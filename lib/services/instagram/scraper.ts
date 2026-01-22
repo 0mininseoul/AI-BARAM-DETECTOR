@@ -7,6 +7,7 @@ const client = new ApifyClient({
 
 /**
  * 인스타그램 프로필 정보를 수집합니다.
+ * 공식 Actor: apify/instagram-profile-scraper
  */
 export async function getInstagramProfile(username: string): Promise<InstagramProfile | null> {
     try {
@@ -41,29 +42,29 @@ export async function getInstagramProfile(username: string): Promise<InstagramPr
 
 /**
  * 인스타그램 팔로워 목록을 수집합니다.
+ * 
+ * ⚠️ 주의: Apify에서 공식 followers-scraper가 없음
+ * 대안: 통합 instagram-scraper의 'followers' 타입 사용
+ * 또는 서드파티 Actor 사용 필요
  */
 export async function getFollowers(
     username: string,
     limit: number = 500
 ): Promise<InstagramFollower[]> {
     try {
-        const run = await client.actor('apify/instagram-followers-scraper').call({
-            username,
-            resultsLimit: limit,
+        // 통합 instagram-scraper 사용 (directUrls 방식)
+        const run = await client.actor('apify/instagram-scraper').call({
+            directUrls: [`https://www.instagram.com/${username}/`],
+            resultsType: 'details',
+            resultsLimit: 1,
         });
 
         const { items } = await client.dataset(run.defaultDatasetId).listItems();
 
-        return items.map((item) => {
-            const follower = item as Record<string, unknown>;
-            return {
-                username: follower.username as string,
-                fullName: follower.fullName as string | undefined,
-                profilePicUrl: follower.profilePicUrl as string | undefined,
-                isPrivate: follower.isPrivate as boolean,
-                isVerified: follower.isVerified as boolean,
-            };
-        });
+        // 팔로워 목록은 직접 수집이 어려움
+        // 대안: 최근 게시물의 좋아요/댓글 사용자 분석
+        console.warn(`Followers scraping not fully supported. Returning empty for ${username}`);
+        return [];
     } catch (error) {
         console.error(`Failed to get followers for ${username}:`, error);
         return [];
@@ -72,29 +73,16 @@ export async function getFollowers(
 
 /**
  * 인스타그램 팔로잉 목록을 수집합니다.
+ * 
+ * ⚠️ 주의: Apify에서 공식 following-scraper가 없음
  */
 export async function getFollowing(
     username: string,
     limit: number = 500
 ): Promise<InstagramFollower[]> {
     try {
-        const run = await client.actor('apify/instagram-following-scraper').call({
-            username,
-            resultsLimit: limit,
-        });
-
-        const { items } = await client.dataset(run.defaultDatasetId).listItems();
-
-        return items.map((item) => {
-            const following = item as Record<string, unknown>;
-            return {
-                username: following.username as string,
-                fullName: following.fullName as string | undefined,
-                profilePicUrl: following.profilePicUrl as string | undefined,
-                isPrivate: following.isPrivate as boolean,
-                isVerified: following.isVerified as boolean,
-            };
-        });
+        console.warn(`Following scraping not fully supported. Returning empty for ${username}`);
+        return [];
     } catch (error) {
         console.error(`Failed to get following for ${username}:`, error);
         return [];

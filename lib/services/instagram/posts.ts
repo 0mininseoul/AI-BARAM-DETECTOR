@@ -7,14 +7,18 @@ const client = new ApifyClient({
 
 /**
  * 인스타그램 게시물을 수집합니다.
+ * 
+ * 공식 Actor: apify/instagram-post-scraper
+ * 입력: usernames 배열 (username 단일이 아님!)
  */
 export async function getPosts(
     username: string,
     limit: number = 20
 ): Promise<InstagramPost[]> {
     try {
+        // instagram-post-scraper는 usernames 배열을 입력으로 받음
         const run = await client.actor('apify/instagram-post-scraper').call({
-            username,
+            usernames: [username],
             resultsLimit: limit,
         });
 
@@ -44,14 +48,18 @@ export async function getPosts(
 
 /**
  * 게시물의 댓글을 수집합니다.
+ * 
+ * 통합 instagram-scraper 사용 (comments 수집)
  */
 export async function getPostComments(
     postUrl: string,
     limit: number = 50
 ): Promise<InstagramComment[]> {
     try {
-        const run = await client.actor('apify/instagram-comment-scraper').call({
+        // 통합 instagram-scraper로 댓글 수집
+        const run = await client.actor('apify/instagram-scraper').call({
             directUrls: [postUrl],
+            resultsType: 'comments',
             resultsLimit: limit,
         });
 
