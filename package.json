@@ -4,18 +4,15 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "ait-dev": "granite dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"
   },
   "dependencies": {
     "@amplitude/analytics-browser": "^2.33.5",
-    "@apps-in-toss/web-framework": "^1.8.0",
     "@google/generative-ai": "^0.24.1",
     "@supabase/ssr": "^0.8.0",
     "@supabase/supabase-js": "^2.91.0",
-    "@toss/tds-mobile": "^2.2.1",
     "apify-client": "^2.21.0",
     "next": "16.1.4",
     "react": "19.2.3",
