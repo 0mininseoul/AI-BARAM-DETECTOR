@@ -6,6 +6,13 @@ export async function middleware(request: NextRequest) {
         request,
     });
 
+    // Auth Callback 및 Static 파일은 미들웨어 로직 건너뛰기
+    if (request.nextUrl.pathname.startsWith('/auth') ||
+        request.nextUrl.pathname.startsWith('/_next') ||
+        request.nextUrl.pathname.startsWith('/static')) {
+        return supabaseResponse;
+    }
+
     const supabase = createServerClient(
         process.env.NEXT_PUBLIC_SUPABASE_URL!,
         process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
