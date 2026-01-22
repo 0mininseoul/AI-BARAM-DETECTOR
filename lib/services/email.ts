@@ -1,46 +1,60 @@
 import { Resend } from 'resend';
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+// 지연 초기화 - 빌드 시 API 키 없어도 오류 방지
+let resendClient: Resend | null = null;
+
+function getResendClient(): Resend {
+  if (!resendClient) {
+    const apiKey = process.env.RESEND_API_KEY;
+    if (!apiKey || apiKey === 'xxx') {
+      throw new Error('RESEND_API_KEY is not configured');
+    }
+    resendClient = new Resend(apiKey);
+  }
+  return resendClient;
+}
 
 interface SendEmailParams {
-    to: string;
-    subject: string;
-    html: string;
+  to: string;
+  subject: string;
+  html: string;
 }
 
 export async function sendEmail({ to, subject, html }: SendEmailParams) {
-    try {
-        const { data, error } = await resend.emails.send({
-            from: process.env.RESEND_FROM_EMAIL || 'AI 바람감지기 <noreply@baram-detector.com>',
-            to,
-            subject,
-            html,
-        });
+  try {
+    const resend = getResendClient();
+    const { data, error } = await resend.emails.send({
+      from: process.env.RESEND_FROM_EMAIL || 'AI 바람감지기 <noreply@baram-detector.com>',
+      to,
+      subject,
+      html,
+    });
 
-        if (error) {
-            console.error('Email send error:', error);
-            throw error;
-        }
-
-        return data;
-    } catch (error) {
-        console.error('Email service error:', error);
-        throw error;
+    if (error) {
+      console.error('Email send error:', error);
+      throw error;
     }
+
+    return data;
+  } catch (error) {
+    console.error('Email service error:', error);
+    // 이메일 발송 실패해도 분석은 계속 진행
+    return null;
+  }
 }
 
 /**
  * 분석 완료 이메일 발송
  */
 export async function sendAnalysisCompleteEmail(
-    email: string,
-    targetInstagramId: string,
-    requestId: string
+  email: string,
+  targetInstagramId: string,
+  requestId: string
 ) {
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://baram-detector.com';
-    const resultUrl = `${appUrl}/result/${requestId}`;
+  const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://baram-detector.com';
+  const resultUrl = `${appUrl}/result/${requestId}`;
 
-    const html = `
+  const html = `
     <!DOCTYPE html>
     <html>
     <head>
@@ -71,9 +85,9 @@ export async function sendAnalysisCompleteEmail(
     </html>
   `;
 
-    return sendEmail({
-        to: email,
-        subject: `[AI 바람감지기] @${targetInstagramId} 분석 완료!`,
-        html,
-    });
+  return sendEmail({
+    to: email,
+    subject: `[AI 바람감지기] @${targetInstagramId} 분석 완료!`,
+    html,
+  });
 }
