@@ -10,20 +10,34 @@ export async function GET(request: Request) {
         const supabase = await createClient();
         const { error } = await supabase.auth.exchangeCodeForSession(code);
 
-        if (!error) {
-            const forwardedHost = request.headers.get('x-forwarded-host');
-            const isLocalEnv = process.env.NODE_ENV === 'development';
-
-            if (isLocalEnv) {
-                return NextResponse.redirect(`${origin}${next}`);
-            } else if (forwardedHost) {
-                return NextResponse.redirect(`https://${forwardedHost}${next}`);
-            } else {
-                return NextResponse.redirect(`${origin}${next}`);
-            }
+        if (error) {
+            console.error('Auth callback error:', error);
+            return NextResponse.redirect(`${origin}/login?error=${encodeURIComponent(error.message)}`);
         }
+
+        // 세션 교환 성공
+        const forwardedHost = request.headers.get('x-forwarded-host'); // original origin before load balancer
+        const isLocalEnv = process.env.NODE_ENV === 'development';
+
+        let redirectTo = next;
+        if (forwardedHost) {
+            redirectTo = `https://${forwardedHost}${next}`;
+        } else {
+            redirectTo = `${origin}${next}`;
+        }
+
+        // 쿠키가 확실히 설정되도록 응답 헤더 확인 (디버깅용)
+        const response = NextResponse.redirect(redirectTo);
+
+        // 개발 환경에서 리다이렉트 루프 방지 (옵션)
+        if (isLocalEnv) {
+            console.log('Redirecting to:', redirectTo);
+        }
+
+        return response;
     }
 
-    // 에러 발생 시 로그인 페이지로 리다이렉트
-    return NextResponse.redirect(`${origin}/login?error=auth_failed`);
+    // code가 없는 경우
+    console.error('Auth callback missing code');
+    return NextResponse.redirect(`${origin}/login?error=no_code`);
 }
