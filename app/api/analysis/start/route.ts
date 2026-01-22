@@ -114,9 +114,16 @@ export async function POST(request: Request) {
             .update({ analysis_count: dbUser.analysis_count + 1 })
             .eq('id', user.id);
 
-        // 8. 백그라운드 분석 작업 트리거 (Edge Function 호출)
-        // TODO: Supabase Edge Function 또는 별도 API로 분석 시작
-        // 현재는 pending 상태로만 생성
+        // 8. 백그라운드 분석 작업 트리거
+        // 비동기로 파이프라인 실행 (응답을 기다리지 않음)
+        const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000';
+        fetch(`${appUrl}/api/analysis/run`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ requestId: analysisRequest.id }),
+        }).catch((err) => {
+            console.error('Failed to trigger analysis pipeline:', err);
+        });
 
         return NextResponse.json(
             {
