@@ -95,10 +95,33 @@ export default function ResultPage({ params }: PageProps) {
         alert('결제 기능은 준비 중입니다.');
     };
 
-    const handleShareKakao = () => {
+    const handleShare = async () => {
         trackEvent(EVENTS.CLICK_SHARE_KAKAO);
-        // TODO: 카카오톡 공유
-        alert('카카오톡 공유 기능은 준비 중입니다.');
+
+        const url = window.location.href;
+        const shareData = {
+            title: 'AI 바람 감지기 분석 결과',
+            text: `${data?.summary.targetInstagramId}님의 인스타 분석 결과를 확인해보세요! 🕵️‍♀️`,
+            url: url,
+        };
+
+        // 모바일 네이티브 공유 시도
+        if (navigator.share) {
+            try {
+                await navigator.share(shareData);
+                return;
+            } catch (err) {
+                // 공유 취소 또는 미지원 시 클립보드 복사로 fallback
+            }
+        }
+
+        // 클립보드 복사
+        try {
+            await navigator.clipboard.writeText(url);
+            alert('링크가 클립보드에 복사되었습니다! 친구에게 공유해보세요.');
+        } catch (err) {
+            alert('공유하기에 실패했습니다. 링크를 직접 복사해주세요.');
+        }
     };
 
     if (loading) {
@@ -287,10 +310,13 @@ export default function ResultPage({ params }: PageProps) {
 
                 {/* 공유하기 */}
                 <button
-                    onClick={handleShareKakao}
-                    className="w-full bg-[#FEE500] text-[#3C1E1E] font-bold py-3.5 px-4 rounded-xl"
+                    onClick={handleShare}
+                    className="w-full bg-[#FEE500] text-[#3C1E1E] font-bold py-3.5 px-4 rounded-xl flex items-center justify-center gap-2"
                 >
-                    카카오톡으로 공유하기
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M12 3C6.48 3 2 6.48 2 10.76C2 13.67 3.93 16.23 6.83 17.54C6.67 18.06 6.33 19.34 6.33 19.34C6.33 19.34 6.2 19.66 6.43 19.68C6.65 19.7 6.89 19.5 7.15 19.3C7.15 19.3 10.99 15.99 11.5 15.65C11.67 15.66 11.83 15.67 12 15.67C17.52 15.67 22 12.19 22 7.91C22 3.63 17.52 3 12 3Z" />
+                    </svg>
+                    결과 링크 공유하기
                 </button>
             </div>
 

@@ -178,9 +178,9 @@ export default async function Home() {
         <footer className="w-full border-t border-white/10 bg-black py-10 text-center text-sm text-gray-600">
           <p className="mb-2">AI 바람감지기 © 2024</p>
           <div className="flex justify-center gap-4">
-            <a href="#" className="hover:text-gray-400">이용약관</a>
-            <a href="#" className="hover:text-gray-400">개인정보처리방침</a>
-            <a href="#" className="hover:text-gray-400">문의하기</a>
+            <Link href="/terms" className="hover:text-gray-400">이용약관</Link>
+            <Link href="/privacy" className="hover:text-gray-400">개인정보처리방침</Link>
+            <a href="mailto:support@baram-detector.com" className="hover:text-gray-400">문의하기</a>
           </div>
         </footer>
       </main>
