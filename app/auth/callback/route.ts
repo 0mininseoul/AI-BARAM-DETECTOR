@@ -15,6 +15,10 @@ export async function GET(request: Request) {
             return redirect(`${origin}/login?error=${encodeURIComponent(error.message)}`);
         }
 
+        // 디버깅: 세션 생성 확인
+        const { data: { session: debugSession } } = await supabase.auth.getSession();
+        console.log('Auth callback success. Session user:', debugSession?.user?.id);
+
         // 세션 교환 성공
         const forwardedHost = request.headers.get('x-forwarded-host'); // original origin before load balancer
 
