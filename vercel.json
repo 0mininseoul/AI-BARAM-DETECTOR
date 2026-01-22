@@ -4,6 +4,11 @@
     "regions": [
         "icn1"
     ],
+    "functions": {
+        "app/api/analysis/run/route.ts": {
+            "maxDuration": 300
+        }
+    },
     "git": {
         "deploymentEnabled": {
             "main": true

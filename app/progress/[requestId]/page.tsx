@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, use } from 'react';
+import { useEffect, use, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAnalysisProgress } from '@/hooks/useAnalysisProgress';
 
@@ -12,6 +12,23 @@ export default function ProgressPage({ params }: PageProps) {
     const { requestId } = use(params);
     const { data, loading, error } = useAnalysisProgress(requestId);
     const router = useRouter();
+    const hasStartedAnalysis = useRef(false);
+
+    // pending 상태이면 분석 파이프라인 시작
+    useEffect(() => {
+        if (data?.status === 'pending' && !hasStartedAnalysis.current) {
+            hasStartedAnalysis.current = true;
+
+            // 분석 파이프라인 시작 (fire-and-forget)
+            fetch('/api/analysis/run', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ requestId }),
+            }).catch((err) => {
+                console.error('Failed to start analysis:', err);
+            });
+        }
+    }, [data?.status, requestId]);
 
     // 완료되면 결과 페이지로 이동
     useEffect(() => {
@@ -106,18 +123,18 @@ export default function ProgressPage({ params }: PageProps) {
                         <div
                             key={step.label}
                             className={`flex items-center gap-3 p-3 rounded-xl ${isComplete
-                                    ? 'bg-emerald-400/10 border border-emerald-400/30'
-                                    : isCurrent
-                                        ? 'bg-gray-800 border border-gray-700'
-                                        : 'bg-gray-900/50 border border-gray-800'
+                                ? 'bg-emerald-400/10 border border-emerald-400/30'
+                                : isCurrent
+                                    ? 'bg-gray-800 border border-gray-700'
+                                    : 'bg-gray-900/50 border border-gray-800'
                                 }`}
                         >
                             <div
                                 className={`w-6 h-6 rounded-full flex items-center justify-center ${isComplete
-                                        ? 'bg-emerald-400 text-black'
-                                        : isCurrent
-                                            ? 'bg-gray-700 border-2 border-emerald-400'
-                                            : 'bg-gray-800 border border-gray-600'
+                                    ? 'bg-emerald-400 text-black'
+                                    : isCurrent
+                                        ? 'bg-gray-700 border-2 border-emerald-400'
+                                        : 'bg-gray-800 border border-gray-600'
                                     }`}
                             >
                                 {isComplete ? '✓' : isCurrent ? '⋯' : index + 1}
