@@ -8,6 +8,12 @@ export async function createClient() {
         process.env.NEXT_PUBLIC_SUPABASE_URL!,
         process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
         {
+            cookieOptions: {
+                // 프로덕션(Vercel)에서는 secure 필수
+                secure: process.env.NODE_ENV === 'production',
+                sameSite: 'lax',
+                path: '/',
+            },
             cookies: {
                 getAll() {
                     return cookieStore.getAll();
