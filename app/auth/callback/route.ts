@@ -22,15 +22,12 @@ export async function GET(request: Request) {
         // 세션 교환 성공
         const forwardedHost = request.headers.get('x-forwarded-host'); // original origin before load balancer
 
-        let redirectTo = next;
-        if (forwardedHost) {
-            redirectTo = `https://${forwardedHost}${next}`;
-        } else {
-            redirectTo = `${origin}${next}`;
-        }
+        const baseUrl = forwardedHost ? `https://${forwardedHost}` : origin;
+        const redirectUrl = new URL(next, baseUrl);
+        redirectUrl.searchParams.set('verified', 'true');
 
         // next/navigation의 redirect 함수 사용 -> Set-Cookie 헤더 보존
-        return redirect(redirectTo);
+        return redirect(redirectUrl.toString());
     }
 
     // code가 없는 경우

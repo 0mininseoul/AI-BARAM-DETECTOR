@@ -36,12 +36,19 @@ export async function middleware(request: NextRequest) {
         }
     );
 
-    // 세션 체크
+    // 세션 체크 (getUser는 서버 사이드에서 안전한 방법)
     const {
         data: { user },
     } = await supabase.auth.getUser();
 
-    // 인증이 필요한 경로 체크
+    // 디버깅: 로그인 직후 리다이렉트된 경우인데 유저가 없으면 로그 출력
+    if (request.nextUrl.searchParams.get('verified') === 'true' && !user) {
+        console.error('Middleware: Login verified but NO USER FOUND.');
+        const cookies = request.cookies.getAll();
+        console.log('Middleware Cookies:', cookies.map(c => c.name).join(', '));
+    }
+
+    // 보호된 경로 체크
     const protectedPaths = ['/analyze', '/progress', '/result'];
     const isProtectedPath = protectedPaths.some((path) =>
         request.nextUrl.pathname.startsWith(path)
@@ -51,6 +58,7 @@ export async function middleware(request: NextRequest) {
     if (isProtectedPath && !user) {
         const url = request.nextUrl.clone();
         url.pathname = '/login';
+        url.searchParams.delete('verified'); // 무한 루프 방지용 param 정리
         url.searchParams.set('redirectTo', request.nextUrl.pathname);
         return NextResponse.redirect(url);
     }
