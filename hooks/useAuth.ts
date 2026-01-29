@@ -21,14 +21,20 @@ export function useAuth() {
     const [loading, setLoading] = useState(true);
     const supabase = createClient();
 
-    const fetchDbUser = useCallback(async (userId: string) => {
-        const { data } = await supabase
-            .from('users')
-            .select('*')
-            .eq('id', userId)
-            .single();
-        setDbUser(data);
-    }, [supabase]);
+    const fetchDbUser = useCallback(async () => {
+        try {
+            const response = await fetch('/api/user/me');
+            if (response.ok) {
+                const data = await response.json();
+                setDbUser(data.user);
+            } else {
+                setDbUser(null);
+            }
+        } catch (error) {
+            console.error('Failed to fetch user data:', error);
+            setDbUser(null);
+        }
+    }, []);
 
     useEffect(() => {
         // 현재 세션 확인
@@ -36,7 +42,7 @@ export function useAuth() {
             const { data: { user } } = await supabase.auth.getUser();
             setUser(user);
             if (user) {
-                await fetchDbUser(user.id);
+                await fetchDbUser();
             }
             setLoading(false);
         };
@@ -48,7 +54,7 @@ export function useAuth() {
             async (_event, session) => {
                 setUser(session?.user ?? null);
                 if (session?.user) {
-                    await fetchDbUser(session.user.id);
+                    await fetchDbUser();
                 } else {
                     setDbUser(null);
                 }
