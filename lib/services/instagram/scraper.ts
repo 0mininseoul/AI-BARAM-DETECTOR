@@ -6,6 +6,27 @@ const client = new ApifyClient({
 });
 
 /**
+ * JSON 쿠키 배열을 쿠키 문자열로 변환합니다.
+ * 예: [{"name": "sessionid", "value": "xxx"}] → "sessionid=xxx"
+ */
+function parseCookieString(cookieInput: string): string {
+    try {
+        // JSON 배열 형태인지 확인
+        const parsed = JSON.parse(cookieInput);
+        if (Array.isArray(parsed)) {
+            return parsed
+                .map((c: { name: string; value: string }) => `${c.name}=${c.value}`)
+                .join('; ');
+        }
+        // 이미 문자열 형태면 그대로 반환
+        return cookieInput;
+    } catch {
+        // 파싱 실패시 그대로 반환 (이미 문자열 형태일 수 있음)
+        return cookieInput;
+    }
+}
+
+/**
  * 인스타그램 프로필 정보를 수집합니다.
  * 공식 Actor: apify/instagram-profile-scraper
  */
@@ -79,17 +100,19 @@ export async function getFollowing(
     limit: number = 500
 ): Promise<InstagramFollower[]> {
     try {
-        const cookie = process.env.INSTAGRAM_COOKIE;
+        const cookieEnv = process.env.INSTAGRAM_COOKIE;
 
-        if (!cookie) {
+        if (!cookieEnv) {
             console.error('INSTAGRAM_COOKIE environment variable is not set');
             return [];
         }
 
+        const cookieString = parseCookieString(cookieEnv);
+
         const run = await client.actor('louisdeconinck/instagram-following-scraper').call({
             usernames: [username],
             max_count: limit,
-            cookie: cookie,
+            cookie: cookieString,
         });
 
         const { items } = await client.dataset(run.defaultDatasetId).listItems();
