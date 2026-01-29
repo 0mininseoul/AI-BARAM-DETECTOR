@@ -50,7 +50,7 @@ export async function getFollowers(
 ): Promise<InstagramFollower[]> {
     try {
         const run = await client.actor('datadoping/instagram-followers-scraper').call({
-            username: username,
+            usernames: [username],
             resultsLimit: limit,
         });
 
