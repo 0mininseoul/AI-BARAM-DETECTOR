@@ -1,19 +1,43 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
 import type { User } from '@supabase/supabase-js';
 
+interface DbUser {
+    id: string;
+    email: string;
+    provider: string;
+    analysis_count: number;
+    is_paid_user: boolean;
+    is_unlimited: boolean;
+    created_at: string;
+    updated_at: string;
+}
+
 export function useAuth() {
     const [user, setUser] = useState<User | null>(null);
+    const [dbUser, setDbUser] = useState<DbUser | null>(null);
     const [loading, setLoading] = useState(true);
     const supabase = createClient();
+
+    const fetchDbUser = useCallback(async (userId: string) => {
+        const { data } = await supabase
+            .from('users')
+            .select('*')
+            .eq('id', userId)
+            .single();
+        setDbUser(data);
+    }, [supabase]);
 
     useEffect(() => {
         // 현재 세션 확인
         const getUser = async () => {
             const { data: { user } } = await supabase.auth.getUser();
             setUser(user);
+            if (user) {
+                await fetchDbUser(user.id);
+            }
             setLoading(false);
         };
 
@@ -21,8 +45,13 @@ export function useAuth() {
 
         // 인증 상태 변경 구독
         const { data: { subscription } } = supabase.auth.onAuthStateChange(
-            (_event, session) => {
+            async (_event, session) => {
                 setUser(session?.user ?? null);
+                if (session?.user) {
+                    await fetchDbUser(session.user.id);
+                } else {
+                    setDbUser(null);
+                }
                 setLoading(false);
             }
         );
@@ -30,7 +59,7 @@ export function useAuth() {
         return () => {
             subscription.unsubscribe();
         };
-    }, [supabase.auth]);
+    }, [supabase.auth, fetchDbUser]);
 
     const signInWithKakao = async (redirectTo?: string) => {
         const { error } = await supabase.auth.signInWithOAuth({
@@ -59,6 +88,7 @@ export function useAuth() {
 
     return {
         user,
+        dbUser,
         loading,
         signInWithKakao,
         signInWithGoogle,

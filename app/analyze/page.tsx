@@ -10,6 +10,7 @@ type PlanType = 'basic' | 'standard';
 interface PlanInfo {
     name: string;
     price: string;
+    originalPrice: string;
     limit: number;
     description: string;
     productId: string;
@@ -21,6 +22,7 @@ const PLANS: Record<PlanType, PlanInfo> = {
     basic: {
         name: 'Basic',
         price: '$2.99',
+        originalPrice: '$4.99',
         limit: 500,
         description: '팔로워/팔로잉 500명까지',
         productId: process.env.NEXT_PUBLIC_POLAR_BASIC_PRODUCT_ID || '',
@@ -28,6 +30,7 @@ const PLANS: Record<PlanType, PlanInfo> = {
     standard: {
         name: 'Standard',
         price: '$5.99',
+        originalPrice: '$9.99',
         limit: 1000,
         description: '팔로워/팔로잉 1000명까지',
         productId: process.env.NEXT_PUBLIC_POLAR_STANDARD_PRODUCT_ID || '',
@@ -42,7 +45,7 @@ export default function AnalyzePage() {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const router = useRouter();
-    const { user } = useAuth();
+    const { user, dbUser } = useAuth();
 
     const handleNext = () => {
         if (!instagramId.trim()) {
@@ -64,7 +67,31 @@ export default function AnalyzePage() {
         setError(null);
 
         try {
-            // pending_analysis 생성
+            // 테스트 계정(is_unlimited)인 경우 결제 스킵하고 바로 분석 시작
+            if (dbUser?.is_unlimited) {
+                const response = await fetch('/api/analysis/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        targetInstagramId: instagramId.replace('@', '').trim(),
+                        targetGender: 'male',
+                    }),
+                });
+
+                const data = await response.json();
+
+                if (!response.ok) {
+                    setError(data.error || '분석 시작에 실패했습니다.');
+                    setLoading(false);
+                    return;
+                }
+
+                trackEvent(EVENTS.CLICK_CHECKOUT, { plan: 'test_account', skipped_payment: true });
+                router.push(`/progress/${data.requestId}`);
+                return;
+            }
+
+            // 일반 사용자: pending_analysis 생성 후 결제 진행
             const response = await fetch('/api/payment/pending', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -191,6 +218,7 @@ export default function AnalyzePage() {
                                             <div className="text-gray-400 text-sm">{plan.description}</div>
                                         </div>
                                         <div className="text-right">
+                                            <div className="text-sm text-gray-500 line-through">{plan.originalPrice}</div>
                                             <div className="text-2xl font-bold text-white">{plan.price}</div>
                                             <div className="text-gray-500 text-xs">1회 분석</div>
                                         </div>
