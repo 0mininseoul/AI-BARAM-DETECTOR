@@ -38,7 +38,6 @@ const PLANS: Record<PlanType, PlanInfo> = {
 export default function AnalyzePage() {
     const [step, setStep] = useState<'input' | 'plan'>('input');
     const [instagramId, setInstagramId] = useState('');
-    const [gender, setGender] = useState<'male' | 'female' | ''>('');
     const [selectedPlan, setSelectedPlan] = useState<PlanType>('standard');
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
@@ -48,10 +47,6 @@ export default function AnalyzePage() {
     const handleNext = () => {
         if (!instagramId.trim()) {
             setError('인스타그램 아이디를 입력해주세요.');
-            return;
-        }
-        if (!gender) {
-            setError('애인의 성별을 선택해주세요.');
             return;
         }
         setError(null);
@@ -76,7 +71,7 @@ export default function AnalyzePage() {
                 body: JSON.stringify({
                     planType: selectedPlan,
                     targetInstagramId: instagramId.replace('@', '').trim(),
-                    targetGender: gender,
+                    targetGender: 'male',
                 }),
             });
 
@@ -139,35 +134,6 @@ export default function AnalyzePage() {
                         </div>
                     </div>
 
-                    {/* 성별 선택 */}
-                    <div>
-                        <label className="block text-sm font-medium text-gray-300 mb-2">
-                            남자친구의 성별
-                        </label>
-                        <div className="grid grid-cols-2 gap-3">
-                            <button
-                                type="button"
-                                onClick={() => setGender('male')}
-                                className={`py-3.5 px-4 rounded-xl font-medium transition-all ${gender === 'male'
-                                        ? 'bg-pink-500 text-white'
-                                        : 'bg-gray-900 text-gray-300 border border-gray-700 hover:border-gray-500'
-                                    }`}
-                            >
-                                👨 남성
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => setGender('female')}
-                                className={`py-3.5 px-4 rounded-xl font-medium transition-all ${gender === 'female'
-                                        ? 'bg-pink-500 text-white'
-                                        : 'bg-gray-900 text-gray-300 border border-gray-700 hover:border-gray-500'
-                                    }`}
-                            >
-                                👩 여성
-                            </button>
-                        </div>
-                    </div>
-
                     {/* 공개 계정 안내 */}
                     <div className="flex items-start gap-2 p-3 bg-gray-900/50 rounded-xl border border-gray-800">
                         <span className="text-amber-400">⚠️</span>
@@ -186,7 +152,7 @@ export default function AnalyzePage() {
                     {/* 다음 버튼 */}
                     <button
                         onClick={handleNext}
-                        disabled={!instagramId.trim() || !gender}
+                        disabled={!instagramId.trim()}
                         className="w-full bg-gradient-to-r from-pink-500 to-purple-500 hover:from-pink-400 hover:to-purple-400 disabled:from-gray-700 disabled:to-gray-700 disabled:text-gray-500 text-white font-bold py-4 px-4 rounded-xl transition-all"
                     >
                         다음 단계로

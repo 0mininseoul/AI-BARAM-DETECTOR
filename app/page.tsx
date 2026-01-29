@@ -65,7 +65,7 @@ export default function LandingPage() {
             className="mb-6"
           >
             <span className="inline-block py-1 px-3 rounded-full bg-pink-900/40 text-pink-300 text-xs font-bold mb-4 border border-pink-500/30">
-              🔥 20대 여성 사용률 1위
+              🔒 비밀 보장 100%
             </span>
             <h1 className="text-3xl md:text-4xl font-bold leading-tight mb-4">
               내 남친이 맞팔 중인 여자들,<br />
@@ -123,7 +123,7 @@ export default function LandingPage() {
               {/* 오버레이 텍스트 */}
               <div className="absolute inset-0 bg-gradient-to-t from-black via-transparent to-transparent flex items-end justify-center pb-4">
                 <p className="text-sm font-medium text-gray-300">
-                  AI가 프로필, 사진, 태그를 분석합니다
+                  AI가 인스타그램 계정을 분석합니다
                 </p>
               </div>
             </div>
@@ -167,7 +167,7 @@ export default function LandingPage() {
               <h3 className="font-bold text-lg mb-1">2. AI 정밀 분석</h3>
               <p className="text-gray-400 text-sm">
                 팔로워 목록을 스캔하여 성별을 식별하고,<br />
-                계정의 분위기, 태그 등을 복합적으로 분석합니다.
+                계정의 분위기, 태그, 남자친구와의 상호작용 등을 복합적으로 분석합니다.
               </p>
             </div>
           </div>
