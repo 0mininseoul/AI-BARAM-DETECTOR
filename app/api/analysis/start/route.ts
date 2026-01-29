@@ -78,8 +78,9 @@ export async function POST(request: Request) {
             dbUser = newUser;
         }
 
-        // 5. 무료 분석 횟수 체크
-        if (!dbUser.is_paid_user && dbUser.analysis_count >= FREE_ANALYSIS_LIMIT) {
+        // 5. 무료 분석 횟수 체크 (is_unlimited 또는 is_paid_user가 true면 무제한)
+        const hasUnlimitedAccess = dbUser.is_unlimited || dbUser.is_paid_user;
+        if (!hasUnlimitedAccess && dbUser.analysis_count >= FREE_ANALYSIS_LIMIT) {
             return NextResponse.json(
                 { error: '무료 분석 횟수를 모두 사용했습니다.', code: 'LIMIT_EXCEEDED' },
                 { status: 403 }

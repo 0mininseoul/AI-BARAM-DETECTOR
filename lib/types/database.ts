@@ -6,6 +6,7 @@ export interface User {
     provider: 'google' | 'kakao';
     analysis_count: number;
     is_paid_user: boolean;
+    is_unlimited: boolean;
     created_at: string;
     updated_at: string;
 }
