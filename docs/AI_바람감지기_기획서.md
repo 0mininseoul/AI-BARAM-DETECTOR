@@ -1,12 +1,12 @@
-# 🔍 AI 바람 감지기
+# AI 바람 감지기
 
 ## 서비스 기획서 & MVP 개발 계획
 
-**Version 1.2 | 2025년 1월**
+**Version 1.3 | 2025년 1월**
 
 ---
 
-## 📋 목차
+## 목차
 
 1. [서비스 개요](#1-서비스-개요)
 2. [타겟 유저 & 유저 플로우](#2-타겟-유저--유저-플로우)
@@ -17,6 +17,7 @@
 7. [MVP 개발 계획 (총 3일)](#7-mvp-개발-계획-총-3일)
 8. [비용 & 리스크 관리](#8-비용--리스크-관리)
 9. [향후 로드맵](#9-향후-로드맵)
+10. [구현 현황](#10-구현-현황)
 
 ---
 
@@ -250,7 +251,7 @@
 
 점수 체계:
 - 일반 댓글: 3점
-- 친밀한 댓글: 5점
+- 친밀한 댓글: 10점 (일반 댓글의 3배 이상 가중치)
 
 응답 형식:
 {
@@ -261,7 +262,7 @@
 }
 ```
 
-#### 친밀한 댓글 판단 기준 (5점)
+#### 친밀한 댓글 판단 기준 (10점)
 
 | 카테고리 | 예시 | 설명 |
 |----------|------|------|
@@ -322,7 +323,7 @@
 |-----------|-----------|------|
 | ❤️ 좋아요 | 1점 | 가장 기본적인 상호작용 |
 | 💬 일반 댓글 | 3점 | 형식적/일반적인 댓글 |
-| 💬 친밀한 댓글 | 5점 | 친밀도 분석 결과 "intimate" |
+| 💬 친밀한 댓글 | 10점 | 친밀도 분석 결과 "intimate" |
 | ↩️ 대댓글 | 5점 | 대화 지속 의지 |
 
 #### 태그/언급 점수 (통합 개념)
@@ -360,7 +361,7 @@
 #### 최종 점수 계산 공식
 
 ```
-기본점수 = (좋아요 × 1) + (일반댓글 × 3) + (친밀댓글 × 5) + (대댓글 × 5) 
+기본점수 = (좋아요 × 1) + (일반댓글 × 3) + (친밀댓글 × 10) + (대댓글 × 5)
          + (게시물태그 × 3) + (캡션언급 × 5) + (외모점수)
 
 최종점수 = 기본점수 × 기간가중치 × 급증보너스(해당시)
@@ -391,8 +392,8 @@
 ```
 ┌─────────────────────────────────────────────────┐
 │                    Frontend                      │
-│              Next.js 14 (App Router)             │
-│         Vercel Free Plan / Tailwind CSS          │
+│              Next.js 16 (App Router)             │
+│         Vercel Free Plan / Tailwind CSS 4        │
 └─────────────────────┬───────────────────────────┘
                       │
                       ▼
@@ -421,10 +422,11 @@
 
 ### 5.2 기술 스택 상세
 
-| 영역 | 기술 | 플랜 |
-|------|------|------|
-| 프론트엔드 | Next.js 14 (App Router) | - |
-| 스타일링 | Tailwind CSS | - |
+| 영역 | 기술 | 버전/플랜 |
+|------|------|----------|
+| 프론트엔드 | Next.js (App Router) | **16.1.4** |
+| UI | React + TypeScript | **19.2.3 / 5.x** |
+| 스타일링 | Tailwind CSS | **4.x** |
 | 배포 | Vercel | **Free** |
 | 백엔드/DB | Supabase (Auth, DB, Realtime) | **Hobby (Free)** |
 | 인스타 스크래핑 | Apify | **Free ($5/월)** |
@@ -441,6 +443,7 @@ CREATE TABLE users (
   email VARCHAR(255) UNIQUE,
   provider VARCHAR(50),  -- 'google' | 'kakao'
   analysis_count INTEGER DEFAULT 0,
+  is_paid_user BOOLEAN DEFAULT FALSE,
   created_at TIMESTAMP DEFAULT NOW()
 );
 
@@ -452,6 +455,7 @@ CREATE TABLE analysis_requests (
   target_gender VARCHAR(10),  -- 'male' | 'female'
   status VARCHAR(20),  -- 'pending' | 'processing' | 'completed' | 'failed'
   progress INTEGER DEFAULT 0,  -- 0-100
+  progress_step VARCHAR(50),  -- 'collecting_profile' | 'analyzing_gender' | 등
   created_at TIMESTAMP DEFAULT NOW(),
   completed_at TIMESTAMP
 );
@@ -491,11 +495,34 @@ CREATE TABLE comment_details (
   created_at TIMESTAMP DEFAULT NOW()
 );
 
+-- 상호작용 로그 테이블
+CREATE TABLE interaction_logs (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  result_id UUID REFERENCES analysis_results(id),
+  interaction_type VARCHAR(20),  -- 'like' | 'comment' | 'tag' | 'mention'
+  post_id VARCHAR(100),
+  score INTEGER,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
 -- 비공개 계정 테이블
 CREATE TABLE private_accounts (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   request_id UUID REFERENCES analysis_requests(id),
   instagram_id VARCHAR(100),
+  profile_image TEXT,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- 결제 테이블
+CREATE TABLE payments (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  user_id UUID REFERENCES users(id),
+  result_id UUID REFERENCES analysis_results(id),
+  order_id VARCHAR(100),
+  product_type VARCHAR(20),  -- 'unlock_rank' | 'deep_scan'
+  amount INTEGER,
+  status VARCHAR(20),  -- 'pending' | 'completed' | 'failed'
   created_at TIMESTAMP DEFAULT NOW()
 );
 ```
@@ -517,9 +544,11 @@ CREATE TABLE private_accounts (
 
 | Actor | 로그인 | 속도 | 추천 |
 |-------|--------|------|------|
-| Instagram Following Scraper (sejinius) | ❌ 불필요 | 중간 | **✅ 1순위** |
-| Instagram Followers - No Cookies | ❌ 불필요 | 중간 | ✅ 백업 |
-| Instagram Followers List (coderx) | 쿠키 필요 | 빠름 | ⚠️ 2순위 |
+| Instagram Profile Scraper | ❌ 불필요 | 빠름 | **✅ 프로필/게시물 수집** |
+| Instagram Following Scraper (sejinius) | ❌ 불필요 | 중간 | ⚠️ 팔로워 수집 (미지원 이슈) |
+| Instagram Followers - No Cookies | ❌ 불필요 | 중간 | ⚠️ 백업 |
+
+> **⚠️ 알려진 이슈:** Apify에서 공식 팔로워/팔로잉 스크래퍼를 안정적으로 제공하지 않아 맞팔 추출 기능에 제한이 있음. 대안 솔루션 검토 필요.
 
 ### 6.3 Fallback 전략
 
@@ -562,7 +591,7 @@ Apify가 지속적으로 실패할 경우를 대비한 자체 구현 계획:
 
 | 시간 | 태스크 |
 |------|--------|
-| 오전 | Next.js 14 프로젝트 초기화, Supabase 연동, Vercel 배포 |
+| 오전 | Next.js 16 프로젝트 초기화, Supabase 연동, Vercel 배포 |
 | 오전 | DB 스키마 생성, Supabase Auth 설정 (카카오/구글) |
 | 오후 | Apify 연동, 팔로워/팔로잉 스크래핑 함수 구현 |
 | 오후 | 맞팔 추출, 게시물(피드+릴스+태그된피드) 수집 함수 |
@@ -610,41 +639,41 @@ Apify가 지속적으로 실패할 경우를 대비한 자체 구현 계획:
 ### 체크리스트 요약
 
 #### Day 1 체크리스트
-- [ ] Next.js 14 + Tailwind 초기화
-- [ ] Supabase 프로젝트 생성 & DB 스키마
-- [ ] Supabase Auth (카카오, 구글)
-- [ ] Vercel 배포
-- [ ] Apify 연동 & 테스트
-- [ ] 팔로워/팔로잉 수집 함수
-- [ ] 맞팔 추출 로직
-- [ ] 피드/릴스/태그된피드 수집
-- [ ] 좋아요/댓글/태그/언급 수집
+- [x] Next.js 16 + Tailwind 4 초기화
+- [x] Supabase 프로젝트 생성 & DB 스키마
+- [x] Supabase Auth (카카오, 구글)
+- [x] Vercel 배포
+- [x] Apify 연동 & 테스트
+- [⚠️] 팔로워/팔로잉 수집 함수 (Apify 미지원으로 제한적)
+- [x] 맞팔 추출 로직
+- [x] 피드/릴스/태그된피드 수집
+- [x] 좋아요/댓글/태그/언급 수집
 
 #### Day 2 체크리스트
-- [ ] Gemini 3.0 Flash API 연동
-- [ ] 성별 판단 프롬프트 & 로직
-- [ ] 외모 분석 프롬프트 & 로직
-- [ ] 계정 주인 식별 로직
-- [ ] **댓글 친밀도 분석 프롬프트 & 로직**
-- [ ] 위험도 점수 계산
-- [ ] 신뢰도 점수 계산
-- [ ] 백그라운드 작업 큐
-- [ ] Resend 이메일 알림
-- [ ] 무료 1회 제한
+- [x] Gemini 3.0 Flash API 연동
+- [x] 성별 판단 프롬프트 & 로직
+- [x] 외모 분석 프롬프트 & 로직
+- [x] 계정 주인 식별 로직
+- [x] **댓글 친밀도 분석 프롬프트 & 로직**
+- [x] 위험도 점수 계산
+- [x] 신뢰도 점수 계산
+- [x] 백그라운드 작업 큐
+- [x] Resend 이메일 알림
+- [x] 무료 1회 제한
 
 #### Day 3 체크리스트
-- [ ] 랜딩 페이지 (모바일)
-- [ ] 로그인 페이지
-- [ ] 입력 화면
-- [ ] 분석 중 화면 (Realtime)
-- [ ] 결과 리포트 화면
-- [ ] 공유하기 (카카오톡, 인스타)
-- [ ] 결제 버튼 UI (앵커링)
-- [ ] **딥 스캔 버튼 → 베타 준비중 모달**
-- [ ] Amplitude 연동
-- [ ] 이용약관/면책조항
-- [ ] 최종 테스트 & 버그 수정
-- [ ] 🚀 런칭!
+- [x] 랜딩 페이지 (모바일)
+- [x] 로그인 페이지
+- [x] 입력 화면
+- [x] 분석 중 화면 (Realtime)
+- [x] 결과 리포트 화면
+- [ ] 공유하기 (카카오톡, 인스타) - UI만 구현
+- [x] 결제 버튼 UI (앵커링)
+- [x] **딥 스캔 버튼 → 베타 준비중 모달**
+- [x] Amplitude 연동
+- [x] 이용약관/면책조항
+- [ ] 결제 기능 (Polar 연동)
+- [ ] 프로필 이미지 blur 처리
 
 ---
 
@@ -667,6 +696,7 @@ Apify가 지속적으로 실패할 경우를 대비한 자체 구현 계획:
 | 리스크 | 대응 방안 |
 |--------|-----------|
 | Apify 스크래핑 실패 | Fallback 전략: 다른 Actor → Bright Data → 자체 구현 |
+| **팔로워/팔로잉 수집 미지원** | ⚠️ 현재 알려진 이슈. Bright Data API 또는 자체 스크래핑 검토 |
 | 분석 시간 초과 | 백그라운드 작업 + 이메일 알림으로 UX 보완 |
 | 성별 판단 부정확 | 신뢰도 점수로 투명성 확보 + confidence 임계값 조정 |
 | 댓글 친밀도 오판 | confidence 임계값 적용 + 명확한 기준 수립 |
@@ -696,6 +726,48 @@ Apify가 지속적으로 실패할 경우를 대비한 자체 구현 계획:
 | 무료 | 0원 | 1회 분석 + 1위 결과 |
 | 추가 열람 | 4,900원/인 | 2위 이하 인물 상세 |
 | 딥 스캔 | 29,900원/회 | 외부 댓글까지 전수 분석 (베타 준비중) |
+
+---
+
+## 10. 구현 현황
+
+### 10.1 완료된 기능 ✅
+
+- **사용자 인증**: 카카오/구글 OAuth 로그인
+- **분석 입력 페이지**: 인스타 ID + 성별 선택
+- **분석 파이프라인**: 프로필 수집 → 성별 판단 → 상호작용 분석 → 점수 계산
+- **AI 성별 판단**: Gemini 3.0 Flash 배치 분석 (동시 5개)
+- **AI 댓글 친밀도 분석**: Gemini 3.0 Flash 배치 분석 (동시 10개)
+- **AI 외모 분석**: Gemini 3.0 Flash
+- **위험도 점수 계산**: 상호작용 + 외모 + 기간 가중치 + 급증 보너스
+- **신뢰도 점수 계산**
+- **실시간 진행 상황**: Supabase Realtime 연동
+- **결과 리포트**: 1위 상세 + 비공개 계정 리스트
+- **결과 마스킹**: ID 마스킹 처리
+- **이메일 알림**: Resend 연동 (분석 완료 시)
+- **무료 분석 제한**: 1회 무료
+- **이용약관/개인정보처리방침**
+- **Amplitude 분석 이벤트 추적**
+
+### 10.2 부분 구현 ⚠️
+
+- **팔로워/팔로잉 수집**: Apify가 공식 API를 안정적으로 지원하지 않아 현재 빈 배열 반환
+- **프로필 이미지 blur**: 코드에 TODO 주석 있음
+- **결제 기능**: Polar 설정은 있지만 실제 API 미연동
+- **소셜 공유**: UI 버튼만 있고 클립보드 복사만 구현
+
+### 10.3 미구현 ❌
+
+- **딥 스캔 기능**: 베타 안내 모달만 있고 실제 기능 없음
+- **2위 이상 결제 해제**: UI만 있고 결제 로직 없음
+- **카카오톡/인스타그램 공유 연동**: 실제 SDK 연동 없음
+
+### 10.4 알려진 이슈
+
+1. **팔로워/팔로잉 수집 문제** (Critical)
+   - Apify에서 공식 팔로워 스크래퍼를 제공하지 않음
+   - 현재 맞팔 추출이 빈 배열로 반환되어 분석 결과 없음
+   - 대안: Bright Data API 또는 자체 Puppeteer 스크래핑 구현 필요
 
 ---
 
@@ -736,6 +808,7 @@ Apify가 지속적으로 실패할 경우를 대비한 자체 구현 계획:
 | 1.0 | 2025-01-22 | 초안 작성 |
 | 1.1 | 2025-01-22 | 태그 정의 확장, 외모 분석 추가, 카카오 공유 멘트 변경, 기간 가중치 수정, 개발 계획 3일로 압축, 수익 모델 수정, 신뢰도 계산 수정 |
 | 1.2 | 2025-01-22 | **댓글 친밀도 분석 추가** (일반 3점/친밀 5점), 친밀도 판단 기준 정의, 딥 스캔 버튼 → 베타 준비중 모달 추가 |
+| 1.3 | 2025-01-24 | **소스코드 기반 업데이트**: 기술 스택 버전 수정 (Next.js 16, React 19, Tailwind 4), Gemini 3.0 Flash로 수정, 친밀한 댓글 점수 10점으로 조정, DB 스키마에 interaction_logs/payments 테이블 추가, 구현 현황 섹션 추가, 알려진 이슈(팔로워 수집) 추가 |
 
 ---
 
