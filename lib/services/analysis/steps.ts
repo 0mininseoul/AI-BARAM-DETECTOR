@@ -94,6 +94,9 @@ export interface StepData {
     }>;
     genderBatchIndex?: number;
 
+    // profiles 단계 결과
+    profileBatchIndex?: number;
+
     // features 단계 결과
     photogenicResults?: Record<string, {
         photogenicGrade: number;
@@ -105,3 +108,6 @@ export interface StepData {
     }>;
     featureBatchIndex?: number;
 }
+
+// profiles 단계 배치 크기 (더 작게 설정하여 타임아웃 방지)
+export const PROFILE_BATCH_SIZE = 30;

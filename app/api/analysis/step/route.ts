@@ -27,6 +27,7 @@ import {
     STEP_PROGRESS,
     getNextStep,
     BATCH_SIZE,
+    PROFILE_BATCH_SIZE,
     calculateBatchProgress,
 } from '@/lib/services/analysis/steps';
 
@@ -231,6 +232,8 @@ async function processProfiles(
     stepData: StepData
 ) {
     const publicAccounts = stepData.publicAccounts || [];
+    const batchIndex = stepData.profileBatchIndex || 0;
+    const accountsWithPosts = stepData.accountsWithPosts || [];
 
     if (publicAccounts.length === 0) {
         // 공개 계정이 없으면 바로 완료
@@ -242,15 +245,47 @@ async function processProfiles(
         });
     }
 
-    await updateStep(requestId, 'profiles', stepData, 35, '공개 계정 프로필 수집 중...');
+    const totalBatches = Math.ceil(publicAccounts.length / PROFILE_BATCH_SIZE);
+
+    // 모든 배치 완료 시 다음 단계로
+    if (batchIndex >= totalBatches) {
+        const newStepData: StepData = {
+            ...stepData,
+            genderBatchIndex: 0,
+            genderResults: {},
+        };
+
+        await updateStep(requestId, 'gender', newStepData, 50, '성별 분석 준비 중...');
+
+        return NextResponse.json({
+            success: true,
+            step: 'gender',
+            done: false,
+            stats: {
+                profilesCollected: accountsWithPosts.length,
+            },
+        });
+    }
+
+    // 현재 배치 처리
+    const startIdx = batchIndex * PROFILE_BATCH_SIZE;
+    const endIdx = Math.min(startIdx + PROFILE_BATCH_SIZE, publicAccounts.length);
+    const batch = publicAccounts.slice(startIdx, endIdx);
+
+    const progress = 30 + Math.round((batchIndex / totalBatches) * 20); // 30~50%
+    await updateStep(
+        requestId,
+        'profiles',
+        stepData,
+        progress,
+        `프로필 수집 중... (${batchIndex + 1}/${totalBatches})`
+    );
 
     // 프로필 배치 수집
-    const profiles = await getProfilesBatch(publicAccounts.map((a) => a.username));
+    const profiles = await getProfilesBatch(batch.map((a) => a.username));
 
-    await updateStep(requestId, 'profiles', stepData, 40, '게시물 수집 중...');
-
-    // 프로필과 게시물 매핑 (배치로 처리하여 속도 개선)
-    const accountsWithPosts = await Promise.all(
+    // 프로필과 게시물 매핑
+    const batchAccountsWithPosts = await Promise.all(
         profiles.map(async (profile) => {
             const posts = !profile.isPrivate ? await getPosts(profile.username, 10) : [];
             return {
@@ -270,21 +305,31 @@ async function processProfiles(
         })
     );
 
+    // 기존 결과에 추가
+    const updatedAccountsWithPosts = [...accountsWithPosts, ...batchAccountsWithPosts];
+
     const newStepData: StepData = {
         ...stepData,
-        accountsWithPosts,
-        genderBatchIndex: 0,
-        genderResults: {},
+        accountsWithPosts: updatedAccountsWithPosts,
+        profileBatchIndex: batchIndex + 1,
     };
 
-    await updateStep(requestId, 'gender', newStepData, 50, '성별 분석 준비 중...');
+    const newProgress = 30 + Math.round(((batchIndex + 1) / totalBatches) * 20);
+    await updateStep(
+        requestId,
+        'profiles',
+        newStepData,
+        newProgress,
+        `프로필 수집 중... (${batchIndex + 1}/${totalBatches})`
+    );
 
     return NextResponse.json({
         success: true,
-        step: 'gender',
+        step: 'profiles',
         done: false,
-        stats: {
-            profilesCollected: profiles.length,
+        batchProgress: {
+            current: batchIndex + 1,
+            total: totalBatches,
         },
     });
 }
