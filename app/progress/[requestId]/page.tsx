@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, use, useRef } from 'react';
+import { useEffect, use, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAnalysisProgress } from '@/hooks/useAnalysisProgress';
 
@@ -12,23 +12,66 @@ export default function ProgressPage({ params }: PageProps) {
     const { requestId } = use(params);
     const { data, loading, error } = useAnalysisProgress(requestId);
     const router = useRouter();
-    const hasStartedAnalysis = useRef(false);
+    const isRunningStep = useRef(false);
+    const abortControllerRef = useRef<AbortController | null>(null);
 
-    // pending 상태이면 분석 파이프라인 시작
-    useEffect(() => {
-        if (data?.status === 'pending' && !hasStartedAnalysis.current) {
-            hasStartedAnalysis.current = true;
+    // 단계별 분석 실행 함수
+    const runNextStep = useCallback(async () => {
+        if (isRunningStep.current) return;
+        isRunningStep.current = true;
 
-            // 분석 파이프라인 시작 (fire-and-forget)
-            fetch('/api/analysis/run', {
+        try {
+            abortControllerRef.current = new AbortController();
+
+            const response = await fetch('/api/analysis/step', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ requestId }),
-            }).catch((err) => {
-                console.error('Failed to start analysis:', err);
+                signal: abortControllerRef.current.signal,
             });
+
+            const result = await response.json();
+
+            if (!response.ok) {
+                console.error('Step failed:', result.error);
+                isRunningStep.current = false;
+                return;
+            }
+
+            // 완료되지 않았으면 다음 단계 실행
+            if (!result.done) {
+                isRunningStep.current = false;
+                // 약간의 딜레이 후 다음 단계 호출
+                setTimeout(() => runNextStep(), 500);
+            }
+        } catch (err) {
+            if (err instanceof Error && err.name === 'AbortError') {
+                console.log('Step aborted');
+            } else {
+                console.error('Failed to run step:', err);
+            }
+            isRunningStep.current = false;
         }
-    }, [data?.status, requestId]);
+    }, [requestId]);
+
+    // pending 또는 processing 상태이면 분석 단계 실행
+    useEffect(() => {
+        if (
+            (data?.status === 'pending' || data?.status === 'processing') &&
+            !isRunningStep.current
+        ) {
+            runNextStep();
+        }
+    }, [data?.status, runNextStep]);
+
+    // 컴포넌트 언마운트 시 정리
+    useEffect(() => {
+        return () => {
+            if (abortControllerRef.current) {
+                abortControllerRef.current.abort();
+            }
+        };
+    }, []);
 
     // 완료되면 결과 페이지로 이동
     useEffect(() => {
