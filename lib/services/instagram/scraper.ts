@@ -51,7 +51,7 @@ export async function getFollowers(
     try {
         const run = await client.actor('datadoping/instagram-followers-scraper').call({
             usernames: [username],
-            resultsLimit: limit,
+            max_count: limit,
         });
 
         const { items } = await client.dataset(run.defaultDatasetId).listItems();
@@ -87,8 +87,8 @@ export async function getFollowing(
         }
 
         const run = await client.actor('louisdeconinck/instagram-following-scraper').call({
-            username: username,
-            resultsLimit: limit,
+            usernames: [username],
+            max_count: limit,
             cookie: cookie,
         });
 
