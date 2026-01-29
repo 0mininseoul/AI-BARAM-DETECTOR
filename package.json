@@ -11,13 +11,17 @@
   "dependencies": {
     "@amplitude/analytics-browser": "^2.33.5",
     "@google/generative-ai": "^0.24.1",
+    "@polar-sh/nextjs": "^0.9.3",
+    "@polar-sh/sdk": "^0.42.5",
     "@supabase/ssr": "^0.8.0",
     "@supabase/supabase-js": "^2.91.0",
     "apify-client": "^2.21.0",
+    "framer-motion": "^12.29.2",
     "next": "16.1.4",
     "react": "19.2.3",
     "react-dom": "19.2.3",
-    "resend": "^6.8.0"
+    "resend": "^6.8.0",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

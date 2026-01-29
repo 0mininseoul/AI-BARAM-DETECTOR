@@ -13,38 +13,38 @@ const geistMono = Geist_Mono({
 });
 
 export const viewport: Viewport = {
-  themeColor: "#6EE7B7",
+  themeColor: "#EC4899",
   width: "device-width",
   initialScale: 1,
 };
 
 export const metadata: Metadata = {
-  title: "AI 바람감지기 - 내 애인의 위험한 친구를 찾아보세요",
-  description: "AI가 애인의 인스타그램을 분석해 바람 위험도가 높은 인물을 찾아드립니다. 공개된 정보만으로 연인 관계의 불안을 해소하세요.",
-  keywords: ["바람감지기", "AI분석", "인스타그램", "연애", "바람", "여사친", "남사친"],
-  authors: [{ name: "AI 바람감지기" }],
-  creator: "AI 바람감지기",
+  title: "AI 위장 여사친 판독기 - 내 남친의 위험한 친구 찾기",
+  description: "내 남친이 맞팔 중인 여자들, 누가 제일 위험할까? AI가 인스타그램을 분석해 위장 여사친을 찾아드립니다.",
+  keywords: ["여사친", "위장여사친", "바람기", "AI분석", "인스타그램", "연애불안", "커플", "남사친"],
+  authors: [{ name: "AI 위장 여사친 판독기" }],
+  creator: "AI 위장 여사친 판독기",
   metadataBase: new URL("https://ai-baram-detector.vercel.app"),
   openGraph: {
     type: "website",
     locale: "ko_KR",
     url: "https://ai-baram-detector.vercel.app",
-    siteName: "AI 바람감지기",
-    title: "AI 바람감지기 - 내 애인의 위험한 친구를 찾아보세요",
-    description: "AI가 애인의 인스타그램을 분석해 바람 위험도가 높은 인물을 찾아드립니다.",
+    siteName: "AI 위장 여사친 판독기",
+    title: "AI 위장 여사친 판독기 - 내 남친의 위험한 친구 찾기",
+    description: "내 남친이 맞팔 중인 여자들, 누가 제일 위험할까? AI가 인스타그램을 분석해 위장 여사친을 찾아드립니다.",
     images: [
       {
         url: "/logo.png",
         width: 512,
         height: 512,
-        alt: "AI 바람감지기 로고",
+        alt: "AI 위장 여사친 판독기 로고",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "AI 바람감지기",
-    description: "AI가 애인의 인스타그램을 분석해 바람 위험도가 높은 인물을 찾아드립니다.",
+    title: "AI 위장 여사친 판독기",
+    description: "내 남친이 맞팔 중인 여자들, 누가 제일 위험할까?",
     images: ["/logo.png"],
   },
   icons: {

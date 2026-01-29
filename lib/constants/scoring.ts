@@ -1,56 +1,127 @@
 // 점수 계산 상수
 
-// 기본 상호작용 점수
+// 성별 판단 신뢰도 임계값
+export const GENDER_CONFIDENCE = {
+    CONFIRMED: 0.80,  // ≥ 0.80 → 확정 여성
+    SUSPECTED: 0.60,  // 0.60 ~ 0.80 → 의심 여성
+} as const;
+
+// Photogenic Quality 점수 (Grade 1~5)
+export const PHOTOGENIC_SCORES = [20, 40, 60, 80, 100] as const;
+
+// 노출 점수
+export const EXPOSURE_SCORES = {
+    HIGH: 40,
+    LOW: 0,
+} as const;
+
+// 태그 점수
+export const TAG_SCORE = 30;
+
+// 최대 점수
+export const MAX_SCORE = 170; // Photogenic 100 + Exposure 40 + Tag 30
+
+/**
+ * Photogenic Grade에 따른 점수 반환
+ */
+export function getPhotogenicScore(grade: number): number {
+    if (grade < 1 || grade > 5) {
+        return PHOTOGENIC_SCORES[0]; // Grade 1 (20점)
+    }
+    return PHOTOGENIC_SCORES[grade - 1];
+}
+
+/**
+ * 노출 레벨에 따른 점수 반환
+ */
+export function getExposureScore(level: 'high' | 'low'): number {
+    return level === 'high' ? EXPOSURE_SCORES.HIGH : EXPOSURE_SCORES.LOW;
+}
+
+/**
+ * 성별 신뢰도에 따른 상태 분류
+ */
+export function classifyGenderStatus(
+    gender: 'male' | 'female' | 'unknown',
+    confidence: number
+): { status: 'confirmed' | 'suspected' | 'unknown'; include: boolean } {
+    if (gender !== 'female') {
+        return { status: 'unknown', include: false };
+    }
+
+    if (confidence >= GENDER_CONFIDENCE.CONFIRMED) {
+        return { status: 'confirmed', include: true };
+    }
+
+    if (confidence >= GENDER_CONFIDENCE.SUSPECTED) {
+        return { status: 'suspected', include: true };
+    }
+
+    return { status: 'unknown', include: false };
+}
+
+/**
+ * 위험순위 분류
+ */
+export function classifyRiskGrade(
+    rank: number,
+    totalCount: number
+): 'high_risk' | 'caution' | 'normal' {
+    // 고위험군: 상위 10명 (또는 상위 10%)
+    const highRiskCount = totalCount >= 100 ? 10 : Math.ceil(totalCount * 0.1);
+
+    if (rank <= highRiskCount) {
+        return 'high_risk';
+    }
+
+    // 나머지 중 주의: 20%
+    const remaining = totalCount - highRiskCount;
+    const cautionCount = Math.ceil(remaining * 0.2);
+
+    if (rank <= highRiskCount + cautionCount) {
+        return 'caution';
+    }
+
+    return 'normal';
+}
+
+// 기존 코드 호환성을 위해 유지 (deprecated)
+export const GENDER_CONFIDENCE_THRESHOLD = 0.6;
+
 export const INTERACTION_SCORES = {
     LIKE: 1,
     NORMAL_COMMENT: 3,
-    INTIMATE_COMMENT: 10,  // 친밀한 댓글은 일반 댓글의 3배 이상 가중치
+    INTIMATE_COMMENT: 10,
     REPLY: 5,
     POST_TAG: 3,
     CAPTION_MENTION: 5,
 } as const;
 
-// 외모 점수
 export const ATTRACTIVENESS_SCORES = {
     HIGH: 70,
     MEDIUM: 10,
     LOW: 0,
 } as const;
 
-// 기간 가중치
 export const DURATION_WEIGHTS = {
     LESS_THAN_6_MONTHS: 1.0,
     SIX_TO_12_MONTHS: 1.3,
     MORE_THAN_12_MONTHS: 1.5,
 } as const;
 
-// 급증 보너스
 export const SURGE_BONUS = 1.5;
-
-// 급증 판단 기준 (최근 1개월 상호작용이 이전 평균의 N배 이상)
 export const SURGE_THRESHOLD = 2;
 
-// 성별 판단 신뢰도 임계값
-export const GENDER_CONFIDENCE_THRESHOLD = 0.7;
-
-// 기간 계산 함수
 export function getDurationWeight(months: number): number {
-    if (months >= 12) {
-        return DURATION_WEIGHTS.MORE_THAN_12_MONTHS;
-    } else if (months >= 6) {
-        return DURATION_WEIGHTS.SIX_TO_12_MONTHS;
-    }
+    if (months >= 12) return DURATION_WEIGHTS.MORE_THAN_12_MONTHS;
+    if (months >= 6) return DURATION_WEIGHTS.SIX_TO_12_MONTHS;
     return DURATION_WEIGHTS.LESS_THAN_6_MONTHS;
 }
 
-// 외모 점수 계산 함수
 export function getAttractivenessScore(level: 'high' | 'medium' | 'low' | null): number {
     switch (level) {
-        case 'high':
-            return ATTRACTIVENESS_SCORES.HIGH;
-        case 'medium':
-            return ATTRACTIVENESS_SCORES.MEDIUM;
-        default:
-            return ATTRACTIVENESS_SCORES.LOW;
+        case 'high': return ATTRACTIVENESS_SCORES.HIGH;
+        case 'medium': return ATTRACTIVENESS_SCORES.MEDIUM;
+        default: return ATTRACTIVENESS_SCORES.LOW;
     }
 }

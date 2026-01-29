@@ -45,7 +45,7 @@ export async function GET(
             );
         }
 
-        // 4. 분석 결과 조회
+        // 4. 분석 결과 조회 (여성 계정들)
         const { data: results, error: resultsError } = await supabase
             .from('analysis_results')
             .select('*')
@@ -66,27 +66,39 @@ export async function GET(
             .select('instagram_id, profile_image')
             .eq('request_id', requestId);
 
-        // 6. 1위 결과 (무료 공개)
-        const topResult = results && results.length > 0 ? results[0] : null;
-
-        // 7. 2위 이하 결과 (잠금 처리)
-        const lockedResults = results
-            ?.slice(1)
-            .map((result) => ({
-                rank: result.rank,
-                riskScore: result.risk_score,
-                isUnlocked: result.is_unlocked,
-                unlockPrice: 499, // $4.99 in cents
-            })) || [];
-
-        // 8. ID 마스킹 처리
-        const maskInstagramId = (id: string): string => {
-            if (id.length <= 3) return id[0] + '***';
-            const visiblePart = id.slice(0, 2);
-            const hiddenPart = '***';
-            const endPart = id.slice(-1);
-            return `${visiblePart}${hiddenPart}_${endPart}`;
+        // 6. 성별 비율 계산
+        const genderStats = analysisRequest.gender_stats || { male: 0, female: 0, unknown: 0 };
+        const totalGender = genderStats.male + genderStats.female + genderStats.unknown;
+        const genderRatio = {
+            male: {
+                count: genderStats.male,
+                percentage: totalGender > 0 ? Math.round((genderStats.male / totalGender) * 100) : 0,
+            },
+            female: {
+                count: genderStats.female,
+                percentage: totalGender > 0 ? Math.round((genderStats.female / totalGender) * 100) : 0,
+            },
+            unknown: {
+                count: genderStats.unknown,
+                percentage: totalGender > 0 ? Math.round((genderStats.unknown / totalGender) * 100) : 0,
+            },
         };
+
+        // 7. 여성 계정 목록 (결제 후 모두 공개)
+        const femaleAccounts = results?.map((result) => ({
+            instagramId: result.suspect_instagram_id,
+            profileImage: result.suspect_profile_image,
+            instagramUrl: `https://instagram.com/${result.suspect_instagram_id}`,
+            riskGrade: result.risk_grade as 'high_risk' | 'caution' | 'normal',
+            bio: result.bio || '',
+        })) || [];
+
+        // 8. 비공개 계정 목록
+        const privateAccountsList = privateAccounts?.map((account) => ({
+            instagramId: account.instagram_id,
+            profileImage: account.profile_image,
+            instagramUrl: `https://instagram.com/${account.instagram_id}`,
+        })) || [];
 
         // 9. 응답 구성
         return NextResponse.json({
@@ -94,38 +106,11 @@ export async function GET(
             status: analysisRequest.status,
             summary: {
                 targetInstagramId: analysisRequest.target_instagram_id,
-                totalFollowers: analysisRequest.total_followers || 0,
                 mutualFollows: analysisRequest.mutual_follows || 0,
-                oppositeGenderCount: analysisRequest.opposite_gender_count || 0,
-                privateAccountsCount: privateAccounts?.length || 0,
-                confidenceScore: analysisRequest.confidence_score || 0,
+                genderRatio,
             },
-            topResult: topResult
-                ? {
-                    rank: topResult.rank,
-                    instagramId: maskInstagramId(topResult.suspect_instagram_id),
-                    profileImage: topResult.suspect_profile_image, // TODO: blur 처리
-                    riskScore: topResult.risk_score,
-                    interactions: {
-                        likes: topResult.likes_count,
-                        normalComments: topResult.normal_comments_count,
-                        intimateComments: topResult.intimate_comments_count,
-                        replies: topResult.replies_count,
-                        postTags: topResult.post_tags_count,
-                        captionMentions: topResult.caption_mentions_count,
-                    },
-                    attractivenessLevel: topResult.attractiveness_level,
-                    durationMonths: topResult.duration_months,
-                    isRecentSurge: topResult.is_recent_surge,
-                    surgePercentage: topResult.surge_percentage,
-                }
-                : null,
-            lockedResults,
-            privateAccounts:
-                privateAccounts?.map((account) => ({
-                    instagramId: maskInstagramId(account.instagram_id),
-                    profileImage: account.profile_image,
-                })) || [],
+            femaleAccounts,
+            privateAccounts: privateAccountsList,
         });
     } catch (error) {
         console.error('Result fetch error:', error);

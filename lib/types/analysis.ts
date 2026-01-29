@@ -9,10 +9,18 @@ export interface GenderAnalysisResponse {
     reasoning: string;
 }
 
-// AI 외모 분석 응답
-export interface AppearanceAnalysisResponse {
+// AI Photogenic Quality 분석 응답
+export interface PhotogenicAnalysisResponse {
     ownerIdentified: boolean;
-    attractivenessLevel: 'high' | 'medium' | 'low';
+    photogenicGrade: 1 | 2 | 3 | 4 | 5;
+    confidence: number;
+    reasoning: string;
+}
+
+// AI 노출 정도 분석 응답
+export interface ExposureAnalysisResponse {
+    ownerIdentified: boolean;
+    skinVisibility: 'high' | 'low';
     confidence: number;
     reasoning: string;
 }
@@ -25,7 +33,89 @@ export interface IntimacyAnalysisResponse {
     reasoning: string;
 }
 
-// 점수 계산 입력 데이터
+// 분석된 계정 데이터
+export interface AnalyzedAccount {
+    username: string;
+    profilePicUrl?: string;
+    bio?: string;
+    isPrivate: boolean;
+
+    // 성별 분석
+    gender: 'male' | 'female' | 'unknown';
+    genderConfidence: number;
+    genderStatus: 'confirmed' | 'suspected' | 'unknown';
+
+    // Photogenic 분석
+    photogenicGrade: number;
+
+    // 노출 분석
+    exposureLevel: 'high' | 'low';
+
+    // 태그 여부
+    isTagged: boolean;
+
+    // 점수
+    totalScore: number;
+
+    // 위험순위
+    riskGrade?: 'high_risk' | 'caution' | 'normal';
+    rank?: number;
+}
+
+// 분석 요약 (프론트엔드용)
+export interface AnalysisSummary {
+    targetInstagramId: string;
+    mutualFollows: number;
+    genderRatio: {
+        male: { count: number; percentage: number };
+        female: { count: number; percentage: number };
+        unknown: { count: number; percentage: number };
+    };
+}
+
+// 결과 페이지용 여성 계정 데이터
+export interface FemaleAccountResult {
+    instagramId: string;
+    profileImage?: string;
+    instagramUrl: string;
+    riskGrade: 'high_risk' | 'caution' | 'normal';
+    bio?: string;
+}
+
+// 결과 페이지용 비공개 계정 데이터
+export interface PrivateAccountResult {
+    instagramId: string;
+    profileImage?: string;
+    instagramUrl: string;
+}
+
+// 결과 리포트 (프론트엔드용) - 새 버전
+export interface AnalysisReportV2 {
+    requestId: string;
+    status: 'pending' | 'processing' | 'completed' | 'failed';
+    summary: AnalysisSummary;
+    femaleAccounts: FemaleAccountResult[];
+    privateAccounts: PrivateAccountResult[];
+}
+
+// 분석 진행 상태
+export interface AnalysisProgress {
+    requestId: string;
+    status: 'pending' | 'processing' | 'completed' | 'failed';
+    progress: number;
+    progressStep: string;
+    createdAt: string;
+    estimatedCompletionTime?: string;
+}
+
+// 기존 호환성 유지 (deprecated)
+export interface AppearanceAnalysisResponse {
+    ownerIdentified: boolean;
+    attractivenessLevel: 'high' | 'medium' | 'low';
+    confidence: number;
+    reasoning: string;
+}
+
 export interface ScoreCalculationInput {
     likesCount: number;
     normalCommentsCount: number;
@@ -38,7 +128,6 @@ export interface ScoreCalculationInput {
     isRecentSurge: boolean;
 }
 
-// 점수 계산 결과
 export interface ScoreCalculationResult {
     baseScore: number;
     weightedScore: number;
@@ -56,21 +145,17 @@ export interface ScoreCalculationResult {
     };
 }
 
-// 분석 요약 (프론트엔드용)
-export interface AnalysisSummary {
-    targetInstagramId: string;
-    totalFollowers: number;
-    mutualFollows: number;
-    oppositeGenderCount: number;
-    privateAccountsCount: number;
-    confidenceScore: number;
-}
-
-// 결과 리포트 (프론트엔드용)
 export interface AnalysisReport {
     requestId: string;
     status: 'pending' | 'processing' | 'completed' | 'failed';
-    summary: AnalysisSummary;
+    summary: {
+        targetInstagramId: string;
+        totalFollowers: number;
+        mutualFollows: number;
+        oppositeGenderCount: number;
+        privateAccountsCount: number;
+        confidenceScore: number;
+    };
     topResult: AnalysisResult | null;
     lockedResults: {
         rank: number;
@@ -82,14 +167,4 @@ export interface AnalysisReport {
         instagramId: string;
         profileImage?: string;
     }[];
-}
-
-// 분석 진행 상태
-export interface AnalysisProgress {
-    requestId: string;
-    status: 'pending' | 'processing' | 'completed' | 'failed';
-    progress: number;
-    progressStep: string;
-    createdAt: string;
-    estimatedCompletionTime?: string;
 }

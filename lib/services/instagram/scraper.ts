@@ -42,29 +42,27 @@ export async function getInstagramProfile(username: string): Promise<InstagramPr
 
 /**
  * 인스타그램 팔로워 목록을 수집합니다.
- * 
- * ⚠️ 주의: Apify에서 공식 followers-scraper가 없음
- * 대안: 통합 instagram-scraper의 'followers' 타입 사용
- * 또는 서드파티 Actor 사용 필요
+ * Actor: datadoping/instagram-followers-scraper
  */
 export async function getFollowers(
     username: string,
     limit: number = 500
 ): Promise<InstagramFollower[]> {
     try {
-        // 통합 instagram-scraper 사용 (directUrls 방식)
-        const run = await client.actor('apify/instagram-scraper').call({
-            directUrls: [`https://www.instagram.com/${username}/`],
-            resultsType: 'details',
-            resultsLimit: 1,
+        const run = await client.actor('datadoping/instagram-followers-scraper').call({
+            username: username,
+            resultsLimit: limit,
         });
 
         const { items } = await client.dataset(run.defaultDatasetId).listItems();
 
-        // 팔로워 목록은 직접 수집이 어려움
-        // 대안: 최근 게시물의 좋아요/댓글 사용자 분석
-        console.warn(`Followers scraping not fully supported. Returning empty for ${username}`);
-        return [];
+        return items.map((item: Record<string, unknown>) => ({
+            username: item.username as string,
+            fullName: item.full_name as string | undefined,
+            profilePicUrl: item.profile_pic_url as string | undefined,
+            isPrivate: item.is_private as boolean ?? false,
+            isVerified: item.is_verified as boolean ?? false,
+        }));
     } catch (error) {
         console.error(`Failed to get followers for ${username}:`, error);
         return [];
@@ -73,20 +71,81 @@ export async function getFollowers(
 
 /**
  * 인스타그램 팔로잉 목록을 수집합니다.
- * 
- * ⚠️ 주의: Apify에서 공식 following-scraper가 없음
+ * Actor: louisdeconinck/instagram-following-scraper
+ * ⚠️ 쿠키 필요
  */
 export async function getFollowing(
     username: string,
     limit: number = 500
 ): Promise<InstagramFollower[]> {
     try {
-        console.warn(`Following scraping not fully supported. Returning empty for ${username}`);
-        return [];
+        const cookie = process.env.INSTAGRAM_COOKIE;
+
+        if (!cookie) {
+            console.error('INSTAGRAM_COOKIE environment variable is not set');
+            return [];
+        }
+
+        const run = await client.actor('louisdeconinck/instagram-following-scraper').call({
+            username: username,
+            resultsLimit: limit,
+            cookie: cookie,
+        });
+
+        const { items } = await client.dataset(run.defaultDatasetId).listItems();
+
+        return items.map((item: Record<string, unknown>) => ({
+            username: item.username as string,
+            fullName: item.full_name as string | undefined,
+            profilePicUrl: item.profile_pic_url as string | undefined,
+            isPrivate: item.is_private as boolean ?? false,
+            isVerified: item.is_verified as boolean ?? false,
+        }));
     } catch (error) {
         console.error(`Failed to get following for ${username}:`, error);
         return [];
     }
+}
+
+/**
+ * 여러 계정의 프로필을 배치로 수집합니다.
+ */
+export async function getProfilesBatch(
+    usernames: string[],
+    batchSize: number = 10
+): Promise<InstagramProfile[]> {
+    const results: InstagramProfile[] = [];
+
+    for (let i = 0; i < usernames.length; i += batchSize) {
+        const batch = usernames.slice(i, i + batchSize);
+
+        try {
+            const run = await client.actor('apify/instagram-profile-scraper').call({
+                usernames: batch,
+            });
+
+            const { items } = await client.dataset(run.defaultDatasetId).listItems();
+
+            for (const item of items) {
+                const profile = item as Record<string, unknown>;
+                results.push({
+                    username: profile.username as string,
+                    fullName: profile.fullName as string | undefined,
+                    bio: profile.biography as string | undefined,
+                    profilePicUrl: profile.profilePicUrl as string | undefined,
+                    followersCount: profile.followersCount as number,
+                    followingCount: profile.followsCount as number,
+                    postsCount: profile.postsCount as number,
+                    isPrivate: profile.private as boolean,
+                    isVerified: profile.verified as boolean,
+                });
+            }
+        } catch (error) {
+            console.error(`Failed to get profiles batch:`, error);
+        }
+    }
+
+    return results;
 }
 
 /**
@@ -99,4 +158,17 @@ export function extractMutualFollows(
     const followerSet = new Set(followers.map((f) => f.username));
 
     return following.filter((f) => followerSet.has(f.username));
+}
+
+/**
+ * 공개/비공개 계정으로 분류합니다.
+ */
+export function classifyByPrivacy(accounts: InstagramFollower[]): {
+    publicAccounts: InstagramFollower[];
+    privateAccounts: InstagramFollower[];
+} {
+    const publicAccounts = accounts.filter((a) => !a.isPrivate);
+    const privateAccounts = accounts.filter((a) => a.isPrivate);
+
+    return { publicAccounts, privateAccounts };
 }

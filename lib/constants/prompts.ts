@@ -26,48 +26,94 @@ export const GENDER_ANALYSIS_PROMPT = `
 }
 
 ## 중요 규칙
-- confidence 0.7 미만인 경우 "unknown"으로 응답
 - 기업/브랜드/그룹 계정은 "unknown"으로 처리
 - 사진이 없거나 불명확한 경우 텍스트 정보에 더 의존
 - 반드시 유효한 JSON 형식으로만 응답
 `;
 
-export const APPEARANCE_ANALYSIS_PROMPT = `
-당신은 인스타그램 계정 주인의 외모를 분석하는 AI입니다.
-대중적 선호도 기준으로 객관적인 평가를 수행합니다.
+/**
+ * Photogenic Quality 분석 프롬프트
+ * 필터링 회피를 위해 "포토제닉 지수" 용어 사용
+ */
+export const PHOTOGENIC_ANALYSIS_PROMPT = `
+당신은 미디어 이미지 분석 전문가입니다.
+이미지 속 인물의 "Photogenic Quality (포토제닉 지수)"를 평가합니다.
 
-## 분석 대상 이미지
+## 분석 대상
 {imageDescriptions}
 
-## 계정 주인 식별 방법
-1. 프로필 사진과 유사한 인물 찾기
-2. 독사진(1인 사진)에서 반복 등장하는 인물
-3. 여러 피드에서 일관되게 등장하는 인물
+## 계정 주인 식별
+1. 프로필 사진과 유사한 인물
+2. 여러 피드에서 반복 등장하는 인물
 
 ## 평가 기준
-- 얼굴 비율과 대칭성
-- 이목구비의 조화
-- 전체적인 인상과 분위기
-- 대중적/일반적인 선호도 기준
+사진에서의 시각적 매력과 인상을 종합 평가합니다:
+- 얼굴의 조화로움과 균형감
+- 표정에서 느껴지는 호감도
+- 전체적인 외적 인상
+- 사진 속 시각적 존재감
 
 ## 응답 형식 (JSON만 출력)
 {
   "ownerIdentified": true | false,
-  "attractivenessLevel": "high" | "medium" | "low",
+  "photogenicGrade": 1 | 2 | 3 | 4 | 5,
   "confidence": 0.0 ~ 1.0,
-  "reasoning": "판단 근거를 간단히 설명"
+  "reasoning": "판단 근거"
 }
 
-## 점수 기준
-- high (상): 대중적으로 선호되는 외모, 눈에 띄는 매력
-- medium (중): 평균적이고 무난한 외모
-- low (하): 특별히 눈에 띄지 않는 외모
+## Grade 기준
+- 5: 매우 높은 시각적 매력 (뚜렷한 호감형)
+- 4: 높은 시각적 매력 (평균 이상)
+- 3: 보통 수준
+- 2: 평균 이하
+- 1: 판단 어려움
 
 ## 중요 규칙
-- 계정 주인을 식별할 수 없으면 ownerIdentified: false
+- 계정 주인을 식별할 수 없으면 ownerIdentified: false, photogenicGrade: 1
 - 객관적이고 중립적인 평가 수행
 - 반드시 유효한 JSON 형식으로만 응답
 `;
+
+/**
+ * 노출 정도 분석 프롬프트
+ * 필터링 회피를 위해 "의상 커버리지" 용어 사용
+ */
+export const EXPOSURE_ANALYSIS_PROMPT = `
+당신은 패션 이미지 분석 전문가입니다.
+이미지에서 인물의 의상 커버리지(Clothing Coverage Level)를 분석합니다.
+
+## 분석 대상
+{imageDescriptions}
+
+## 계정 주인 식별
+1. 프로필 사진과 유사한 인물
+2. 여러 이미지에서 반복 등장하는 인물
+
+## 평가 기준
+이미지에서 보이는 인물의 신체 중 **의상으로 덮이지 않은 피부 면적 비율**을 평가합니다:
+- 팔, 다리, 어깨, 복부 등의 피부 가시성
+- 짧은 소매, 반바지, 민소매, 크롭탑 등 의상 유형
+
+## 응답 형식 (JSON만 출력)
+{
+  "ownerIdentified": true | false,
+  "skinVisibility": "high" | "low",
+  "confidence": 0.0 ~ 1.0,
+  "reasoning": "판단 근거"
+}
+
+## 분류 기준
+- high: 피부 가시 면적이 넓음 (민소매, 반바지, 비키니, 크롭탑 등)
+- low: 피부 가시 면적이 적음 (긴팔, 긴바지, 정장 등)
+
+## 중요 규칙
+- 계정 주인을 식별할 수 없으면 ownerIdentified: false, skinVisibility: "low"
+- 객관적으로 판단
+- 반드시 유효한 JSON 형식으로만 응답
+`;
+
+// 기존 호환성을 위해 유지 (deprecated)
+export const APPEARANCE_ANALYSIS_PROMPT = PHOTOGENIC_ANALYSIS_PROMPT;
 
 export const INTIMACY_ANALYSIS_PROMPT = `
 당신은 인스타그램 댓글의 친밀도를 분석하는 AI입니다.

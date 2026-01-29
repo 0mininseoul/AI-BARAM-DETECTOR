@@ -5,13 +5,22 @@ import {
     getFollowers,
     getFollowing,
     extractMutualFollows,
-    getPosts,
-    getPostComments,
-} from '@/lib/services/instagram';
-import { analyzeGenderBatch, analyzeAppearance, analyzeCommentIntimacyBatch } from '@/lib/services/ai';
-import { calculateRiskScore, detectRecentSurge, calculateDurationMonths } from '@/lib/services/analysis/risk-score';
-import { calculateConfidenceScore } from '@/lib/services/analysis/confidence-score';
+    classifyByPrivacy,
+    getProfilesBatch,
+} from '@/lib/services/instagram/scraper';
+import { getPosts } from '@/lib/services/instagram/posts';
+import { analyzeGenderBatch } from '@/lib/services/ai/gender-analysis';
+import { analyzePhotogenicBatch } from '@/lib/services/ai/photogenic-analysis';
+import { analyzeExposureBatch } from '@/lib/services/ai/exposure-analysis';
+import {
+    getPhotogenicScore,
+    getExposureScore,
+    classifyGenderStatus,
+    classifyRiskGrade,
+    TAG_SCORE,
+} from '@/lib/constants/scoring';
 import { sendAnalysisCompleteEmail } from '@/lib/services/email';
+import type { AnalyzedAccount } from '@/lib/types/analysis';
 
 // 분석 실행 API (내부용 - 직접 호출하지 않음)
 export async function POST(request: Request) {
@@ -33,7 +42,6 @@ export async function POST(request: Request) {
             return NextResponse.json({ error: 'Request not found' }, { status: 404 });
         }
 
-        // 이미 처리중이거나 완료된 경우
         if (analysisRequest.status !== 'pending') {
             return NextResponse.json({ error: 'Already processing or completed' }, { status: 400 });
         }
@@ -47,11 +55,11 @@ export async function POST(request: Request) {
         };
 
         const targetId = analysisRequest.target_instagram_id;
-        const targetGender = analysisRequest.target_gender;
-        const oppositeGender = targetGender === 'male' ? 'female' : 'male';
+        const planType = analysisRequest.plan_type || 'basic'; // basic or standard
+        const scrapeLimit = planType === 'standard' ? 1000 : 500;
 
         try {
-            // Step 1: 프로필 수집 (0-10%)
+            // Step 1: 프로필 수집 (5%)
             await updateProgress(5, '대상 계정 정보 수집 중...');
             const profile = await getInstagramProfile(targetId);
 
@@ -63,15 +71,15 @@ export async function POST(request: Request) {
                 throw new Error('비공개 계정은 분석할 수 없습니다.');
             }
 
-            // Step 2: 팔로워/팔로잉 수집 (10-25%)
+            // Step 2: 팔로워/팔로잉 수집 (15%)
             await updateProgress(15, '팔로워/팔로잉 목록 수집 중...');
             const [followers, following] = await Promise.all([
-                getFollowers(targetId, 500),
-                getFollowing(targetId, 500),
+                getFollowers(targetId, scrapeLimit),
+                getFollowing(targetId, scrapeLimit),
             ]);
 
-            // Step 3: 맞팔 추출 (25-30%)
-            await updateProgress(28, '맞팔 계정 분석 중...');
+            // Step 3: 맞팔 추출 (25%)
+            await updateProgress(25, '맞팔 계정 분석 중...');
             const mutualFollows = extractMutualFollows(followers, following);
 
             await supabaseAdmin
@@ -82,39 +90,9 @@ export async function POST(request: Request) {
                 })
                 .eq('id', requestId);
 
-            // Step 4: 성별 판단 (30-50%)
-            await updateProgress(35, '맞팔 계정 성별 판단 중...');
-
-            // 맞팔 계정들의 프로필 및 게시물 수집
-            const accountsWithPosts = await Promise.all(
-                mutualFollows.slice(0, 50).map(async (account) => {
-                    const accountProfile = await getInstagramProfile(account.username);
-                    const posts = accountProfile && !accountProfile.isPrivate
-                        ? await getPosts(account.username, 5)
-                        : [];
-                    return { profile: accountProfile || account as never, recentPosts: posts };
-                })
-            );
-
-            const genderResults = await analyzeGenderBatch(
-                accountsWithPosts.filter(a => a.profile) as { profile: never; recentPosts: never[] }[]
-            );
-
-            // 이성 계정 필터링
-            const oppositeGenderAccounts = mutualFollows.filter((account) => {
-                const result = genderResults.get(account.username);
-                return result?.gender === oppositeGender && result.confidence >= 0.7;
-            });
-
-            await supabaseAdmin
-                .from('analysis_requests')
-                .update({ opposite_gender_count: oppositeGenderAccounts.length })
-                .eq('id', requestId);
-
-            // Step 5: 공개/비공개 분류 (50-55%)
-            await updateProgress(52, '공개 계정 필터링 중...');
-            const publicAccounts = oppositeGenderAccounts.filter((a) => !a.isPrivate);
-            const privateAccounts = oppositeGenderAccounts.filter((a) => a.isPrivate);
+            // Step 4: 공개/비공개 분류 (30%)
+            await updateProgress(30, '공개/비공개 계정 분류 중...');
+            const { publicAccounts, privateAccounts } = classifyByPrivacy(mutualFollows);
 
             // 비공개 계정 저장
             if (privateAccounts.length > 0) {
@@ -127,230 +105,151 @@ export async function POST(request: Request) {
                 );
             }
 
-            // Step 6: 상호작용 수집 및 분석 (55-85%)
-            await updateProgress(60, '상호작용 데이터 수집 중...');
+            // Step 5: 공개 계정 프로필 스크래핑 (45%) - 최대 350개
+            await updateProgress(45, '공개 계정 프로필 수집 중...');
+            const profilesToScrape = publicAccounts.slice(0, 350);
+            const profiles = await getProfilesBatch(profilesToScrape.map(a => a.username));
 
-            const results: {
-                username: string;
-                likesCount: number;
-                normalCommentsCount: number;
-                intimateCommentsCount: number;
-                repliesCount: number;
-                postTagsCount: number;
-                captionMentionsCount: number;
-                attractivenessLevel: 'high' | 'medium' | 'low' | null;
-                firstInteractionDate?: string;
-                recentInteractionDates: string[];
-                profileImage?: string;
-                genderConfidence?: number;
-            }[] = [];
+            // 프로필과 게시물 매핑
+            const accountsWithPosts = await Promise.all(
+                profiles.map(async (profile) => {
+                    const posts = !profile.isPrivate
+                        ? await getPosts(profile.username, 10)
+                        : [];
+                    return { profile, recentPosts: posts };
+                })
+            );
 
-            // 대상 계정의 게시물 수집
-            const targetPosts = await getPosts(targetId, 20);
+            // Step 6: 성별 판단 (60%)
+            await updateProgress(60, '계정 성별 분석 중...');
+            const genderResults = await analyzeGenderBatch(accountsWithPosts);
 
-            for (const suspect of publicAccounts.slice(0, 20)) {
-                await updateProgress(
-                    60 + Math.floor((results.length / Math.min(publicAccounts.length, 20)) * 20),
-                    `${suspect.username} 분석 중...`
+            // 성별 통계 계산
+            const genderStats = { male: 0, female: 0, unknown: 0 };
+            const femaleAccounts: typeof accountsWithPosts = [];
+
+            for (const account of accountsWithPosts) {
+                const result = genderResults.get(account.profile.username);
+                if (!result) continue;
+
+                if (result.gender === 'male') genderStats.male++;
+                else if (result.gender === 'female') genderStats.female++;
+                else genderStats.unknown++;
+
+                // 여성 계정 필터링 (확정 + 의심)
+                const { include } = classifyGenderStatus(result.gender, result.confidence);
+                if (include) {
+                    femaleAccounts.push(account);
+                }
+            }
+
+            await supabaseAdmin
+                .from('analysis_requests')
+                .update({
+                    opposite_gender_count: femaleAccounts.length,
+                    gender_stats: genderStats,
+                })
+                .eq('id', requestId);
+
+            // Step 7: 계정 분석 (Photogenic + 노출 + 태그) (85%)
+            await updateProgress(70, '계정 분석 중...');
+
+            // Photogenic 분석
+            const photogenicInputs = femaleAccounts.map((a) => ({
+                username: a.profile.username,
+                profilePicUrl: a.profile.profilePicUrl,
+                postImageUrls: a.recentPosts.map((p) => p.imageUrl).filter(Boolean) as string[],
+            }));
+            const photogenicResults = await analyzePhotogenicBatch(photogenicInputs);
+
+            await updateProgress(78, '노출 분석 중...');
+
+            // 노출 분석
+            const exposureResults = await analyzeExposureBatch(photogenicInputs);
+
+            await updateProgress(85, '점수 계산 중...');
+
+            // 태그 확인 및 점수 계산
+            const analyzedAccounts: AnalyzedAccount[] = [];
+
+            for (const account of femaleAccounts) {
+                const username = account.profile.username;
+                const genderResult = genderResults.get(username);
+                const photogenicResult = photogenicResults.get(username);
+                const exposureResult = exposureResults.get(username);
+
+                // 태그 확인 (caption @멘션 또는 tagged_users)
+                let isTagged = false;
+                for (const post of account.recentPosts) {
+                    if (post.taggedUsers?.includes(targetId) || post.mentionedUsers?.includes(targetId)) {
+                        isTagged = true;
+                        break;
+                    }
+                }
+
+                // 점수 계산
+                const photogenicGrade = photogenicResult?.photogenicGrade || 1;
+                const exposureLevel = exposureResult?.skinVisibility || 'low';
+
+                const photogenicScore = getPhotogenicScore(photogenicGrade);
+                const exposureScore = getExposureScore(exposureLevel);
+                const tagScore = isTagged ? TAG_SCORE : 0;
+                const totalScore = photogenicScore + exposureScore + tagScore;
+
+                const { status: genderStatus } = classifyGenderStatus(
+                    genderResult?.gender || 'unknown',
+                    genderResult?.confidence || 0
                 );
 
-                let likesCount = 0;
-                let normalCommentsCount = 0;
-                let intimateCommentsCount = 0;
-                let repliesCount = 0;
-                let postTagsCount = 0;
-                let captionMentionsCount = 0;
-                const interactionDates: string[] = [];
-
-                // 용의자 게시물에서 대상의 상호작용 찾기
-                const suspectPosts = await getPosts(suspect.username, 10);
-
-                for (const post of suspectPosts) {
-                    // 태그 확인
-                    if (post.taggedUsers.includes(targetId)) {
-                        postTagsCount++;
-                    }
-                    // 캡션 멘션 확인
-                    if (post.mentionedUsers.includes(targetId)) {
-                        captionMentionsCount++;
-                    }
-
-                    // 댓글 수집 및 분석
-                    const comments = await getPostComments(
-                        `https://instagram.com/p/${post.shortCode}`,
-                        30
-                    );
-
-                    for (const comment of comments) {
-                        if (comment.ownerUsername === targetId) {
-                            interactionDates.push(comment.timestamp);
-
-                            // 친밀도 분석
-                            const intimacyResults = await analyzeCommentIntimacyBatch([
-                                {
-                                    authorId: targetId,
-                                    postOwnerId: suspect.username,
-                                    commentText: comment.text,
-                                },
-                            ]);
-
-                            const intimacy = intimacyResults.get('0');
-                            if (intimacy?.intimacyLevel === 'intimate') {
-                                intimateCommentsCount++;
-                            } else {
-                                normalCommentsCount++;
-                            }
-                        }
-                    }
-                }
-
-                // 대상 게시물에서 용의자의 상호작용 찾기
-                for (const post of targetPosts) {
-                    if (post.taggedUsers.includes(suspect.username)) {
-                        postTagsCount++;
-                    }
-                    if (post.mentionedUsers.includes(suspect.username)) {
-                        captionMentionsCount++;
-                    }
-
-                    const comments = await getPostComments(
-                        `https://instagram.com/p/${post.shortCode}`,
-                        30
-                    );
-
-                    for (const comment of comments) {
-                        if (comment.ownerUsername === suspect.username) {
-                            interactionDates.push(comment.timestamp);
-
-                            const intimacyResults = await analyzeCommentIntimacyBatch([
-                                {
-                                    authorId: suspect.username,
-                                    postOwnerId: targetId,
-                                    commentText: comment.text,
-                                },
-                            ]);
-
-                            const intimacy = intimacyResults.get('0');
-                            if (intimacy?.intimacyLevel === 'intimate') {
-                                intimateCommentsCount++;
-                            } else {
-                                normalCommentsCount++;
-                            }
-                        }
-                    }
-                }
-
-                // 외모 분석
-                let attractivenessLevel: 'high' | 'medium' | 'low' | null = null;
-                if (suspectPosts.length > 0) {
-                    const suspectProfile = await getInstagramProfile(suspect.username);
-                    const appearanceResult = await analyzeAppearance(
-                        suspectProfile?.profilePicUrl,
-                        suspectPosts.map((p) => p.imageUrl).filter(Boolean) as string[]
-                    );
-                    if (appearanceResult.ownerIdentified) {
-                        attractivenessLevel = appearanceResult.attractivenessLevel;
-                    }
-                }
-
-                results.push({
-                    username: suspect.username,
-                    likesCount,
-                    normalCommentsCount,
-                    intimateCommentsCount,
-                    repliesCount,
-                    postTagsCount,
-                    captionMentionsCount,
-                    attractivenessLevel,
-                    firstInteractionDate: interactionDates.sort()[0],
-                    recentInteractionDates: interactionDates,
-                    profileImage: suspect.profilePicUrl,
-                    genderConfidence: genderResults.get(suspect.username)?.confidence,
+                analyzedAccounts.push({
+                    username,
+                    profilePicUrl: account.profile.profilePicUrl,
+                    bio: account.profile.bio,
+                    isPrivate: account.profile.isPrivate,
+                    gender: genderResult?.gender || 'unknown',
+                    genderConfidence: genderResult?.confidence || 0,
+                    genderStatus,
+                    photogenicGrade,
+                    exposureLevel,
+                    isTagged,
+                    totalScore,
                 });
             }
 
-            // Step 7: 점수 계산 및 순위 정렬 (85-95%)
-            await updateProgress(88, '위험도 점수 계산 중...');
-
-            const scoredResults = results.map((r) => {
-                const durationMonths = calculateDurationMonths(r.firstInteractionDate);
-                const { isRecentSurge, surgePercentage } = detectRecentSurge(
-                    r.recentInteractionDates,
-                    r.likesCount + r.normalCommentsCount + r.intimateCommentsCount
-                );
-
-                const score = calculateRiskScore({
-                    likesCount: r.likesCount,
-                    normalCommentsCount: r.normalCommentsCount,
-                    intimateCommentsCount: r.intimateCommentsCount,
-                    repliesCount: r.repliesCount,
-                    postTagsCount: r.postTagsCount,
-                    captionMentionsCount: r.captionMentionsCount,
-                    attractivenessLevel: r.attractivenessLevel,
-                    durationMonths,
-                    isRecentSurge,
-                });
-
-                return {
-                    ...r,
-                    riskScore: score.finalScore,
-                    durationMonths,
-                    isRecentSurge,
-                    surgePercentage,
-                };
-            });
+            // Step 8: 위험순위 분류 (95%)
+            await updateProgress(92, '위험순위 분류 중...');
 
             // 점수순 정렬
-            scoredResults.sort((a, b) => b.riskScore - a.riskScore);
+            analyzedAccounts.sort((a, b) => b.totalScore - a.totalScore);
 
-            // Step 8: 결과 저장 (95-100%)
+            // 위험순위 부여
+            const rankedAccounts = analyzedAccounts.map((account, index) => ({
+                ...account,
+                rank: index + 1,
+                riskGrade: classifyRiskGrade(index + 1, analyzedAccounts.length),
+            }));
+
+            // Step 9: 결과 저장 (100%)
             await updateProgress(95, '결과 저장 중...');
 
-            // 상위 10명만 저장
-            const topResults = scoredResults.slice(0, 10);
-
-            for (let i = 0; i < topResults.length; i++) {
-                const result = topResults[i];
+            // 모든 여성 계정 저장
+            for (const result of rankedAccounts) {
                 await supabaseAdmin.from('analysis_results').insert({
                     request_id: requestId,
-                    rank: i + 1,
+                    rank: result.rank,
                     suspect_instagram_id: result.username,
-                    suspect_profile_image: result.profileImage,
-                    risk_score: result.riskScore,
-                    likes_count: result.likesCount,
-                    normal_comments_count: result.normalCommentsCount,
-                    intimate_comments_count: result.intimateCommentsCount,
-                    replies_count: result.repliesCount,
-                    post_tags_count: result.postTagsCount,
-                    caption_mentions_count: result.captionMentionsCount,
-                    attractiveness_level: result.attractivenessLevel,
-                    attractiveness_score:
-                        result.attractivenessLevel === 'high'
-                            ? 70
-                            : result.attractivenessLevel === 'medium'
-                                ? 10
-                                : 0,
+                    suspect_profile_image: result.profilePicUrl,
+                    bio: result.bio,
+                    risk_score: result.totalScore,
+                    photogenic_grade: result.photogenicGrade,
+                    exposure_level: result.exposureLevel,
+                    is_tagged: result.isTagged,
+                    risk_grade: result.riskGrade,
                     gender_confidence: result.genderConfidence,
-                    first_interaction_date: result.firstInteractionDate,
-                    duration_months: result.durationMonths,
-                    is_recent_surge: result.isRecentSurge,
-                    surge_percentage: result.surgePercentage,
-                    is_unlocked: i === 0, // 1위만 무료 공개
+                    gender_status: result.genderStatus,
+                    is_unlocked: true, // 결제 후 모두 공개
                 });
             }
-
-            // 신뢰도 점수 계산
-            const confidenceScore = calculateConfidenceScore({
-                totalInteractions: scoredResults.reduce(
-                    (sum, r) => sum + r.likesCount + r.normalCommentsCount + r.intimateCommentsCount,
-                    0
-                ),
-                oppositeGenderCount: oppositeGenderAccounts.length,
-                averagePostsPerAccount: targetPosts.length,
-                genderConfidences: Array.from(genderResults.values())
-                    .filter((r) => r.gender !== 'unknown')
-                    .map((r) => r.confidence),
-            });
 
             // 완료 상태 업데이트
             await supabaseAdmin
@@ -359,7 +258,6 @@ export async function POST(request: Request) {
                     status: 'completed',
                     progress: 100,
                     progress_step: '분석 완료!',
-                    confidence_score: confidenceScore,
                     completed_at: new Date().toISOString(),
                 })
                 .eq('id', requestId);
@@ -375,7 +273,6 @@ export async function POST(request: Request) {
 
             return NextResponse.json({ success: true, requestId });
         } catch (pipelineError) {
-            // 실패 상태 업데이트
             const errorMessage = pipelineError instanceof Error ? pipelineError.message : 'Unknown error';
 
             await supabaseAdmin
