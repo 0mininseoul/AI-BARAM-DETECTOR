@@ -19,13 +19,13 @@ export default function LandingPage() {
   };
 
   return (
-    <div className="min-h-screen bg-black text-white selection:bg-pink-500/30">
+    <div className="min-h-screen bg-black text-white selection:bg-mint-500/30">
       {/* 네비게이션 */}
       <nav className="fixed top-0 w-full z-50 bg-black/80 backdrop-blur-md border-b border-gray-800">
         <div className="max-w-md mx-auto px-4 h-14 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span className="text-2xl">🕵️‍♀️</span>
-            <span className="font-bold text-lg bg-gradient-to-r from-pink-400 to-purple-400 text-transparent bg-clip-text">
+            <span className="font-bold text-lg text-mint-500">
               AI 위장 여사친 판독기
             </span>
           </div>
@@ -39,7 +39,7 @@ export default function LandingPage() {
               </button>
               <button
                 onClick={() => router.push('/analyze')}
-                className="bg-pink-600 hover:bg-pink-500 text-white text-sm font-bold py-2 px-4 rounded-full transition-colors"
+                className="bg-mint-500 hover:bg-mint-400 text-black text-sm font-bold py-2 px-4 rounded-full transition-colors"
               >
                 분석하기
               </button>
@@ -64,12 +64,12 @@ export default function LandingPage() {
             transition={{ duration: 0.6 }}
             className="mb-6"
           >
-            <span className="inline-block py-1 px-3 rounded-full bg-pink-900/40 text-pink-300 text-xs font-bold mb-4 border border-pink-500/30">
+            <span className="inline-block py-1 px-3 rounded-full bg-mint-500/10 text-mint-400 text-xs font-bold mb-4 border border-mint-500/20">
               🔒 비밀 보장 100%
             </span>
             <h1 className="text-3xl md:text-4xl font-bold leading-tight mb-4">
               내 남친이 맞팔 중인 여자들,<br />
-              <span className="bg-gradient-to-r from-pink-500 to-purple-500 text-transparent bg-clip-text">
+              <span className="text-mint-500">
                 누가 제일 위험할까?
               </span>
             </h1>
@@ -83,7 +83,7 @@ export default function LandingPage() {
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
             transition={{ delay: 0.3, duration: 0.5 }}
-            className="relative w-full aspect-[4/3] bg-gray-900 rounded-2xl overflow-hidden mb-8 border border-gray-800 shadow-2xl shadow-pink-900/20"
+            className="relative w-full aspect-[4/3] bg-gray-900 rounded-2xl overflow-hidden mb-8 border border-gray-800 shadow-2xl shadow-mint-500/10"
           >
             {/* 예시 결과 화면 (가상) */}
             <div className="absolute inset-0 flex flex-col p-4">
@@ -92,13 +92,13 @@ export default function LandingPage() {
                 <div className="text-xs text-red-400 font-bold">🔴 고위험군 감지</div>
               </div>
               <div className="space-y-3">
-                <div className="bg-gray-800/80 rounded-xl p-3 flex items-center gap-3 backdrop-blur-sm border border-red-500/30">
+                <div className="bg-gray-800/80 rounded-xl p-3 flex items-center gap-3 backdrop-blur-sm border border-point-red/30">
                   <div className="w-10 h-10 rounded-full bg-gray-700 overflow-hidden relative">
-                    <div className="absolute inset-0 bg-red-500/20 backdrop-blur-[2px]"></div>
+                    <div className="absolute inset-0 bg-point-red/20 backdrop-blur-[2px]"></div>
                   </div>
                   <div className="flex-1">
                     <div className="h-3 w-20 bg-gray-600 rounded mb-1.5"></div>
-                    <div className="h-2 w-12 bg-red-900/50 rounded"></div>
+                    <div className="h-2 w-12 bg-point-red/50 rounded"></div>
                   </div>
                   <div className="text-xl">🚨</div>
                 </div>
@@ -106,7 +106,7 @@ export default function LandingPage() {
                   <div className="w-10 h-10 rounded-full bg-gray-700"></div>
                   <div className="flex-1">
                     <div className="h-3 w-16 bg-gray-600 rounded mb-1.5"></div>
-                    <div className="h-2 w-10 bg-orange-900/50 rounded"></div>
+                    <div className="h-2 w-10 bg-orange-500/50 rounded"></div>
                   </div>
                   <div className="text-xl">⚠️</div>
                 </div>
@@ -114,7 +114,7 @@ export default function LandingPage() {
                   <div className="w-10 h-10 rounded-full bg-gray-700"></div>
                   <div className="flex-1">
                     <div className="h-3 w-24 bg-gray-600 rounded mb-1.5"></div>
-                    <div className="h-2 w-8 bg-green-900/50 rounded"></div>
+                    <div className="h-2 w-8 bg-mint-500/50 rounded"></div>
                   </div>
                   <div className="text-xl">✅</div>
                 </div>
@@ -131,7 +131,7 @@ export default function LandingPage() {
 
           <button
             onClick={handleStart}
-            className="w-full bg-gradient-to-r from-pink-600 to-purple-600 text-white font-bold text-lg py-4 rounded-xl shadow-lg shadow-pink-900/30 hover:shadow-pink-900/50 hover:scale-[1.02] transition-all active:scale-[0.98]"
+            className="w-full bg-mint-500 text-black font-bold text-lg py-4 rounded-xl shadow-lg shadow-mint-500/20 hover:bg-mint-400 hover:scale-[1.02] transition-all active:scale-[0.98]"
           >
             지금 바로 분석하기 ✨
           </button>
@@ -195,7 +195,7 @@ export default function LandingPage() {
           <div className="space-y-4">
             <div className="bg-gray-900 p-5 rounded-2xl border border-gray-800 relative">
               <span className="absolute top-4 right-4 text-gray-600 text-xs">어제</span>
-              <div className="flex text-pink-500 mb-2">★★★★★</div>
+              <div className="flex text-mint-500 mb-2">★★★★★</div>
               <p className="text-gray-300 text-sm leading-relaxed mb-3">
                 "그냥 아는 동생이라던 애가 있었는데, AI 분석 결과에서 고위험군 1위로 뜨더라고요. 혹시나 해서 봤더니...ㅎ 진짜 소름"
               </p>
@@ -204,7 +204,7 @@ export default function LandingPage() {
 
             <div className="bg-gray-900 p-5 rounded-2xl border border-gray-800 relative">
               <span className="absolute top-4 right-4 text-gray-600 text-xs">2일 전</span>
-              <div className="flex text-pink-500 mb-2">★★★★★</div>
+              <div className="flex text-mint-500 mb-2">★★★★★</div>
               <p className="text-gray-300 text-sm leading-relaxed mb-3">
                 "비공개 계정까지 리스트로 쫙 뽑아줘서 좋았어요. 내가 모르는 여자가 이렇게 많은 줄 몰랐음."
               </p>
