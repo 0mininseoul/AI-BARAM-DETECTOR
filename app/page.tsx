@@ -24,7 +24,9 @@ export default function LandingPage() {
       <nav className="fixed top-0 w-full z-50 bg-black/80 backdrop-blur-md border-b border-gray-800">
         <div className="max-w-md mx-auto px-4 h-14 flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <span className="text-2xl">🕵️‍♀️</span>
+            <div className="flex items-center justify-center w-8 h-8 bg-gray-900 rounded-full overflow-hidden border border-gray-800">
+              <img src="/logo.png" alt="AI 위장 여사친 판독기 로고" className="w-full h-full object-cover" />
+            </div>
             <span className="font-bold text-lg text-mint-500">
               AI 위장 여사친 판독기
             </span>
