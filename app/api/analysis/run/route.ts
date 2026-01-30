@@ -8,7 +8,6 @@ import {
     classifyByPrivacy,
     getProfilesBatch,
 } from '@/lib/services/instagram/scraper';
-import { getPosts } from '@/lib/services/instagram/posts';
 import { analyzeGenderBatch } from '@/lib/services/ai/gender-analysis';
 import { analyzePhotogenicBatch } from '@/lib/services/ai/photogenic-analysis';
 import { analyzeExposureBatch } from '@/lib/services/ai/exposure-analysis';
@@ -106,19 +105,16 @@ export async function POST(request: Request) {
             }
 
             // Step 5: 공개 계정 프로필 스크래핑 (45%) - 최대 350개
+            // 프로파일 수집 시 latestPosts도 함께 반환됨 (instagram-profile-scraper)
             await updateProgress(45, '공개 계정 프로필 수집 중...');
             const profilesToScrape = publicAccounts.slice(0, 350);
             const profiles = await getProfilesBatch(profilesToScrape.map(a => a.username));
 
-            // 프로필과 게시물 매핑
-            const accountsWithPosts = await Promise.all(
-                profiles.map(async (profile) => {
-                    const posts = !profile.isPrivate
-                        ? await getPosts(profile.username, 10)
-                        : [];
-                    return { profile, recentPosts: posts };
-                })
-            );
+            // 프로필과 게시물 매핑 (latestPosts 사용 - 별도 API 호출 불필요)
+            const accountsWithPosts = profiles.map((profile) => ({
+                profile,
+                recentPosts: profile.latestPosts || [],
+            }));
 
             // Step 6: 성별 판단 (60%)
             await updateProgress(60, '계정 성별 분석 중...');

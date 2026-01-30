@@ -8,7 +8,6 @@ import {
     classifyByPrivacy,
     getProfilesBatch,
 } from '@/lib/services/instagram/scraper';
-import { getPosts } from '@/lib/services/instagram/posts';
 import { analyzeGender } from '@/lib/services/ai/gender-analysis';
 import { analyzePhotogenicBatch } from '@/lib/services/ai/photogenic-analysis';
 import { analyzeExposureBatch } from '@/lib/services/ai/exposure-analysis';
@@ -281,29 +280,27 @@ async function processProfiles(
         `프로필 수집 중... (${batchIndex + 1}/${totalBatches})`
     );
 
-    // 프로필 배치 수집
+    // 프로필 배치 수집 (latestPosts 포함)
     const profiles = await getProfilesBatch(batch.map((a) => a.username));
 
-    // 프로필과 게시물 매핑
-    const batchAccountsWithPosts = await Promise.all(
-        profiles.map(async (profile) => {
-            const posts = !profile.isPrivate ? await getPosts(profile.username, 10) : [];
-            return {
-                profile: {
-                    username: profile.username,
-                    profilePicUrl: profile.profilePicUrl,
-                    fullName: profile.fullName,
-                    bio: profile.bio,
-                    isPrivate: profile.isPrivate,
-                },
-                recentPosts: posts.map((p) => ({
-                    imageUrl: p.imageUrl,
-                    taggedUsers: p.taggedUsers,
-                    mentionedUsers: p.mentionedUsers,
-                })),
-            };
-        })
-    );
+    // 프로필과 게시물 매핑 (latestPosts 사용 - 별도 API 호출 불필요)
+    const batchAccountsWithPosts = profiles.map((profile) => {
+        const posts = profile.latestPosts || [];
+        return {
+            profile: {
+                username: profile.username,
+                profilePicUrl: profile.profilePicUrl,
+                fullName: profile.fullName,
+                bio: profile.bio,
+                isPrivate: profile.isPrivate,
+            },
+            recentPosts: posts.map((p) => ({
+                imageUrl: p.imageUrl,
+                taggedUsers: p.taggedUsers,
+                mentionedUsers: p.mentionedUsers,
+            })),
+        };
+    });
 
     // 기존 결과에 추가
     const updatedAccountsWithPosts = [...accountsWithPosts, ...batchAccountsWithPosts];

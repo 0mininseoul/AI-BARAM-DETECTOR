@@ -1,5 +1,5 @@
 import { ApifyClient } from 'apify-client';
-import type { InstagramProfile, InstagramFollower } from '@/lib/types/instagram';
+import type { InstagramProfile, InstagramFollower, InstagramPost } from '@/lib/types/instagram';
 
 const client = new ApifyClient({
     token: process.env.APIFY_API_TOKEN,
@@ -119,7 +119,49 @@ export async function getFollowing(
 }
 
 /**
+ * latestPosts를 InstagramPost[] 형식으로 변환합니다.
+ */
+function parseLatestPosts(rawPosts: unknown[]): InstagramPost[] {
+    if (!rawPosts || !Array.isArray(rawPosts)) return [];
+
+    return rawPosts.slice(0, 10).map((item) => {
+        const post = item as Record<string, unknown>;
+        const type = (post.type as string)?.toLowerCase() || 'image';
+
+        // mentions 추출 (caption에서 @username 패턴)
+        const caption = post.caption as string || '';
+        const mentionRegex = /@([a-zA-Z0-9._]+)/g;
+        const mentionMatches = caption.match(mentionRegex);
+        const mentionedUsers = mentionMatches ? mentionMatches.map(m => m.slice(1)) : [];
+
+        // taggedUsers 추출
+        const taggedUsers: string[] = [];
+        const rawTaggedUsers = post.taggedUsers as Array<{ username?: string }> | undefined;
+        if (rawTaggedUsers && Array.isArray(rawTaggedUsers)) {
+            for (const user of rawTaggedUsers) {
+                if (user.username) taggedUsers.push(user.username);
+            }
+        }
+
+        return {
+            id: post.id as string || '',
+            shortCode: post.shortCode as string || '',
+            caption,
+            imageUrl: post.displayUrl as string | undefined,
+            videoUrl: post.videoUrl as string | undefined,
+            type: type === 'video' ? 'video' : type === 'sidecar' ? 'carousel' : 'image',
+            likesCount: post.likesCount as number || 0,
+            commentsCount: post.commentsCount as number || 0,
+            timestamp: post.timestamp as string || '',
+            taggedUsers,
+            mentionedUsers,
+        } as InstagramPost;
+    });
+}
+
+/**
  * 여러 계정의 프로필을 배치로 수집합니다.
+ * latestPosts도 함께 반환합니다.
  */
 export async function getProfilesBatch(
     usernames: string[],
@@ -143,6 +185,8 @@ export async function getProfilesBatch(
 
             for (const item of items) {
                 const profile = item as Record<string, unknown>;
+                const latestPosts = parseLatestPosts(profile.latestPosts as unknown[]);
+
                 results.push({
                     username: profile.username as string,
                     fullName: profile.fullName as string | undefined,
@@ -153,6 +197,7 @@ export async function getProfilesBatch(
                     postsCount: profile.postsCount as number,
                     isPrivate: profile.private as boolean,
                     isVerified: profile.verified as boolean,
+                    latestPosts,
                 });
             }
         } catch (error) {

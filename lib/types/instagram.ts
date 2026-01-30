@@ -10,6 +10,7 @@ export interface InstagramProfile {
     postsCount: number;
     isPrivate: boolean;
     isVerified: boolean;
+    latestPosts?: InstagramPost[]; // profile scraper에서 함께 반환
 }
 
 export interface InstagramPost {
