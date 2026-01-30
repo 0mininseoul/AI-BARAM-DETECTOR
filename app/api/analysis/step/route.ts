@@ -8,9 +8,7 @@ import {
     classifyByPrivacy,
     getProfilesBatch,
 } from '@/lib/services/instagram/scraper';
-import { analyzeGender } from '@/lib/services/ai/gender-analysis';
-import { analyzePhotogenicBatch } from '@/lib/services/ai/photogenic-analysis';
-import { analyzeExposureBatch } from '@/lib/services/ai/exposure-analysis';
+import { analyzeCombined } from '@/lib/services/ai/combined-analysis';
 import {
     getPhotogenicScore,
     getExposureScore,
@@ -84,14 +82,21 @@ export async function POST(request: Request) {
                 case 'profiles':
                     return await processProfiles(requestId, targetId, stepData);
 
-                case 'gender':
-                    return await processGender(requestId, stepData);
-
-                case 'features':
-                    return await processFeatures(requestId, targetId, stepData);
+                case 'analyze':
+                    return await processAnalyze(requestId, stepData);
 
                 case 'finalize':
                     return await processFinalize(requestId, analysisRequest, stepData);
+
+                // 레거시 단계 처리 (하위 호환성 - analyze로 리다이렉트)
+                case 'gender':
+                case 'features':
+                    await updateStep(requestId, 'analyze', { ...stepData, analyzeBatchIndex: 0, combinedResults: {} }, 50, 'AI 분석 준비 중...');
+                    return NextResponse.json({
+                        success: true,
+                        step: 'analyze',
+                        done: false,
+                    });
 
                 default:
                     return NextResponse.json({
@@ -250,15 +255,15 @@ async function processProfiles(
     if (batchIndex >= totalBatches) {
         const newStepData: StepData = {
             ...stepData,
-            genderBatchIndex: 0,
-            genderResults: {},
+            analyzeBatchIndex: 0,
+            combinedResults: {},
         };
 
-        await updateStep(requestId, 'gender', newStepData, 50, '성별 분석 준비 중...');
+        await updateStep(requestId, 'analyze', newStepData, 50, 'AI 분석 준비 중...');
 
         return NextResponse.json({
             success: true,
-            step: 'gender',
+            step: 'analyze',
             done: false,
             stats: {
                 profilesCollected: accountsWithPosts.length,
@@ -331,58 +336,54 @@ async function processProfiles(
     });
 }
 
-// Step 3: 성별 분석 (배치 처리)
-async function processGender(requestId: string, stepData: StepData) {
+// Step 3: 통합 분석 (성별 + 여성인 경우 외모/노출)
+async function processAnalyze(requestId: string, stepData: StepData) {
     const accountsWithPosts = stepData.accountsWithPosts || [];
-    const batchIndex = stepData.genderBatchIndex || 0;
-    const genderResults = stepData.genderResults || {};
+    const batchIndex = stepData.analyzeBatchIndex || 0;
+    const combinedResults = stepData.combinedResults || {};
 
     const totalBatches = Math.ceil(accountsWithPosts.length / BATCH_SIZE);
 
     if (batchIndex >= totalBatches) {
-        // 모든 배치 완료 - 여성 계정 필터링
+        // 모든 배치 완료 - 통계 계산 후 finalize 단계로
         const genderStats = { male: 0, female: 0, unknown: 0 };
-        const femaleAccounts: StepData['femaleAccounts'] = [];
+        let femaleCount = 0;
 
         for (const account of accountsWithPosts) {
-            const result = genderResults[account.profile.username];
+            const result = combinedResults[account.profile.username];
             if (!result) continue;
 
             if (result.gender === 'male') genderStats.male++;
-            else if (result.gender === 'female') genderStats.female++;
-            else genderStats.unknown++;
-
-            const { include } = classifyGenderStatus(result.gender, result.confidence);
-            if (include) {
-                femaleAccounts.push(account);
+            else if (result.gender === 'female') {
+                genderStats.female++;
+                const { include } = classifyGenderStatus(result.gender, result.genderConfidence);
+                if (include) femaleCount++;
             }
+            else genderStats.unknown++;
         }
 
         await supabaseAdmin
             .from('analysis_requests')
             .update({
-                opposite_gender_count: femaleAccounts.length,
+                opposite_gender_count: femaleCount,
                 gender_stats: genderStats,
             })
             .eq('id', requestId);
 
         const newStepData: StepData = {
             ...stepData,
-            femaleAccounts,
-            featureBatchIndex: 0,
-            photogenicResults: {},
-            exposureResults: {},
+            combinedResults,
         };
 
-        await updateStep(requestId, 'features', newStepData, 70, '외모 분석 준비 중...');
+        await updateStep(requestId, 'finalize', newStepData, 90, '결과 저장 준비 중...');
 
         return NextResponse.json({
             success: true,
-            step: 'features',
+            step: 'finalize',
             done: false,
             stats: {
                 genderStats,
-                femaleCount: femaleAccounts.length,
+                femaleCount,
             },
         });
     }
@@ -392,59 +393,71 @@ async function processGender(requestId: string, stepData: StepData) {
     const endIdx = Math.min(startIdx + BATCH_SIZE, accountsWithPosts.length);
     const batch = accountsWithPosts.slice(startIdx, endIdx);
 
-    const progress = calculateBatchProgress('gender', batchIndex, totalBatches);
+    const progress = calculateBatchProgress('analyze', batchIndex, totalBatches);
     await updateStep(
         requestId,
-        'gender',
+        'analyze',
         stepData,
         progress,
-        `성별 분석 중... (${batchIndex + 1}/${totalBatches})`
+        `AI 분석 중... (${batchIndex + 1}/${totalBatches})`
     );
 
-    // 배치 성별 분석 (5개씩 병렬 처리)
+    // 배치 통합 분석 (5개씩 병렬 처리)
     const subBatchSize = 5;
     for (let i = 0; i < batch.length; i += subBatchSize) {
         const subBatch = batch.slice(i, i + subBatchSize);
         const results = await Promise.all(
             subBatch.map(async (account) => {
                 try {
-                    const result = await analyzeGender({
-                        profile: account.profile as Parameters<typeof analyzeGender>[0]['profile'],
-                        recentPosts: account.recentPosts as Parameters<typeof analyzeGender>[0]['recentPosts'],
+                    const result = await analyzeCombined({
+                        profile: account.profile as Parameters<typeof analyzeCombined>[0]['profile'],
+                        recentPosts: account.recentPosts as Parameters<typeof analyzeCombined>[0]['recentPosts'],
                     });
                     return { username: account.profile.username, result };
                 } catch (error) {
-                    console.error(`Gender analysis failed for ${account.profile.username}:`, error);
+                    console.error(`Combined analysis failed for ${account.profile.username}:`, error);
                     return {
                         username: account.profile.username,
-                        result: { gender: 'unknown' as const, confidence: 0, reasoning: 'Analysis failed' },
+                        result: {
+                            gender: 'unknown' as const,
+                            genderConfidence: 0,
+                            genderReasoning: 'Analysis failed',
+                        },
                     };
                 }
             })
         );
 
         for (const { username, result } of results) {
-            genderResults[username] = result;
+            combinedResults[username] = {
+                gender: result.gender,
+                genderConfidence: result.genderConfidence,
+                photogenicGrade: result.photogenicGrade,
+                photogenicConfidence: result.photogenicConfidence,
+                skinVisibility: result.skinVisibility,
+                exposureConfidence: result.exposureConfidence,
+                ownerIdentified: result.ownerIdentified,
+            };
         }
     }
 
     const newStepData: StepData = {
         ...stepData,
-        genderResults,
-        genderBatchIndex: batchIndex + 1,
+        combinedResults,
+        analyzeBatchIndex: batchIndex + 1,
     };
 
     await updateStep(
         requestId,
-        'gender',
+        'analyze',
         newStepData,
-        calculateBatchProgress('gender', batchIndex + 1, totalBatches),
-        `성별 분석 중... (${batchIndex + 1}/${totalBatches})`
+        calculateBatchProgress('analyze', batchIndex + 1, totalBatches),
+        `AI 분석 중... (${batchIndex + 1}/${totalBatches})`
     );
 
     return NextResponse.json({
         success: true,
-        step: 'gender',
+        step: 'analyze',
         done: false,
         batchProgress: {
             current: batchIndex + 1,
@@ -453,98 +466,7 @@ async function processGender(requestId: string, stepData: StepData) {
     });
 }
 
-// Step 4: Photogenic/노출 분석 (배치 처리)
-async function processFeatures(requestId: string, targetId: string, stepData: StepData) {
-    const femaleAccounts = stepData.femaleAccounts || [];
-    const batchIndex = stepData.featureBatchIndex || 0;
-    const photogenicResults = stepData.photogenicResults || {};
-    const exposureResults = stepData.exposureResults || {};
-
-    const totalBatches = Math.ceil(femaleAccounts.length / BATCH_SIZE);
-
-    if (batchIndex >= totalBatches || femaleAccounts.length === 0) {
-        // 모든 배치 완료 - finalize 단계로
-        const newStepData: StepData = {
-            ...stepData,
-            photogenicResults,
-            exposureResults,
-        };
-
-        await updateStep(requestId, 'finalize', newStepData, 90, '결과 저장 준비 중...');
-
-        return NextResponse.json({
-            success: true,
-            step: 'finalize',
-            done: false,
-        });
-    }
-
-    // 현재 배치 처리
-    const startIdx = batchIndex * BATCH_SIZE;
-    const endIdx = Math.min(startIdx + BATCH_SIZE, femaleAccounts.length);
-    const batch = femaleAccounts.slice(startIdx, endIdx);
-
-    const progress = calculateBatchProgress('features', batchIndex, totalBatches);
-    await updateStep(
-        requestId,
-        'features',
-        stepData,
-        progress,
-        `외모/노출 분석 중... (${batchIndex + 1}/${totalBatches})`
-    );
-
-    // Photogenic 분석
-    const photogenicInputs = batch.map((a) => ({
-        username: a.profile.username,
-        profilePicUrl: a.profile.profilePicUrl,
-        postImageUrls: a.recentPosts.map((p) => p.imageUrl).filter(Boolean) as string[],
-    }));
-    const photogenicBatchResults = await analyzePhotogenicBatch(photogenicInputs);
-
-    for (const [username, result] of photogenicBatchResults) {
-        photogenicResults[username] = {
-            photogenicGrade: result.photogenicGrade,
-            confidence: result.confidence,
-        };
-    }
-
-    // 노출 분석
-    const exposureBatchResults = await analyzeExposureBatch(photogenicInputs);
-
-    for (const [username, result] of exposureBatchResults) {
-        exposureResults[username] = {
-            skinVisibility: result.skinVisibility,
-            confidence: result.confidence,
-        };
-    }
-
-    const newStepData: StepData = {
-        ...stepData,
-        photogenicResults,
-        exposureResults,
-        featureBatchIndex: batchIndex + 1,
-    };
-
-    await updateStep(
-        requestId,
-        'features',
-        newStepData,
-        calculateBatchProgress('features', batchIndex + 1, totalBatches),
-        `외모/노출 분석 중... (${batchIndex + 1}/${totalBatches})`
-    );
-
-    return NextResponse.json({
-        success: true,
-        step: 'features',
-        done: false,
-        batchProgress: {
-            current: batchIndex + 1,
-            total: totalBatches,
-        },
-    });
-}
-
-// Step 5: 점수 계산 + 결과 저장
+// Step 4: 점수 계산 + 결과 저장
 async function processFinalize(
     requestId: string,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -552,20 +474,34 @@ async function processFinalize(
     stepData: StepData
 ) {
     const targetId = analysisRequest.target_instagram_id;
-    const femaleAccounts = stepData.femaleAccounts || [];
-    const genderResults = stepData.genderResults || {};
-    const photogenicResults = stepData.photogenicResults || {};
-    const exposureResults = stepData.exposureResults || {};
+    const accountsWithPosts = stepData.accountsWithPosts || [];
+    const combinedResults = stepData.combinedResults || {};
+
+    // 레거시 데이터 지원 (하위 호환성)
+    const legacyGenderResults = stepData.genderResults || {};
+    const legacyPhotogenicResults = stepData.photogenicResults || {};
+    const legacyExposureResults = stepData.exposureResults || {};
 
     await updateStep(requestId, 'finalize', stepData, 92, '점수 계산 중...');
 
     const analyzedAccounts: AnalyzedAccount[] = [];
 
-    for (const account of femaleAccounts) {
+    for (const account of accountsWithPosts) {
         const username = account.profile.username;
-        const genderResult = genderResults[username];
-        const photogenicResult = photogenicResults[username];
-        const exposureResult = exposureResults[username];
+
+        // 통합 결과 또는 레거시 결과 사용
+        const combinedResult = combinedResults[username];
+        const legacyGender = legacyGenderResults[username];
+        const legacyPhotogenic = legacyPhotogenicResults[username];
+        const legacyExposure = legacyExposureResults[username];
+
+        // 성별 판단
+        const gender = combinedResult?.gender || legacyGender?.gender || 'unknown';
+        const genderConfidence = combinedResult?.genderConfidence || legacyGender?.confidence || 0;
+
+        // 여성이 아니면 건너뛰기
+        const { include, status: genderStatus } = classifyGenderStatus(gender, genderConfidence);
+        if (!include) continue;
 
         // 태그 확인
         let isTagged = false;
@@ -576,27 +512,22 @@ async function processFinalize(
             }
         }
 
-        // 점수 계산
-        const photogenicGrade = photogenicResult?.photogenicGrade || 1;
-        const exposureLevel = exposureResult?.skinVisibility || 'low';
+        // 점수 계산 (통합 결과 또는 레거시 결과 사용)
+        const photogenicGrade = combinedResult?.photogenicGrade || legacyPhotogenic?.photogenicGrade || 1;
+        const exposureLevel = combinedResult?.skinVisibility || legacyExposure?.skinVisibility || 'low';
 
         const photogenicScore = getPhotogenicScore(photogenicGrade);
         const exposureScore = getExposureScore(exposureLevel);
         const tagScore = isTagged ? TAG_SCORE : 0;
         const totalScore = photogenicScore + exposureScore + tagScore;
 
-        const { status: genderStatus } = classifyGenderStatus(
-            genderResult?.gender || 'unknown',
-            genderResult?.confidence || 0
-        );
-
         analyzedAccounts.push({
             username,
             profilePicUrl: account.profile.profilePicUrl,
             bio: account.profile.bio,
             isPrivate: account.profile.isPrivate,
-            gender: genderResult?.gender || 'unknown',
-            genderConfidence: genderResult?.confidence || 0,
+            gender,
+            genderConfidence,
             genderStatus,
             photogenicGrade,
             exposureLevel,

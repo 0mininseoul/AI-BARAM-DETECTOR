@@ -33,6 +33,22 @@ export interface IntimacyAnalysisResponse {
     reasoning: string;
 }
 
+// AI 통합 분석 응답 (성별 + 여성인 경우 외모/노출)
+export interface CombinedAnalysisResponse {
+    // 성별 분석 (항상 포함)
+    gender: 'male' | 'female' | 'unknown';
+    genderConfidence: number;
+    genderReasoning: string;
+
+    // 외모/노출 분석 (여성인 경우에만 포함)
+    photogenicGrade?: 1 | 2 | 3 | 4 | 5;
+    photogenicConfidence?: number;
+    skinVisibility?: 'high' | 'low';
+    exposureConfidence?: number;
+    ownerIdentified?: boolean;
+    featureReasoning?: string;
+}
+
 // 분석된 계정 데이터
 export interface AnalyzedAccount {
     username: string;

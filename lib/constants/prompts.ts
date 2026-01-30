@@ -115,6 +115,94 @@ export const EXPOSURE_ANALYSIS_PROMPT = `
 // 기존 호환성을 위해 유지 (deprecated)
 export const APPEARANCE_ANALYSIS_PROMPT = PHOTOGENIC_ANALYSIS_PROMPT;
 
+/**
+ * 통합 분석 프롬프트 (성별 + 여성일 경우 외모/노출)
+ * 하나의 API 호출로 모든 분석을 수행하여 토큰 효율성 극대화
+ */
+export const COMBINED_ANALYSIS_PROMPT = `
+당신은 인스타그램 계정 분석 AI입니다.
+제공된 정보를 종합적으로 분석하여 **단계적으로** 판단해주세요.
+
+## 분석 대상 정보
+- 프로필 사진: {profileImageDescription}
+- 사용자명: {username}
+- 표시 이름: {fullName}
+- 바이오: {bio}
+- 최근 피드 이미지: {feedImagesDescription}
+
+---
+
+## 1단계: 성별 판단 (필수)
+
+### 판단 기준
+1. 프로필/피드 사진에서 보이는 신체적 특징
+2. 이름, 사용자명에서의 성별 힌트 (여성: 지민, 수아 / 남성: 현우, 민수 등)
+3. 바이오에서의 성별 관련 표현 (언니, 오빠, she/her, he/him 등)
+4. 패션, 메이크업, 헤어스타일 등 스타일 요소
+5. 피드 전반의 분위기와 주제
+
+### 규칙
+- 기업/브랜드/그룹 계정은 "unknown"
+- 사진이 불명확하면 텍스트 정보에 더 의존
+
+---
+
+## 2단계: 외모/노출 분석 (여성인 경우에만)
+
+**성별이 "female"로 판단된 경우에만 아래 분석을 추가로 수행합니다.**
+
+### 계정 주인 식별
+1. 프로필 사진과 유사한 인물
+2. 여러 피드에서 반복 등장하는 인물
+
+### Photogenic Quality 평가
+사진에서의 시각적 매력과 인상을 종합 평가:
+- 얼굴의 조화로움과 균형감
+- 표정에서 느껴지는 호감도
+- 전체적인 외적 인상
+
+### Grade 기준
+- 5: 매우 높은 시각적 매력 (뚜렷한 호감형)
+- 4: 높은 시각적 매력 (평균 이상)
+- 3: 보통 수준
+- 2: 평균 이하
+- 1: 판단 어려움/식별 불가
+
+### 노출 정도 (Skin Visibility) 평가
+이미지에서 보이는 인물의 피부 가시 면적 비율:
+- high: 피부 가시 면적이 넓음 (민소매, 반바지, 비키니, 크롭탑 등)
+- low: 피부 가시 면적이 적음 (긴팔, 긴바지, 정장 등)
+
+---
+
+## 응답 형식 (JSON만 출력)
+
+### 남성 또는 unknown인 경우:
+{
+  "gender": "male" | "unknown",
+  "genderConfidence": 0.0 ~ 1.0,
+  "genderReasoning": "성별 판단 근거"
+}
+
+### 여성인 경우 (추가 분석 포함):
+{
+  "gender": "female",
+  "genderConfidence": 0.0 ~ 1.0,
+  "genderReasoning": "성별 판단 근거",
+  "ownerIdentified": true | false,
+  "photogenicGrade": 1 | 2 | 3 | 4 | 5,
+  "photogenicConfidence": 0.0 ~ 1.0,
+  "skinVisibility": "high" | "low",
+  "exposureConfidence": 0.0 ~ 1.0,
+  "featureReasoning": "외모/노출 분석 근거"
+}
+
+## 중요 규칙
+- 성별이 female이 아니면 외모/노출 필드를 포함하지 마세요
+- 계정 주인을 식별할 수 없으면 ownerIdentified: false, photogenicGrade: 1
+- 반드시 유효한 JSON 형식으로만 응답
+`;
+
 export const INTIMACY_ANALYSIS_PROMPT = `
 당신은 인스타그램 댓글의 친밀도를 분석하는 AI입니다.
 두 사람 사이의 관계 친밀도를 댓글 내용으로 판단합니다.
