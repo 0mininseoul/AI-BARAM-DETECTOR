@@ -8,6 +8,46 @@ interface PageProps {
     params: Promise<{ requestId: string }>;
 }
 
+// Instagram CDN URL을 프록시 URL로 변환
+const getProxyImageUrl = (url: string | undefined): string | undefined => {
+    if (!url) return undefined;
+    // 이미 프록시 URL이면 그대로 반환
+    if (url.startsWith('/api/image-proxy')) return url;
+    // Instagram CDN URL을 프록시 URL로 변환
+    return `/api/image-proxy?url=${encodeURIComponent(url)}`;
+};
+
+// 프로필 이미지 컴포넌트 (로드 실패 시 fallback)
+function ProfileImage({
+    src,
+    fallbackIcon,
+    className = "w-full h-full object-cover"
+}: {
+    src?: string;
+    fallbackIcon: string;
+    className?: string;
+}) {
+    const [error, setError] = useState(false);
+    const proxiedSrc = getProxyImageUrl(src);
+
+    if (!proxiedSrc || error) {
+        return (
+            <div className="w-full h-full flex items-center justify-center text-xl">
+                {fallbackIcon}
+            </div>
+        );
+    }
+
+    return (
+        <img
+            src={proxiedSrc}
+            alt=""
+            className={className}
+            onError={() => setError(true)}
+        />
+    );
+}
+
 interface GenderRatio {
     male: { count: number; percentage: number };
     female: { count: number; percentage: number };
@@ -16,6 +56,7 @@ interface GenderRatio {
 
 interface FemaleAccount {
     instagramId: string;
+    fullName?: string;
     profileImage?: string;
     instagramUrl: string;
     riskGrade: 'high_risk' | 'caution' | 'normal';
@@ -24,6 +65,7 @@ interface FemaleAccount {
 
 interface PrivateAccount {
     instagramId: string;
+    fullName?: string;
     profileImage?: string;
     instagramUrl: string;
 }
@@ -206,7 +248,7 @@ export default function ResultPage({ params }: PageProps) {
                             </p>
                         ) : (
                             <div className="space-y-3 max-h-[400px] overflow-y-auto">
-                                {femaleAccounts.map((account, index) => {
+                                {femaleAccounts.map((account) => {
                                     const style = getRiskGradeStyle(account.riskGrade);
                                     return (
                                         <div
@@ -216,17 +258,10 @@ export default function ResultPage({ params }: PageProps) {
                                             <div className="flex items-start gap-3">
                                                 {/* 프로필 이미지 */}
                                                 <div className="w-12 h-12 bg-gray-800 rounded-full flex-shrink-0 overflow-hidden">
-                                                    {account.profileImage ? (
-                                                        <img
-                                                            src={account.profileImage}
-                                                            alt=""
-                                                            className="w-full h-full object-cover"
-                                                        />
-                                                    ) : (
-                                                        <div className="w-full h-full flex items-center justify-center text-xl">
-                                                            👤
-                                                        </div>
-                                                    )}
+                                                    <ProfileImage
+                                                        src={account.profileImage}
+                                                        fallbackIcon="👤"
+                                                    />
                                                 </div>
 
                                                 {/* 정보 */}
@@ -244,8 +279,10 @@ export default function ResultPage({ params }: PageProps) {
                                                             {style.label}
                                                         </span>
                                                     </div>
-                                                    {account.bio && (
+                                                    {(account.fullName || account.bio) && (
                                                         <p className="text-gray-400 text-sm truncate">
+                                                            {account.fullName && <span>{account.fullName}</span>}
+                                                            {account.fullName && account.bio && ' · '}
                                                             {account.bio}
                                                         </p>
                                                     )}
@@ -291,28 +328,26 @@ export default function ResultPage({ params }: PageProps) {
                                         <div className="flex items-center gap-3">
                                             {/* 프로필 이미지 */}
                                             <div className="w-10 h-10 bg-gray-700 rounded-full flex-shrink-0 overflow-hidden">
-                                                {account.profileImage ? (
-                                                    <img
-                                                        src={account.profileImage}
-                                                        alt=""
-                                                        className="w-full h-full object-cover"
-                                                    />
-                                                ) : (
-                                                    <div className="w-full h-full flex items-center justify-center text-lg">
-                                                        🔒
-                                                    </div>
-                                                )}
+                                                <ProfileImage
+                                                    src={account.profileImage}
+                                                    fallbackIcon="🔒"
+                                                />
                                             </div>
 
                                             {/* ID */}
-                                            <a
-                                                href={account.instagramUrl}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                className="font-medium text-gray-300 hover:text-white truncate flex-1"
-                                            >
-                                                @{account.instagramId}
-                                            </a>
+                                            <div className="flex-1 min-w-0">
+                                                <a
+                                                    href={account.instagramUrl}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="font-medium text-gray-300 hover:text-white truncate block"
+                                                >
+                                                    @{account.instagramId}
+                                                </a>
+                                                {account.fullName && (
+                                                    <p className="text-gray-500 text-xs truncate">{account.fullName}</p>
+                                                )}
+                                            </div>
 
                                             {/* 인스타 링크 */}
                                             <a

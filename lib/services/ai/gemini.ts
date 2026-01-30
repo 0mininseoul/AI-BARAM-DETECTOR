@@ -62,9 +62,51 @@ export async function analyzeWithGemini<T>(
 
 /**
  * 이미지 URL을 base64로 변환
+ * Instagram CDN URL은 지역 기반이라 Vercel 서버에서 직접 접근이 불가할 수 있음
+ * 실패 시 외부 프록시 서비스(weserv.nl)를 통해 재시도
  */
 export async function imageUrlToBase64(url: string): Promise<string> {
-    const response = await fetch(url);
-    const buffer = await response.arrayBuffer();
-    return Buffer.from(buffer).toString('base64');
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000); // 15초 타임아웃
+
+    try {
+        // 1차 시도: 직접 fetch
+        const response = await fetch(url, {
+            signal: controller.signal,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+                'Referer': 'https://www.instagram.com/',
+            },
+        });
+
+        if (response.ok) {
+            const buffer = await response.arrayBuffer();
+            return Buffer.from(buffer).toString('base64');
+        }
+
+        throw new Error(`Direct fetch failed: ${response.status}`);
+    } catch (directError) {
+        // 2차 시도: weserv.nl 프록시 사용
+        console.log(`Direct fetch failed for ${url.substring(0, 50)}..., trying proxy`);
+
+        try {
+            const proxyUrl = `https://images.weserv.nl/?url=${encodeURIComponent(url)}&default=1`;
+            const proxyResponse = await fetch(proxyUrl, {
+                signal: controller.signal,
+            });
+
+            if (!proxyResponse.ok) {
+                throw new Error(`Proxy fetch failed: ${proxyResponse.status}`);
+            }
+
+            const buffer = await proxyResponse.arrayBuffer();
+            return Buffer.from(buffer).toString('base64');
+        } catch (proxyError) {
+            console.warn(`Failed to convert image via proxy: ${url.substring(0, 80)}...`, proxyError);
+            throw proxyError;
+        }
+    } finally {
+        clearTimeout(timeoutId);
+    }
 }
