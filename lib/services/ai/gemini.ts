@@ -12,34 +12,52 @@ export async function analyzeWithGemini<T>(
     prompt: string,
     images?: string[]
 ): Promise<T> {
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+    // API 호출 전 로그
+    console.log('--- AnalyzeWithGemini Start ---');
+    console.log('Prompt (first 200 chars):', prompt.substring(0, 200) + '...');
+    console.log('Image count:', images?.length ?? 0);
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const parts: any[] = [{ text: prompt }];
+    try {
+        const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
 
-    // 이미지가 있으면 추가
-    if (images && images.length > 0) {
-        for (const image of images) {
-            parts.push({
-                inlineData: {
-                    mimeType: 'image/jpeg',
-                    data: image,
-                },
-            });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const parts: any[] = [{ text: prompt }];
+
+        // 이미지가 있으면 추가
+        if (images && images.length > 0) {
+            for (const image of images) {
+                parts.push({
+                    inlineData: {
+                        mimeType: 'image/jpeg',
+                        data: image,
+                    },
+                });
+            }
         }
+
+        const result = await model.generateContent(parts);
+        const response = await result.response;
+        const text = response.text();
+
+        // Raw Response 로그
+        console.log('Gemini Raw Response:', text);
+
+        // JSON 파싱
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) {
+            console.error('JSON Parse Failed. Raw text:', text);
+            throw new Error('Failed to parse AI response as JSON');
+        }
+
+        const parsed = JSON.parse(jsonMatch[0]) as T;
+        console.log('Parsed JSON:', JSON.stringify(parsed, null, 2));
+        console.log('--- AnalyzeWithGemini End ---');
+
+        return parsed;
+    } catch (error) {
+        console.error('Gemini API Error:', error);
+        throw error;
     }
-
-    const result = await model.generateContent(parts);
-    const response = await result.response;
-    const text = response.text();
-
-    // JSON 파싱
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-        throw new Error('Failed to parse AI response as JSON');
-    }
-
-    return JSON.parse(jsonMatch[0]) as T;
 }
 
 /**
