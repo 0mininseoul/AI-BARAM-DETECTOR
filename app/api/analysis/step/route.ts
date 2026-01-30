@@ -532,6 +532,7 @@ async function processFinalize(
 
         analyzedAccounts.push({
             username,
+            fullName: account.profile.fullName,
             profilePicUrl: account.profile.profilePicUrl,
             bio: account.profile.bio,
             isPrivate: account.profile.isPrivate,
@@ -565,6 +566,7 @@ async function processFinalize(
             request_id: requestId,
             rank: result.rank,
             suspect_instagram_id: result.username,
+            suspect_full_name: result.fullName,
             suspect_profile_image: result.profilePicUrl,
             bio: result.bio,
             risk_score: result.totalScore,
