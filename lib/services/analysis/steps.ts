@@ -88,6 +88,8 @@ export interface StepData {
         skinVisibility?: 'high' | 'low';
         exposureConfidence?: number;
         ownerIdentified?: boolean;
+        isMarried?: boolean;
+        marriedConfidence?: number;
     }>;
 
     // 레거시 필드 (하위 호환성)

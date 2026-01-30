@@ -147,13 +147,30 @@ export const COMBINED_ANALYSIS_PROMPT = `
 
 ---
 
-## 2단계: 외모/노출 분석 (여성인 경우에만)
+## 2단계: 외모/노출/기혼 분석 (여성인 경우에만)
 
 **성별이 "female"로 판단된 경우에만 아래 분석을 추가로 수행합니다.**
 
 ### 계정 주인 식별
 1. 프로필 사진과 유사한 인물
 2. 여러 피드에서 반복 등장하는 인물
+
+### 기혼 여부 판단 (isMarried)
+다음 기준 중 하나라도 해당하면 기혼으로 판단:
+
+**텍스트 기반 (바이오, 캡션):**
+- 결혼 관련 키워드: 유부녀, 기혼, 결혼, married, wife, hubby, 남편, 신혼, 웨딩
+- 육아/엄마 관련: 엄마, 맘, mom, mother, 아이맘, 육아, 워킹맘, 애기엄마
+- 가족 해시태그: #신혼부부, #결혼기념일, #우리아기, #육아스타그램
+- 남편/아이 언급: "우리 남편", "우리 아들/딸", "첫째/둘째"
+
+**이미지 기반:**
+- 결혼반지가 명확히 보이는 사진
+- 아이와 함께 찍은 육아 사진 (본인이 엄마로 보이는 경우)
+- 웨딩 드레스/결혼식 사진
+- 가족 단체 사진 (본인+남편+아이)
+
+**중요**: 단순히 "언니", "friend" 등의 표현은 기혼 판단 근거가 아님
 
 ### Photogenic Quality 평가
 사진에서의 시각적 매력과 인상을 종합 평가:
@@ -190,16 +207,19 @@ export const COMBINED_ANALYSIS_PROMPT = `
   "genderConfidence": 0.0 ~ 1.0,
   "genderReasoning": "성별 판단 근거",
   "ownerIdentified": true | false,
+  "isMarried": true | false,
+  "marriedConfidence": 0.0 ~ 1.0,
   "photogenicGrade": 1 | 2 | 3 | 4 | 5,
   "photogenicConfidence": 0.0 ~ 1.0,
   "skinVisibility": "high" | "low",
   "exposureConfidence": 0.0 ~ 1.0,
-  "featureReasoning": "외모/노출 분석 근거"
+  "featureReasoning": "외모/노출/기혼 분석 근거"
 }
 
 ## 중요 규칙
-- 성별이 female이 아니면 외모/노출 필드를 포함하지 마세요
+- 성별이 female이 아니면 외모/노출/기혼 필드를 포함하지 마세요
 - 계정 주인을 식별할 수 없으면 ownerIdentified: false, photogenicGrade: 1
+- 기혼 여부가 불확실하면 isMarried: false로 설정 (보수적 접근)
 - 반드시 유효한 JSON 형식으로만 응답
 `;
 

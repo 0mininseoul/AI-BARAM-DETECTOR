@@ -4,6 +4,7 @@ export interface InstagramProfile {
     username: string;
     fullName?: string;
     bio?: string;
+    externalUrl?: string; // 프로필 링크 (bio가 없을 때 대체용)
     profilePicUrl?: string;
     followersCount: number;
     followingCount: number;

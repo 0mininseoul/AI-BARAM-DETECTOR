@@ -291,12 +291,14 @@ async function processProfiles(
     // 프로필과 게시물 매핑 (latestPosts 사용 - 별도 API 호출 불필요)
     const batchAccountsWithPosts = profiles.map((profile) => {
         const posts = profile.latestPosts || [];
+        // bio가 없으면 externalUrl을 대신 사용
+        const displayBio = profile.bio || profile.externalUrl;
         return {
             profile: {
                 username: profile.username,
                 profilePicUrl: profile.profilePicUrl,
                 fullName: profile.fullName,
-                bio: profile.bio,
+                bio: displayBio,
                 isPrivate: profile.isPrivate,
             },
             recentPosts: posts.map((p) => ({
@@ -437,6 +439,8 @@ async function processAnalyze(requestId: string, stepData: StepData) {
                 skinVisibility: result.skinVisibility,
                 exposureConfidence: result.exposureConfidence,
                 ownerIdentified: result.ownerIdentified,
+                isMarried: result.isMarried,
+                marriedConfidence: result.marriedConfidence,
             };
         }
     }
@@ -515,11 +519,16 @@ async function processFinalize(
         // 점수 계산 (통합 결과 또는 레거시 결과 사용)
         const photogenicGrade = combinedResult?.photogenicGrade || legacyPhotogenic?.photogenicGrade || 1;
         const exposureLevel = combinedResult?.skinVisibility || legacyExposure?.skinVisibility || 'low';
+        const isMarried = combinedResult?.isMarried || false;
 
-        const photogenicScore = getPhotogenicScore(photogenicGrade);
-        const exposureScore = getExposureScore(exposureLevel);
-        const tagScore = isTagged ? TAG_SCORE : 0;
-        const totalScore = photogenicScore + exposureScore + tagScore;
+        // 기혼녀인 경우 점수 0점 처리 (위험하지 않음)
+        let totalScore = 0;
+        if (!isMarried) {
+            const photogenicScore = getPhotogenicScore(photogenicGrade);
+            const exposureScore = getExposureScore(exposureLevel);
+            const tagScore = isTagged ? TAG_SCORE : 0;
+            totalScore = photogenicScore + exposureScore + tagScore;
+        }
 
         analyzedAccounts.push({
             username,

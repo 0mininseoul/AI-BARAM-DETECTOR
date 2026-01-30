@@ -191,6 +191,7 @@ export async function getProfilesBatch(
                     username: profile.username as string,
                     fullName: profile.fullName as string | undefined,
                     bio: profile.biography as string | undefined,
+                    externalUrl: profile.externalUrl as string | undefined,
                     profilePicUrl: profile.profilePicUrl as string | undefined,
                     followersCount: profile.followersCount as number,
                     followingCount: profile.followsCount as number,
