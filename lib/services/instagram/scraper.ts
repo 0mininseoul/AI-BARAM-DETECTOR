@@ -15,6 +15,10 @@ export async function getInstagramProfile(username: string): Promise<InstagramPr
             usernames: [username],
         });
 
+        if (run.status === 'ABORTED') {
+            throw new Error('Scraping run aborted by user');
+        }
+
         const { items } = await client.dataset(run.defaultDatasetId).listItems();
 
         if (items.length === 0) {
@@ -54,6 +58,10 @@ export async function getFollowers(
             max_count: limit,
         });
 
+        if (run.status === 'ABORTED') {
+            throw new Error('Scraping run aborted by user');
+        }
+
         const { items } = await client.dataset(run.defaultDatasetId).listItems();
 
         return items.map((item: Record<string, unknown>) => ({
@@ -91,6 +99,10 @@ export async function getFollowing(
             usernames: [username],
         });
 
+        if (run.status === 'ABORTED') {
+            throw new Error('Scraping run aborted by user');
+        }
+
         const { items } = await client.dataset(run.defaultDatasetId).listItems();
 
         return items.map((item: Record<string, unknown>) => ({
@@ -122,6 +134,10 @@ export async function getProfilesBatch(
             const run = await client.actor('apify/instagram-profile-scraper').call({
                 usernames: batch,
             });
+
+            if (run.status === 'ABORTED') {
+                throw new Error('Scraping run aborted by user');
+            }
 
             const { items } = await client.dataset(run.defaultDatasetId).listItems();
 
