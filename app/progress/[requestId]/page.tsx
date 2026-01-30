@@ -150,7 +150,7 @@ export default function ProgressPage({ params }: PageProps) {
                 </div>
                 <div className="flex justify-between mt-2 text-sm text-gray-500">
                     <span>{data.progress}%</span>
-                    <span>약 3~5분 소요</span>
+                    <span>약 5분 소요</span>
                 </div>
             </div>
 
@@ -198,12 +198,12 @@ export default function ProgressPage({ params }: PageProps) {
                 })}
             </div>
 
-            {/* 이탈 안내 */}
-            <div className="mt-8 p-4 bg-gray-900/50 rounded-xl border border-gray-800 max-w-sm">
-                <p className="text-sm text-gray-400 text-center">
-                    💡 페이지를 닫아도 분석은 계속됩니다.
+            {/* 이탈 주의 안내 */}
+            <div className="mt-8 p-4 bg-red-900/20 rounded-xl border border-red-500/30 max-w-sm">
+                <p className="text-sm text-red-300 text-center">
+                    ⚠️ 분석이 완료될 때까지 이 페이지를 닫지 마세요!
                     <br />
-                    완료되면 이메일로 알려드릴게요!
+                    <span className="text-gray-400">페이지를 닫으면 분석이 중단됩니다.</span>
                 </p>
             </div>
         </div>

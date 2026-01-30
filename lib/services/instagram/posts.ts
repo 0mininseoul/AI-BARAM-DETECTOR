@@ -9,16 +9,17 @@ const client = new ApifyClient({
  * 인스타그램 게시물을 수집합니다.
  * 
  * 공식 Actor: apify/instagram-post-scraper
- * 입력: usernames 배열 (username 단일이 아님!)
+ * 입력: directUrls 배열 (프로필 URL 형식)
  */
 export async function getPosts(
     username: string,
     limit: number = 20
 ): Promise<InstagramPost[]> {
     try {
-        // instagram-post-scraper는 usernames 배열을 입력으로 받음
+        // instagram-post-scraper는 directUrls 배열을 입력으로 받음 (프로필 URL)
+        const profileUrl = `https://www.instagram.com/${username}/`;
         const run = await client.actor('apify/instagram-post-scraper').call({
-            usernames: [username],
+            directUrls: [profileUrl],
             resultsLimit: limit,
         });
 
