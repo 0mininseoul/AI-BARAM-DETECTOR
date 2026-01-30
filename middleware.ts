@@ -6,8 +6,10 @@ export async function middleware(request: NextRequest) {
         request,
     });
 
-    // Auth Callback 및 Static 파일은 미들웨어 로직 건너뛰기
+    // Auth Callback, API, Static 파일은 미들웨어 로직 건너뛰기
+    // 특히 /api/payment/webhook은 외부(Polar)에서 직접 요청이 오므로 반드시 제외해야 함
     if (request.nextUrl.pathname.startsWith('/auth') ||
+        request.nextUrl.pathname.startsWith('/api') ||
         request.nextUrl.pathname.startsWith('/_next') ||
         request.nextUrl.pathname.startsWith('/static')) {
         return supabaseResponse;
