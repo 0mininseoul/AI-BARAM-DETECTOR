@@ -100,6 +100,7 @@ export async function POST(request: Request) {
                         request_id: requestId,
                         instagram_id: account.username,
                         profile_image: account.profilePicUrl,
+                        full_name: account.fullName,
                     }))
                 );
             }
@@ -199,6 +200,7 @@ export async function POST(request: Request) {
 
                 analyzedAccounts.push({
                     username,
+                    fullName: account.profile.fullName,
                     profilePicUrl: account.profile.profilePicUrl,
                     bio: account.profile.bio,
                     isPrivate: account.profile.isPrivate,
@@ -234,6 +236,7 @@ export async function POST(request: Request) {
                     request_id: requestId,
                     rank: result.rank,
                     suspect_instagram_id: result.username,
+                    suspect_full_name: result.fullName,
                     suspect_profile_image: result.profilePicUrl,
                     bio: result.bio,
                     risk_score: result.totalScore,

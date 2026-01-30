@@ -63,7 +63,7 @@ export async function GET(
         // 5. 비공개 계정 조회
         const { data: privateAccounts } = await supabase
             .from('private_accounts')
-            .select('instagram_id, profile_image')
+            .select('instagram_id, profile_image, full_name')
             .eq('request_id', requestId);
 
         // 6. 성별 비율 계산
@@ -87,6 +87,7 @@ export async function GET(
         // 7. 여성 계정 목록 (결제 후 모두 공개)
         const femaleAccounts = results?.map((result) => ({
             instagramId: result.suspect_instagram_id,
+            fullName: result.suspect_full_name,
             profileImage: result.suspect_profile_image,
             instagramUrl: `https://instagram.com/${result.suspect_instagram_id}`,
             riskGrade: result.risk_grade as 'high_risk' | 'caution' | 'normal',
@@ -96,6 +97,7 @@ export async function GET(
         // 8. 비공개 계정 목록
         const privateAccountsList = privateAccounts?.map((account) => ({
             instagramId: account.instagram_id,
+            fullName: account.full_name,
             profileImage: account.profile_image,
             instagramUrl: `https://instagram.com/${account.instagram_id}`,
         })) || [];

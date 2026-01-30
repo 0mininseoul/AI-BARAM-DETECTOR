@@ -34,6 +34,7 @@ export interface AnalysisResult {
     rank: number;
     suspect_instagram_id: string;
     suspect_profile_image?: string;
+    suspect_full_name?: string;
     risk_score: number;
 
     // 상호작용 카운트
@@ -91,6 +92,7 @@ export interface PrivateAccount {
     request_id: string;
     instagram_id: string;
     profile_image?: string;
+    full_name?: string;
     created_at: string;
 }
 

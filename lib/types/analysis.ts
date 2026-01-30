@@ -36,6 +36,7 @@ export interface IntimacyAnalysisResponse {
 // 분석된 계정 데이터
 export interface AnalyzedAccount {
     username: string;
+    fullName?: string;
     profilePicUrl?: string;
     bio?: string;
     isPrivate: boolean;
@@ -76,6 +77,7 @@ export interface AnalysisSummary {
 // 결과 페이지용 여성 계정 데이터
 export interface FemaleAccountResult {
     instagramId: string;
+    fullName?: string;
     profileImage?: string;
     instagramUrl: string;
     riskGrade: 'high_risk' | 'caution' | 'normal';
@@ -85,6 +87,7 @@ export interface FemaleAccountResult {
 // 결과 페이지용 비공개 계정 데이터
 export interface PrivateAccountResult {
     instagramId: string;
+    fullName?: string;
     profileImage?: string;
     instagramUrl: string;
 }

@@ -7,4 +7,3 @@ export {
     classifyByPrivacy,
     getProfilesBatch,
 } from './scraper';
-export { getPosts, getPostComments } from './posts';
