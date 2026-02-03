@@ -189,6 +189,7 @@ async function processCollect(
                 request_id: requestId,
                 instagram_id: account.username,
                 profile_image: account.profilePicUrl,
+                full_name: account.fullName,
             }))
         );
     }
@@ -441,6 +442,8 @@ async function processAnalyze(requestId: string, stepData: StepData) {
                 ownerIdentified: result.ownerIdentified,
                 isMarried: result.isMarried,
                 marriedConfidence: result.marriedConfidence,
+                isForeigner: result.isForeigner,
+                foreignerConfidence: result.foreignerConfidence,
             };
         }
     }
@@ -520,10 +523,11 @@ async function processFinalize(
         const photogenicGrade = combinedResult?.photogenicGrade || legacyPhotogenic?.photogenicGrade || 1;
         const exposureLevel = combinedResult?.skinVisibility || legacyExposure?.skinVisibility || 'low';
         const isMarried = combinedResult?.isMarried || false;
+        const isForeigner = combinedResult?.isForeigner || false;
 
-        // 기혼녀인 경우 점수 0점 처리 (위험하지 않음)
+        // 기혼녀 또는 해외 계정인 경우 점수 0점 처리 (위험하지 않음)
         let totalScore = 0;
-        if (!isMarried) {
+        if (!isMarried && !isForeigner) {
             const photogenicScore = getPhotogenicScore(photogenicGrade);
             const exposureScore = getExposureScore(exposureLevel);
             const tagScore = isTagged ? TAG_SCORE : 0;

@@ -159,7 +159,7 @@ export async function POST(request: Request) {
             }));
             const photogenicResults = await analyzePhotogenicBatch(photogenicInputs);
 
-            await updateProgress(78, '노출 분석 중...');
+            await updateProgress(78, '계정 상세 분석 중...');
 
             // 노출 분석
             const exposureResults = await analyzeExposureBatch(photogenicInputs);

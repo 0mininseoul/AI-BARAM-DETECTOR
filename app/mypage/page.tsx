@@ -40,9 +40,8 @@ export default async function MyPage() {
                     </a>
                     <div className="flex items-center gap-4">
                         <span className="text-xs text-gray-500">{user.email}</span>
-                        <form action="/auth/signout" method="post">
-                            {/* 로그아웃 버튼 (추후 구현) */}
-                            {/* <button className="text-sm text-gray-400 hover:text-white">로그아웃</button> */}
+                        <form action="/api/auth/signout" method="post">
+                            <button className="text-sm text-gray-400 hover:text-white">로그아웃</button>
                         </form>
                     </div>
                 </div>

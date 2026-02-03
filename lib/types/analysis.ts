@@ -33,7 +33,7 @@ export interface IntimacyAnalysisResponse {
     reasoning: string;
 }
 
-// AI 통합 분석 응답 (성별 + 여성인 경우 외모/노출/기혼 여부)
+// AI 통합 분석 응답 (성별 + 여성인 경우 외모/노출/기혼/해외 여부)
 export interface CombinedAnalysisResponse {
     // 성별 분석 (항상 포함)
     gender: 'male' | 'female' | 'unknown';
@@ -50,6 +50,10 @@ export interface CombinedAnalysisResponse {
     // 기혼 여부 (여성인 경우에만 포함)
     isMarried?: boolean;
     marriedConfidence?: number;
+
+    // 해외 계정 여부 (여성인 경우에만 포함)
+    isForeigner?: boolean;
+    foreignerConfidence?: number;
 
     featureReasoning?: string;
 }

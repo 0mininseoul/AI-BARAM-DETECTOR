@@ -23,7 +23,7 @@ export const STEP_PROGRESS: Record<AnalysisStep, { min: number; max: number; lab
     failed: { min: 0, max: 0, label: '분석 실패' },
     // 레거시 단계 (하위 호환성)
     gender: { min: 50, max: 70, label: '성별 분석 중...' },
-    features: { min: 70, max: 90, label: '외모/노출 분석 중...' },
+    features: { min: 70, max: 90, label: '계정 분석 중...' },
 };
 
 // 다음 단계 결정
@@ -90,6 +90,8 @@ export interface StepData {
         ownerIdentified?: boolean;
         isMarried?: boolean;
         marriedConfidence?: number;
+        isForeigner?: boolean;
+        foreignerConfidence?: number;
     }>;
 
     // 레거시 필드 (하위 호환성)

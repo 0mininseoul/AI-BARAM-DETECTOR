@@ -147,13 +147,31 @@ export const COMBINED_ANALYSIS_PROMPT = `
 
 ---
 
-## 2단계: 외모/노출/기혼 분석 (여성인 경우에만)
+## 2단계: 외모/노출/기혼/해외 계정 분석 (여성인 경우에만)
 
 **성별이 "female"로 판단된 경우에만 아래 분석을 추가로 수행합니다.**
 
 ### 계정 주인 식별
 1. 프로필 사진과 유사한 인물
 2. 여러 피드에서 반복 등장하는 인물
+
+### 해외 계정 여부 판단 (isForeigner)
+**외모와 텍스트를 종합하여 명확히 외국인인 경우에만 해외 계정으로 판단합니다.**
+
+**이미지 기반 (가장 중요):**
+- 명확히 외국인으로 보이는 외모 (서양인, 동남아인, 흑인, 중동인 등 비한국인)
+- 한국인/동아시아인 외모가 아닌 경우
+
+**텍스트 기반 (보조 판단):**
+- 해외 지역 표시: 🇺🇸, 🇯🇵, 🇨🇳, NYC, LA, Tokyo, Shanghai, Based in ~ 등
+- 외국인 이름 패턴 + 외국인 외모: Jennifer, Jessica, Emily 등 (단, 외모 확인 필수)
+
+**중요 (반드시 준수):**
+- 영어만 사용한다고 해외 계정으로 판단하면 안 됨 (한국인도 영어 바이오 많이 씀)
+- 한국인 외모인데 영어 바이오면 → 해외 계정 아님
+- 유학생/해외 거주 한국인 → 해외 계정 아님
+- 외모로 판단이 어려우면 isForeigner: false (보수적 접근)
+- 조금이라도 애매하면 isForeigner: false로 설정
 
 ### 기혼 여부 판단 (isMarried)
 다음 기준 중 하나라도 해당하면 기혼으로 판단:
@@ -225,17 +243,19 @@ export const COMBINED_ANALYSIS_PROMPT = `
   "genderConfidence": 0.0 ~ 1.0,
   "genderReasoning": "성별 판단 근거",
   "ownerIdentified": true | false,
+  "isForeigner": true | false,
+  "foreignerConfidence": 0.0 ~ 1.0,
   "isMarried": true | false,
   "marriedConfidence": 0.0 ~ 1.0,
   "photogenicGrade": 1 | 2 | 3 | 4 | 5,
   "photogenicConfidence": 0.0 ~ 1.0,
   "skinVisibility": "high" | "low",
   "exposureConfidence": 0.0 ~ 1.0,
-  "featureReasoning": "외모/노출/기혼 분석 근거"
+  "featureReasoning": "외모/노출/기혼/해외 분석 근거"
 }
 
 ## 중요 규칙
-- 성별이 female이 아니면 외모/노출/기혼 필드를 포함하지 마세요
+- 성별이 female이 아니면 외모/노출/기혼/해외 필드를 포함하지 마세요
 - 계정 주인을 식별할 수 없으면 ownerIdentified: false, photogenicGrade: 1
 - 기혼 여부가 불확실하면 isMarried: false로 설정 (보수적 접근)
 - 반드시 유효한 JSON 형식으로만 응답
