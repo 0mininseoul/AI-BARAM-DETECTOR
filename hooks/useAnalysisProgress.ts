@@ -9,6 +9,7 @@ interface AnalysisProgress {
     status: 'pending' | 'processing' | 'completed' | 'failed';
     progress: number;
     progressStep: string | null;
+    errorMessage: string | null;
 }
 
 export function useAnalysisProgress(requestId: string) {
@@ -22,7 +23,7 @@ export function useAnalysisProgress(requestId: string) {
         try {
             const { data: request, error } = await supabase
                 .from('analysis_requests')
-                .select('id, status, progress, progress_step')
+                .select('id, status, progress, progress_step, error_message')
                 .eq('id', requestId)
                 .single();
 
@@ -33,6 +34,7 @@ export function useAnalysisProgress(requestId: string) {
                 status: request.status,
                 progress: request.progress,
                 progressStep: request.progress_step,
+                errorMessage: request.error_message,
             });
         } catch (err) {
             setError('분석 요청을 찾을 수 없습니다.');
@@ -64,6 +66,7 @@ export function useAnalysisProgress(requestId: string) {
                             status: 'pending' | 'processing' | 'completed' | 'failed';
                             progress: number;
                             progress_step: string | null;
+                            error_message: string | null;
                         };
 
                         setData({
@@ -71,6 +74,7 @@ export function useAnalysisProgress(requestId: string) {
                             status: updated.status,
                             progress: updated.progress,
                             progressStep: updated.progress_step,
+                            errorMessage: updated.error_message,
                         });
                     }
                 )

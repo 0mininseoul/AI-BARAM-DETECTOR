@@ -272,7 +272,17 @@ export async function POST(request: Request) {
 
             return NextResponse.json({ success: true, requestId });
         } catch (pipelineError) {
-            const errorMessage = pipelineError instanceof Error ? pipelineError.message : 'Unknown error';
+            const rawMessage = pipelineError instanceof Error ? pipelineError.message : 'Unknown error';
+
+            // 사용자 친화적 에러 메시지 변환
+            let errorMessage = rawMessage;
+            if (rawMessage.includes('SCRAPING_AUTH_ERROR')) {
+                errorMessage = '서비스 인증 오류가 발생했습니다. 잠시 후 다시 시도해주세요. 문제가 지속되면 관리자에게 문의해주세요.';
+                console.error('SCRAPING_AUTH_ERROR - Instagram cookie may be expired:', rawMessage);
+            } else if (rawMessage.includes('SCRAPING_ERROR')) {
+                errorMessage = '데이터 수집 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.';
+                console.error('SCRAPING_ERROR:', rawMessage);
+            }
 
             await supabaseAdmin
                 .from('analysis_requests')

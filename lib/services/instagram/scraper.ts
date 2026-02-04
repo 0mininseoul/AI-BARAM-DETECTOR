@@ -52,29 +52,33 @@ export async function getFollowers(
     username: string,
     limit: number = 500
 ): Promise<InstagramFollower[]> {
-    try {
-        const run = await client.actor('datadoping/instagram-followers-scraper').call({
-            usernames: [username],
-            max_count: limit,
-        });
+    const run = await client.actor('datadoping/instagram-followers-scraper').call({
+        usernames: [username],
+        max_count: limit,
+    });
 
-        if (run.status === 'ABORTED') {
-            throw new Error('Scraping run aborted by user');
-        }
-
-        const { items } = await client.dataset(run.defaultDatasetId).listItems();
-
-        return items.map((item: Record<string, unknown>) => ({
-            username: item.username as string,
-            fullName: item.full_name as string | undefined,
-            profilePicUrl: item.profile_pic_url as string | undefined,
-            isPrivate: item.is_private as boolean ?? false,
-            isVerified: item.is_verified as boolean ?? false,
-        }));
-    } catch (error) {
-        console.error(`Failed to get followers for ${username}:`, error);
-        return [];
+    if (run.status === 'ABORTED') {
+        throw new Error('스크래핑이 중단되었습니다.');
     }
+
+    if (run.status === 'FAILED') {
+        throw new Error('SCRAPING_ERROR: 팔로워 수집에 실패했습니다.');
+    }
+
+    const { items } = await client.dataset(run.defaultDatasetId).listItems();
+
+    // 결과가 비어있으면 에러 (계정 접근 실패)
+    if (items.length === 0) {
+        throw new Error('SCRAPING_ERROR: 팔로워 목록을 가져올 수 없습니다. 계정 접근이 차단되었을 수 있습니다.');
+    }
+
+    return items.map((item: Record<string, unknown>) => ({
+        username: item.username as string,
+        fullName: item.full_name as string | undefined,
+        profilePicUrl: item.profile_pic_url as string | undefined,
+        isPrivate: item.is_private as boolean ?? false,
+        isVerified: item.is_verified as boolean ?? false,
+    }));
 }
 
 /**
@@ -86,36 +90,39 @@ export async function getFollowing(
     username: string,
     _limit: number = 500
 ): Promise<InstagramFollower[]> {
-    try {
-        const cookieEnv = process.env.INSTAGRAM_COOKIE;
+    const cookieEnv = process.env.INSTAGRAM_COOKIE;
 
-        if (!cookieEnv) {
-            console.error('INSTAGRAM_COOKIE environment variable is not set');
-            return [];
-        }
-
-        const run = await client.actor('louisdeconinck/instagram-following-scraper').call({
-            cookies: cookieEnv,
-            usernames: [username],
-        });
-
-        if (run.status === 'ABORTED') {
-            throw new Error('Scraping run aborted by user');
-        }
-
-        const { items } = await client.dataset(run.defaultDatasetId).listItems();
-
-        return items.map((item: Record<string, unknown>) => ({
-            username: item.username as string,
-            fullName: item.full_name as string | undefined,
-            profilePicUrl: item.profile_pic_url as string | undefined,
-            isPrivate: item.is_private as boolean ?? false,
-            isVerified: item.is_verified as boolean ?? false,
-        }));
-    } catch (error) {
-        console.error(`Failed to get following for ${username}:`, error);
-        return [];
+    if (!cookieEnv) {
+        throw new Error('SCRAPING_AUTH_ERROR: Instagram 쿠키가 설정되지 않았습니다. 관리자에게 문의해주세요.');
     }
+
+    const run = await client.actor('louisdeconinck/instagram-following-scraper').call({
+        cookies: cookieEnv,
+        usernames: [username],
+    });
+
+    if (run.status === 'ABORTED') {
+        throw new Error('스크래핑이 중단되었습니다.');
+    }
+
+    if (run.status === 'FAILED') {
+        throw new Error('SCRAPING_AUTH_ERROR: 팔로잉 수집에 실패했습니다. Instagram 인증이 만료되었을 수 있습니다.');
+    }
+
+    const { items } = await client.dataset(run.defaultDatasetId).listItems();
+
+    // 결과가 비어있으면 인증 실패로 간주
+    if (items.length === 0) {
+        throw new Error('SCRAPING_AUTH_ERROR: 팔로잉 목록을 가져올 수 없습니다. Instagram 인증이 만료되었거나 계정 접근이 차단되었습니다.');
+    }
+
+    return items.map((item: Record<string, unknown>) => ({
+        username: item.username as string,
+        fullName: item.full_name as string | undefined,
+        profilePicUrl: item.profile_pic_url as string | undefined,
+        isPrivate: item.is_private as boolean ?? false,
+        isVerified: item.is_verified as boolean ?? false,
+    }));
 }
 
 /**

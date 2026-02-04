@@ -105,10 +105,12 @@ export default function ProgressPage({ params }: PageProps) {
     if (data.status === 'failed') {
         return (
             <div className="min-h-screen bg-black flex flex-col items-center justify-center p-4">
-                <div className="text-center">
+                <div className="text-center max-w-sm">
                     <div className="text-4xl mb-4">❌</div>
                     <h1 className="text-xl font-bold text-white mb-2">분석 실패</h1>
-                    <p className="text-gray-400 mb-6">분석 중 오류가 발생했습니다.</p>
+                    <p className="text-gray-400 mb-6">
+                        {data.errorMessage || '분석 중 오류가 발생했습니다.'}
+                    </p>
                     <button
                         onClick={() => router.push('/analyze')}
                         className="bg-emerald-400 text-black font-bold py-3 px-6 rounded-xl"
