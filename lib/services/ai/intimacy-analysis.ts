@@ -6,15 +6,16 @@ interface CommentForAnalysis {
     authorId: string;
     postOwnerId: string;
     commentText: string;
+    requestId?: string; // 토큰 추적용
 }
 
 /**
- * 댓글의 친밀도를 AI로 분석
+ * 댓글의 친밀도를 AI로 분석 (토큰 추적 포함)
  */
 export async function analyzeCommentIntimacy(
     comment: CommentForAnalysis
 ): Promise<IntimacyAnalysisResponse> {
-    const { authorId, postOwnerId, commentText } = comment;
+    const { authorId, postOwnerId, commentText, requestId } = comment;
 
     // 너무 짧은 댓글은 일반 처리
     if (commentText.length < 2) {
@@ -32,17 +33,21 @@ export async function analyzeCommentIntimacy(
         .replace('{postOwnerId}', postOwnerId)
         .replace('{commentText}', commentText);
 
-    // AI 분석 수행
-    const result = await analyzeWithGemini<IntimacyAnalysisResponse>(prompt);
+    // AI 분석 수행 (토큰 추적 포함)
+    const result = await analyzeWithGemini<IntimacyAnalysisResponse>(prompt, undefined, {
+        analysisType: 'intimacy',
+        requestId,
+    });
 
     return result;
 }
 
 /**
- * 여러 댓글의 친밀도를 일괄 분석
+ * 여러 댓글의 친밀도를 일괄 분석 (토큰 추적 포함)
  */
 export async function analyzeCommentIntimacyBatch(
-    comments: CommentForAnalysis[]
+    comments: CommentForAnalysis[],
+    requestId?: string
 ): Promise<Map<string, IntimacyAnalysisResponse>> {
     const results = new Map<string, IntimacyAnalysisResponse>();
 
@@ -53,7 +58,10 @@ export async function analyzeCommentIntimacyBatch(
         const batchResults = await Promise.all(
             batch.map(async (comment, index) => {
                 try {
-                    const result = await analyzeCommentIntimacy(comment);
+                    const result = await analyzeCommentIntimacy({
+                        ...comment,
+                        requestId,
+                    });
                     return { key: `${i + index}`, result };
                 } catch (error) {
                     console.error(`Intimacy analysis failed:`, error);

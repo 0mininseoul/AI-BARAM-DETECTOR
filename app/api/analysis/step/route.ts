@@ -339,7 +339,7 @@ async function processProfiles(
     });
 }
 
-// Step 3: 통합 분석 (성별 + 여성인 경우 외모/노출)
+// Step 3: 통합 분석 (성별 + 여성인 경우 외모/노출) + 캐싱 + 토큰 추적
 async function processAnalyze(requestId: string, stepData: StepData) {
     const accountsWithPosts = stepData.accountsWithPosts || [];
     const batchIndex = stepData.analyzeBatchIndex || 0;
@@ -415,6 +415,7 @@ async function processAnalyze(requestId: string, stepData: StepData) {
                     const result = await analyzeCombined({
                         profile: account.profile as Parameters<typeof analyzeCombined>[0]['profile'],
                         recentPosts: account.recentPosts as Parameters<typeof analyzeCombined>[0]['recentPosts'],
+                        requestId, // 토큰 추적용
                     });
                     return { username: account.profile.username, result };
                 } catch (error) {

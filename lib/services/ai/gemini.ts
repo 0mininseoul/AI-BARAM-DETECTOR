@@ -1,63 +1,182 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { supabaseAdmin } from '@/lib/supabase/admin';
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
+// 재시도 설정
+const RETRY_CONFIG = {
+    maxRetries: 3,
+    baseDelay: 1000, // 1초
+    maxDelay: 10000, // 최대 10초
+};
+
+// 토큰 사용량 타입
+export interface TokenUsage {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+}
+
+// 분석 결과 + 토큰 사용량
+export interface AnalysisResult<T> {
+    data: T;
+    tokenUsage: TokenUsage;
+}
+
 /**
- * Gemini AI를 사용하여 프롬프트 분석 수행
+ * Exponential backoff delay 계산
+ */
+function getRetryDelay(attempt: number): number {
+    const delay = RETRY_CONFIG.baseDelay * Math.pow(2, attempt);
+    return Math.min(delay, RETRY_CONFIG.maxDelay);
+}
+
+/**
+ * 지연 함수
+ */
+function sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * 재시도 가능한 에러인지 확인
+ */
+function isRetryableError(error: unknown): boolean {
+    if (error instanceof Error) {
+        const message = error.message.toLowerCase();
+        // Rate limit, 서버 에러, 네트워크 에러는 재시도
+        return (
+            message.includes('rate limit') ||
+            message.includes('429') ||
+            message.includes('500') ||
+            message.includes('503') ||
+            message.includes('timeout') ||
+            message.includes('network') ||
+            message.includes('econnreset') ||
+            message.includes('fetch failed')
+        );
+    }
+    return false;
+}
+
+/**
+ * 토큰 사용량을 DB에 저장
+ */
+export async function logTokenUsage(
+    tokenUsage: TokenUsage,
+    analysisType: string,
+    requestId?: string,
+    cachedHit: boolean = false
+): Promise<void> {
+    try {
+        await supabaseAdmin.from('gemini_token_usage').insert({
+            request_id: requestId || null,
+            prompt_tokens: tokenUsage.promptTokens,
+            completion_tokens: tokenUsage.completionTokens,
+            total_tokens: tokenUsage.totalTokens,
+            analysis_type: analysisType,
+            model_name: 'gemini-3-flash-preview',
+            cached_hit: cachedHit,
+        });
+    } catch (error) {
+        // 토큰 로깅 실패는 분석 실패로 이어지지 않도록
+        console.warn('Failed to log token usage:', error);
+    }
+}
+
+/**
+ * Gemini AI를 사용하여 프롬프트 분석 수행 (재시도 로직 + 토큰 추적 포함)
  * @param prompt - 분석 프롬프트
  * @param images - base64 인코딩된 이미지 배열 (선택)
- * @returns 파싱된 JSON 응답
+ * @param options - 추가 옵션 (분석 타입, requestId 등)
+ * @returns 파싱된 JSON 응답 + 토큰 사용량
  */
 export async function analyzeWithGemini<T>(
     prompt: string,
-    images?: string[]
+    images?: string[],
+    options?: {
+        analysisType?: string;
+        requestId?: string;
+        skipTokenLog?: boolean;
+    }
 ): Promise<T> {
-    // API 호출 전 로그
+    const { analysisType = 'unknown', requestId, skipTokenLog = false } = options || {};
+
     console.log('--- AnalyzeWithGemini Start ---');
-    console.log('Prompt (first 200 chars):', prompt.substring(0, 200) + '...');
+    console.log('Analysis type:', analysisType);
     console.log('Image count:', images?.length ?? 0);
 
-    try {
-        const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
+    let lastError: Error | null = null;
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const parts: any[] = [{ text: prompt }];
+    for (let attempt = 0; attempt <= RETRY_CONFIG.maxRetries; attempt++) {
+        try {
+            if (attempt > 0) {
+                const delay = getRetryDelay(attempt - 1);
+                console.log(`Retry attempt ${attempt}/${RETRY_CONFIG.maxRetries} after ${delay}ms`);
+                await sleep(delay);
+            }
 
-        // 이미지가 있으면 추가
-        if (images && images.length > 0) {
-            for (const image of images) {
-                parts.push({
-                    inlineData: {
-                        mimeType: 'image/jpeg',
-                        data: image,
-                    },
-                });
+            const model = genAI.getGenerativeModel({ model: 'gemini-3-flash-preview' });
+
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const parts: any[] = [{ text: prompt }];
+
+            // 이미지가 있으면 추가
+            if (images && images.length > 0) {
+                for (const image of images) {
+                    parts.push({
+                        inlineData: {
+                            mimeType: 'image/jpeg',
+                            data: image,
+                        },
+                    });
+                }
+            }
+
+            const result = await model.generateContent(parts);
+            const response = await result.response;
+            const text = response.text();
+
+            // 토큰 사용량 추출
+            const usageMetadata = response.usageMetadata;
+            const tokenUsage: TokenUsage = {
+                promptTokens: usageMetadata?.promptTokenCount ?? 0,
+                completionTokens: usageMetadata?.candidatesTokenCount ?? 0,
+                totalTokens: usageMetadata?.totalTokenCount ?? 0,
+            };
+
+            console.log('Token usage:', tokenUsage);
+
+            // 토큰 사용량 DB 저장
+            if (!skipTokenLog) {
+                await logTokenUsage(tokenUsage, analysisType, requestId, false);
+            }
+
+            // JSON 파싱
+            const jsonMatch = text.match(/\{[\s\S]*\}/);
+            if (!jsonMatch) {
+                console.error('JSON Parse Failed. Raw text:', text);
+                throw new Error('Failed to parse AI response as JSON');
+            }
+
+            const parsed = JSON.parse(jsonMatch[0]) as T;
+            console.log('--- AnalyzeWithGemini End (Success) ---');
+
+            return parsed;
+        } catch (error) {
+            lastError = error instanceof Error ? error : new Error(String(error));
+            console.error(`Gemini API Error (attempt ${attempt + 1}):`, lastError.message);
+
+            // 재시도 불가능한 에러거나 마지막 시도면 throw
+            if (!isRetryableError(error) || attempt >= RETRY_CONFIG.maxRetries) {
+                console.error('--- AnalyzeWithGemini End (Failed) ---');
+                throw lastError;
             }
         }
-
-        const result = await model.generateContent(parts);
-        const response = await result.response;
-        const text = response.text();
-
-        // Raw Response 로그
-        console.log('Gemini Raw Response:', text);
-
-        // JSON 파싱
-        const jsonMatch = text.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) {
-            console.error('JSON Parse Failed. Raw text:', text);
-            throw new Error('Failed to parse AI response as JSON');
-        }
-
-        const parsed = JSON.parse(jsonMatch[0]) as T;
-        console.log('Parsed JSON:', JSON.stringify(parsed, null, 2));
-        console.log('--- AnalyzeWithGemini End ---');
-
-        return parsed;
-    } catch (error) {
-        console.error('Gemini API Error:', error);
-        throw error;
     }
+
+    // 이론적으로 도달 불가능하지만 TypeScript를 위해
+    throw lastError || new Error('Unknown error');
 }
 
 /**
@@ -109,4 +228,56 @@ export async function imageUrlToBase64(url: string): Promise<string> {
     } finally {
         clearTimeout(timeoutId);
     }
+}
+
+/**
+ * 일별 토큰 사용량 조회
+ */
+export async function getDailyTokenUsage(days: number = 7): Promise<{
+    date: string;
+    analysisType: string;
+    apiCalls: number;
+    cacheHits: number;
+    totalTokens: number;
+}[]> {
+    const { data, error } = await supabaseAdmin
+        .from('gemini_token_usage')
+        .select('*')
+        .gte('created_at', new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString())
+        .order('created_at', { ascending: false });
+
+    if (error) {
+        console.error('Failed to get token usage:', error);
+        return [];
+    }
+
+    // 일별 집계
+    const dailyStats = new Map<string, {
+        date: string;
+        analysisType: string;
+        apiCalls: number;
+        cacheHits: number;
+        totalTokens: number;
+    }>();
+
+    for (const row of data || []) {
+        const date = new Date(row.created_at).toISOString().split('T')[0];
+        const key = `${date}-${row.analysis_type}`;
+
+        const existing = dailyStats.get(key) || {
+            date,
+            analysisType: row.analysis_type,
+            apiCalls: 0,
+            cacheHits: 0,
+            totalTokens: 0,
+        };
+
+        existing.apiCalls += 1;
+        existing.cacheHits += row.cached_hit ? 1 : 0;
+        existing.totalTokens += row.total_tokens;
+
+        dailyStats.set(key, existing);
+    }
+
+    return Array.from(dailyStats.values());
 }
