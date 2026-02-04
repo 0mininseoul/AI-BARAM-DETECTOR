@@ -18,6 +18,7 @@ export interface InstagramPost {
     id: string;
     shortCode: string;
     caption?: string;
+    hashtags?: string[]; // 스크래퍼에서 제공하는 해시태그 배열
     imageUrl?: string;
     videoUrl?: string;
     type: 'image' | 'video' | 'carousel' | 'reel';

@@ -131,8 +131,31 @@ export default function AnalyzePage() {
         }
     };
 
+    const handleLogout = async () => {
+        try {
+            const response = await fetch('/api/auth/signout', { method: 'POST' });
+            if (response.ok) {
+                router.push('/');
+            }
+        } catch (err) {
+            console.error('Logout failed:', err);
+        }
+    };
+
     return (
         <div className="min-h-screen bg-black flex flex-col items-center justify-center p-4">
+            {/* 로그아웃 버튼 */}
+            {user && (
+                <div className="absolute top-4 right-4">
+                    <button
+                        onClick={handleLogout}
+                        className="text-sm text-gray-400 hover:text-white transition-colors"
+                    >
+                        로그아웃
+                    </button>
+                </div>
+            )}
+
             {/* 헤더 */}
             <div className="mb-8 text-center">
                 <div className="text-4xl mb-4">🔍</div>

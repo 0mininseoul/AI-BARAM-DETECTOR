@@ -109,13 +109,32 @@ export async function analyzeCombined(
         }
     }
 
+    // 2-2. 포스트 캡션/해시태그 수집 (기혼 여부 판단에 활용)
+    const postsTextInfo = recentPosts
+        .slice(0, 10) // 최대 10개 포스트
+        .filter(post => post.caption || (post.hashtags && post.hashtags.length > 0)) // 캡션 또는 해시태그가 있는 포스트만
+        .map((post, index) => {
+            const caption = post.caption || '';
+            // 스크래퍼에서 제공하는 hashtags 배열 우선 사용, 없으면 캡션에서 추출
+            const hashtags = (post.hashtags && post.hashtags.length > 0)
+                ? post.hashtags.map(tag => `#${tag}`)  // 스크래퍼는 # 없이 제공하므로 추가
+                : (caption.match(/#[\w가-힣]+/g) || []);
+            // 캡션은 최대 200자로 제한 (너무 길면 토큰 낭비)
+            const truncatedCaption = caption.length > 200
+                ? caption.substring(0, 200) + '...'
+                : caption;
+            return `[포스트 ${index + 1}] 캡션: ${truncatedCaption || '없음'}${hashtags.length > 0 ? ` | 해시태그: ${hashtags.join(' ')}` : ''}`;
+        })
+        .join('\n');
+
     // 3. 프롬프트 구성
     const prompt = COMBINED_ANALYSIS_PROMPT
         .replace('{profileImageDescription}', profile.profilePicUrl ? '첨부된 이미지 참조' : '없음')
         .replace('{username}', profile.username)
         .replace('{fullName}', profile.fullName || '없음')
         .replace('{bio}', profile.bio || '없음')
-        .replace('{feedImagesDescription}', images.length > 1 ? '첨부된 이미지들 참조' : '없음');
+        .replace('{feedImagesDescription}', images.length > 1 ? '첨부된 이미지들 참조' : '없음')
+        .replace('{postsTextInfo}', postsTextInfo || '없음');
 
     // 4. AI 분석 수행 (한 번의 호출로 모든 분석 + 재시도 로직 + 토큰 추적)
     const result = await analyzeWithGemini<CombinedAnalysisResponse>(prompt, images, {

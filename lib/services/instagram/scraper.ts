@@ -135,11 +135,9 @@ function parseLatestPosts(rawPosts: unknown[]): InstagramPost[] {
         const post = item as Record<string, unknown>;
         const type = (post.type as string)?.toLowerCase() || 'image';
 
-        // mentions 추출 (caption에서 @username 패턴)
-        const caption = post.caption as string || '';
-        const mentionRegex = /@([a-zA-Z0-9._]+)/g;
-        const mentionMatches = caption.match(mentionRegex);
-        const mentionedUsers = mentionMatches ? mentionMatches.map(m => m.slice(1)) : [];
+        // mentions: 스크래퍼에서 이미 파싱해서 제공
+        const rawMentions = post.mentions as string[] | undefined;
+        const mentionedUsers = Array.isArray(rawMentions) ? rawMentions : [];
 
         // taggedUsers 추출
         const taggedUsers: string[] = [];
@@ -153,7 +151,8 @@ function parseLatestPosts(rawPosts: unknown[]): InstagramPost[] {
         return {
             id: post.id as string || '',
             shortCode: post.shortCode as string || '',
-            caption,
+            caption: post.caption as string | undefined,
+            hashtags: Array.isArray(post.hashtags) ? post.hashtags as string[] : [],
             imageUrl: post.displayUrl as string | undefined,
             videoUrl: post.videoUrl as string | undefined,
             type: type === 'video' ? 'video' : type === 'sidecar' ? 'carousel' : 'image',

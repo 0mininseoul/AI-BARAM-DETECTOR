@@ -80,6 +80,17 @@ export default function ProgressPage({ params }: PageProps) {
         }
     }, [data?.status, requestId, router]);
 
+    const handleLogout = async () => {
+        try {
+            const response = await fetch('/api/auth/signout', { method: 'POST' });
+            if (response.ok) {
+                router.push('/');
+            }
+        } catch (err) {
+            console.error('Logout failed:', err);
+        }
+    };
+
     if (loading) {
         return (
             <div className="min-h-screen bg-black flex items-center justify-center">
@@ -133,6 +144,16 @@ export default function ProgressPage({ params }: PageProps) {
 
     return (
         <div className="min-h-screen bg-black flex flex-col items-center justify-center p-4">
+            {/* 로그아웃 버튼 */}
+            <div className="absolute top-4 right-4">
+                <button
+                    onClick={handleLogout}
+                    className="text-sm text-gray-400 hover:text-white transition-colors"
+                >
+                    로그아웃
+                </button>
+            </div>
+
             {/* 로고 */}
             <div className="w-16 h-16 mb-6">
                 <img src="/logo.png" alt="AI 바람감지기" className="w-full h-full animate-pulse" />

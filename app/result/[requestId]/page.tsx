@@ -203,6 +203,21 @@ export default function ResultPage({ params }: PageProps) {
                 <div className="flex gap-3 text-sm">
                     <a href="/" className="text-gray-400 hover:text-white">홈</a>
                     <a href="/mypage" className="text-gray-400 hover:text-white">마이페이지</a>
+                    <button
+                        onClick={async () => {
+                            try {
+                                const response = await fetch('/api/auth/signout', { method: 'POST' });
+                                if (response.ok) {
+                                    router.push('/');
+                                }
+                            } catch (err) {
+                                console.error('Logout failed:', err);
+                            }
+                        }}
+                        className="text-gray-400 hover:text-white"
+                    >
+                        로그아웃
+                    </button>
                 </div>
             </div>
 
