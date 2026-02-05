@@ -184,14 +184,23 @@ export async function POST(request: Request) {
                     }
                 }
 
+                // 커플 사진 감지 결과 확인
+                const hasCouplePhoto = photogenicResult?.hasCouplePhoto || false;
+
                 // 점수 계산
                 const photogenicGrade = photogenicResult?.photogenicGrade || 1;
                 const exposureLevel = exposureResult?.skinVisibility || 'low';
 
-                const photogenicScore = getPhotogenicScore(photogenicGrade);
-                const exposureScore = getExposureScore(exposureLevel);
-                const tagScore = isTagged ? TAG_SCORE : 0;
-                const totalScore = photogenicScore + exposureScore + tagScore;
+                // 커플 사진이 있으면 위험도 0 (남자친구 있음으로 판단)
+                let totalScore: number;
+                if (hasCouplePhoto) {
+                    totalScore = 0;
+                } else {
+                    const photogenicScore = getPhotogenicScore(photogenicGrade);
+                    const exposureScore = getExposureScore(exposureLevel);
+                    const tagScore = isTagged ? TAG_SCORE : 0;
+                    totalScore = photogenicScore + exposureScore + tagScore;
+                }
 
                 const { status: genderStatus } = classifyGenderStatus(
                     genderResult?.gender || 'unknown',

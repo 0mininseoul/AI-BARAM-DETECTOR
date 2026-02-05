@@ -15,6 +15,9 @@ export interface PhotogenicAnalysisResponse {
     photogenicGrade: 1 | 2 | 3 | 4 | 5;
     confidence: number;
     reasoning: string;
+    // 커플 사진 감지 (남자친구 있는 계정 필터링용)
+    hasCouplePhoto?: boolean;
+    couplePhotoConfidence?: number;
 }
 
 // AI 노출 정도 분석 응답

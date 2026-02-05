@@ -5,15 +5,13 @@ import { useRouter } from 'next/navigation';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
 
 interface PageProps {
-    params: Promise<{ requestId: string }>;
+    params: Promise<{ token: string }>;
 }
 
 // Instagram CDN URL을 프록시 URL로 변환
 const getProxyImageUrl = (url: string | undefined): string | undefined => {
     if (!url) return undefined;
-    // 이미 프록시 URL이면 그대로 반환
     if (url.startsWith('/api/image-proxy')) return url;
-    // Instagram CDN URL을 프록시 URL로 변환
     return `/api/image-proxy?url=${encodeURIComponent(url)}`;
 };
 
@@ -73,6 +71,7 @@ interface PrivateAccount {
 interface ResultData {
     requestId: string;
     status: string;
+    isShared: boolean;
     summary: {
         targetInstagramId: string;
         mutualFollows: number;
@@ -82,12 +81,6 @@ interface ResultData {
     privateAccounts: PrivateAccount[];
 }
 
-interface ShareResponse {
-    success: boolean;
-    shareUrl: string;
-    shareToken: string;
-}
-
 const getRiskGradeStyle = (grade: string) => {
     switch (grade) {
         case 'high_risk':
@@ -95,101 +88,81 @@ const getRiskGradeStyle = (grade: string) => {
                 bg: 'bg-red-500/20',
                 text: 'text-red-400',
                 border: 'border-red-500/30',
-                label: '🔴 고위험군',
+                label: '고위험군',
             };
         case 'caution':
             return {
                 bg: 'bg-orange-500/20',
                 text: 'text-orange-400',
                 border: 'border-orange-500/30',
-                label: '🟠 주의',
+                label: '주의',
             };
         default:
             return {
                 bg: 'bg-green-500/20',
                 text: 'text-green-400',
                 border: 'border-green-500/30',
-                label: '🟢 보통',
+                label: '보통',
             };
     }
 };
 
-export default function ResultPage({ params }: PageProps) {
-    const { requestId } = use(params);
+export default function ShareResultPage({ params }: PageProps) {
+    const { token } = use(params);
     const [data, setData] = useState<ResultData | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const [shareLoading, setShareLoading] = useState(false);
     const router = useRouter();
 
     useEffect(() => {
         const fetchResult = async () => {
             try {
-                const response = await fetch(`/api/analysis/result/${requestId}`);
+                const response = await fetch(`/api/share/${token}`);
                 const result = await response.json();
 
                 if (!response.ok) {
-                    if (result.status && result.status !== 'completed') {
-                        router.push(`/progress/${requestId}`);
-                        return;
-                    }
-                    throw new Error(result.error);
+                    throw new Error(result.error || '결과를 불러올 수 없습니다.');
                 }
 
                 setData(result);
-                trackEvent(EVENTS.VIEW_RESULT, { femaleCount: result.femaleAccounts?.length });
+                trackEvent(EVENTS.VIEW_RESULT, {
+                    femaleCount: result.femaleAccounts?.length,
+                    isShared: true,
+                });
             } catch (err) {
-                setError('결과를 불러오는데 실패했습니다.');
+                setError(err instanceof Error ? err.message : '결과를 불러오는데 실패했습니다.');
             } finally {
                 setLoading(false);
             }
         };
 
         fetchResult();
-    }, [requestId, router]);
+    }, [token]);
 
     const handleShare = async () => {
         trackEvent(EVENTS.CLICK_SHARE_KAKAO);
 
-        setShareLoading(true);
+        const url = window.location.href;
+        const shareData = {
+            title: 'AI 위장 여사친 판독기 분석 결과',
+            text: `${data?.summary.targetInstagramId}님의 인스타 분석 결과를 확인해보세요!`,
+            url: url,
+        };
+
+        if (navigator.share) {
+            try {
+                await navigator.share(shareData);
+                return;
+            } catch (err) {
+                // fallback
+            }
+        }
 
         try {
-            // 공유 토큰 생성 API 호출
-            const response = await fetch('/api/share/enable', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ requestId }),
-            });
-
-            const result: ShareResponse = await response.json();
-
-            if (!response.ok || !result.success) {
-                throw new Error('공유 링크 생성에 실패했습니다.');
-            }
-
-            const shareUrl = result.shareUrl;
-            const shareData = {
-                title: 'AI 위장 여사친 판독기 분석 결과',
-                text: `${data?.summary.targetInstagramId}님의 인스타 분석 결과를 확인해보세요!`,
-                url: shareUrl,
-            };
-
-            if (navigator.share) {
-                try {
-                    await navigator.share(shareData);
-                    return;
-                } catch (err) {
-                    // fallback
-                }
-            }
-
-            await navigator.clipboard.writeText(shareUrl);
-            alert('공유 링크가 클립보드에 복사되었습니다!');
+            await navigator.clipboard.writeText(url);
+            alert('링크가 클립보드에 복사되었습니다!');
         } catch (err) {
-            console.error('Share error:', err);
             alert('공유하기에 실패했습니다.');
-        } finally {
-            setShareLoading(false);
         }
     };
 
@@ -206,10 +179,10 @@ export default function ResultPage({ params }: PageProps) {
             <div className="min-h-screen bg-black flex flex-col items-center justify-center p-4">
                 <p className="text-red-400 mb-4">{error}</p>
                 <button
-                    onClick={() => router.push('/analyze')}
-                    className="text-pink-400 underline"
+                    onClick={() => router.push('/')}
+                    className="bg-gradient-to-r from-pink-500 to-purple-500 text-white font-bold py-3 px-6 rounded-xl"
                 >
-                    다시 시도하기
+                    서비스 이용하기
                 </button>
             </div>
         );
@@ -219,31 +192,18 @@ export default function ResultPage({ params }: PageProps) {
 
     return (
         <div className="min-h-screen bg-black text-white pb-20">
-            {/* 헤더 */}
+            {/* 헤더 - 공유 페이지용 (로그인 버튼 없음) */}
             <div className="p-4 border-b border-gray-800 flex justify-between items-center">
                 <div className="flex items-center gap-3">
                     <span className="text-2xl">🔍</span>
                     <h1 className="font-bold">분석 결과</h1>
                 </div>
-                <div className="flex gap-3 text-sm">
-                    <a href="/" className="text-gray-400 hover:text-white">홈</a>
-                    <a href="/mypage" className="text-gray-400 hover:text-white">마이페이지</a>
-                    <button
-                        onClick={async () => {
-                            try {
-                                const response = await fetch('/api/auth/signout', { method: 'POST' });
-                                if (response.ok) {
-                                    router.push('/');
-                                }
-                            } catch (err) {
-                                console.error('Logout failed:', err);
-                            }
-                        }}
-                        className="text-gray-400 hover:text-white"
-                    >
-                        로그아웃
-                    </button>
-                </div>
+                <a
+                    href="/"
+                    className="text-pink-400 hover:text-pink-300 text-sm font-medium"
+                >
+                    나도 분석해보기 →
+                </a>
             </div>
 
             {/* 성별 비율 리포트 */}
@@ -412,21 +372,22 @@ export default function ResultPage({ params }: PageProps) {
                     </div>
                 </div>
 
-                {/* 공유하기 */}
-                <button
-                    onClick={handleShare}
-                    disabled={shareLoading}
-                    className="w-full mt-6 bg-gradient-to-r from-pink-500 to-purple-500 text-white font-bold py-3.5 px-4 rounded-xl flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                    {shareLoading ? (
-                        <>
-                            <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                            공유 링크 생성 중...
-                        </>
-                    ) : (
-                        '📤 결과 공유하기'
-                    )}
-                </button>
+                {/* 공유하기 + 나도 분석해보기 CTA */}
+                <div className="space-y-3 mt-6">
+                    <button
+                        onClick={handleShare}
+                        className="w-full bg-gray-800 text-white font-bold py-3.5 px-4 rounded-xl flex items-center justify-center gap-2 border border-gray-700"
+                    >
+                        📤 결과 공유하기
+                    </button>
+
+                    <a
+                        href="/"
+                        className="w-full bg-gradient-to-r from-pink-500 to-purple-500 text-white font-bold py-3.5 px-4 rounded-xl flex items-center justify-center gap-2 block text-center"
+                    >
+                        🔍 나도 분석해보기
+                    </a>
+                </div>
 
                 {/* 면책 조항 */}
                 <p className="text-center text-xs text-gray-600 mt-4">

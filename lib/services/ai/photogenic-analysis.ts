@@ -25,6 +25,8 @@ export async function analyzePhotogenic(
             photogenicGrade: 1,
             confidence: 0,
             reasoning: '분석할 이미지가 없습니다.',
+            hasCouplePhoto: false,
+            couplePhotoConfidence: 0,
         };
     }
 
@@ -45,6 +47,8 @@ export async function analyzePhotogenic(
             photogenicGrade: 1,
             confidence: 0,
             reasoning: '이미지 변환에 실패했습니다.',
+            hasCouplePhoto: false,
+            couplePhotoConfidence: 0,
         };
     }
 
@@ -57,7 +61,12 @@ export async function analyzePhotogenic(
     // AI 분석 수행
     try {
         const result = await analyzeWithGemini<PhotogenicAnalysisResponse>(prompt, images);
-        return result;
+        // 커플 사진 필드가 없는 경우 기본값 설정
+        return {
+            ...result,
+            hasCouplePhoto: result.hasCouplePhoto ?? false,
+            couplePhotoConfidence: result.couplePhotoConfidence ?? 0,
+        };
     } catch (error) {
         console.error('Photogenic analysis failed:', error);
         return {
@@ -65,6 +74,8 @@ export async function analyzePhotogenic(
             photogenicGrade: 1,
             confidence: 0,
             reasoning: '분석 중 오류가 발생했습니다.',
+            hasCouplePhoto: false,
+            couplePhotoConfidence: 0,
         };
     }
 }
@@ -98,6 +109,8 @@ export async function analyzePhotogenicBatch(
                             photogenicGrade: 1 as const,
                             confidence: 0,
                             reasoning: 'Analysis failed',
+                            hasCouplePhoto: false,
+                            couplePhotoConfidence: 0,
                         },
                     };
                 }

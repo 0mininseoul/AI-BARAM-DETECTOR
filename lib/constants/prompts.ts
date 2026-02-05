@@ -34,10 +34,11 @@ export const GENDER_ANALYSIS_PROMPT = `
 /**
  * Photogenic Quality 분석 프롬프트
  * 필터링 회피를 위해 "포토제닉 지수" 용어 사용
+ * 커플 사진 감지 기능 포함
  */
 export const PHOTOGENIC_ANALYSIS_PROMPT = `
 당신은 미디어 이미지 분석 전문가입니다.
-이미지 속 인물의 "Photogenic Quality (포토제닉 지수)"를 평가합니다.
+이미지 속 인물의 "Photogenic Quality (포토제닉 지수)"를 평가하고, 커플 사진 여부를 판단합니다.
 
 ## 분석 대상
 {imageDescriptions}
@@ -46,30 +47,55 @@ export const PHOTOGENIC_ANALYSIS_PROMPT = `
 1. 프로필 사진과 유사한 인물
 2. 여러 피드에서 반복 등장하는 인물
 
-## 평가 기준
+## 1. Photogenic Quality 평가 기준
 사진에서의 시각적 매력과 인상을 종합 평가합니다:
 - 얼굴의 조화로움과 균형감
 - 표정에서 느껴지는 호감도
 - 전체적인 외적 인상
 - 사진 속 시각적 존재감
 
-## 응답 형식 (JSON만 출력)
-{
-  "ownerIdentified": true | false,
-  "photogenicGrade": 1 | 2 | 3 | 4 | 5,
-  "confidence": 0.0 ~ 1.0,
-  "reasoning": "판단 근거"
-}
-
-## Grade 기준
+### Grade 기준
 - 5: 매우 높은 시각적 매력 (뚜렷한 호감형)
 - 4: 높은 시각적 매력 (평균 이상)
 - 3: 보통 수준
 - 2: 평균 이하
 - 1: 판단 어려움
 
+## 2. 커플 사진 여부 판단
+이미지 중 계정주(여성)와 동년배 남성이 친밀하게 함께 있는 **커플 사진**이 있는지 판단합니다.
+
+### 커플 사진으로 판단하는 기준 (1개 이상 해당 시 hasCouplePhoto: true):
+- 동년배(20-40대) 남녀가 함께 있는 투샷 (둘만 있는 사진)
+- 친밀한 포즈: 손잡기, 포옹, 기대기, 팔짱, 볼 키스, 어깨동무
+- 데이트/여행 분위기의 배경: 레스토랑, 카페, 여행지, 호텔
+- 같은 남성이 여러 사진에 반복 등장
+- 커플 기념일/이벤트 분위기 (생일, 기념일 축하 등)
+
+### 커플 사진이 아닌 경우 (hasCouplePhoto: false):
+- 가족 사진: 나이 차이가 확연한 남성 (아버지, 오빠/형 등)
+- 3인 이상 단체 사진
+- 남자 연예인/유명인과의 팬 사진
+- 직장/업무 관련 사진 (정장 차림, 회사 배경)
+- 배경에 우연히 남성이 있는 경우
+- 남성 친구들과의 그룹 사진
+
+### 커플 사진 판단 시 중요 규칙:
+- 커플 사진이 1장이라도 있으면 hasCouplePhoto: true
+- 판단이 애매한 경우 hasCouplePhoto: false (보수적 접근)
+- 같은 남성이 2장 이상 등장하면 커플 확신도 높임
+
+## 응답 형식 (JSON만 출력)
+{
+  "ownerIdentified": true | false,
+  "photogenicGrade": 1 | 2 | 3 | 4 | 5,
+  "confidence": 0.0 ~ 1.0,
+  "hasCouplePhoto": true | false,
+  "couplePhotoConfidence": 0.0 ~ 1.0,
+  "reasoning": "포토제닉 및 커플 사진 판단 근거"
+}
+
 ## 중요 규칙
-- 계정 주인을 식별할 수 없으면 ownerIdentified: false, photogenicGrade: 1
+- 계정 주인을 식별할 수 없으면 ownerIdentified: false, photogenicGrade: 1, hasCouplePhoto: false
 - 객관적이고 중립적인 평가 수행
 - 반드시 유효한 JSON 형식으로만 응답
 `;
