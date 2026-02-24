@@ -35,9 +35,12 @@ export default function ProgressPage({ params }: PageProps) {
                 signal: abortControllerRef.current.signal,
             });
 
-            const result = await response.json();
-
+            // 504 등 non-JSON 에러 응답 처리를 위해 ok 체크를 먼저
             if (!response.ok) {
+                // JSON 파싱 시도 (500은 JSON 응답일 수 있음)
+                let result: { step?: string; error?: string } = {};
+                try { result = await response.json(); } catch { /* non-JSON 응답 (504 등) */ }
+
                 // 서버가 파이프라인 실패를 기록한 경우 (500 + step 존재) → 재시도 불필요
                 if (response.status === 500 && result.step) {
                     console.error('Pipeline failed at step:', result.step, result.error);
@@ -62,6 +65,8 @@ export default function ProgressPage({ params }: PageProps) {
                 isRunningStep.current = false;
                 return;
             }
+
+            const result = await response.json();
 
             // 성공 시 retryCount 리셋
             retryCountRef.current = 0;
