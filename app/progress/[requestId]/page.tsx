@@ -14,6 +14,11 @@ export default function ProgressPage({ params }: PageProps) {
     const router = useRouter();
     const isRunningStep = useRef(false);
     const abortControllerRef = useRef<AbortController | null>(null);
+    const retryCountRef = useRef(0);
+    const retryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const stepTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const MAX_RETRIES = 3;
 
     // 단계별 분석 실행 함수
     const runNextStep = useCallback(async () => {
@@ -33,24 +38,62 @@ export default function ProgressPage({ params }: PageProps) {
             const result = await response.json();
 
             if (!response.ok) {
-                console.error('Step failed:', result.error);
+                // 서버가 파이프라인 실패를 기록한 경우 (500 + step 존재) → 재시도 불필요
+                if (response.status === 500 && result.step) {
+                    console.error('Pipeline failed at step:', result.step, result.error);
+                    isRunningStep.current = false;
+                    return;
+                }
+
+                // 504/네트워크 에러 등 일시적 에러 → 재시도
+                if (retryCountRef.current < MAX_RETRIES) {
+                    const delay = Math.pow(2, retryCountRef.current + 1) * 1000; // 2s, 4s, 8s
+                    retryCountRef.current += 1;
+                    console.warn(`Step failed (${response.status}), retrying in ${delay}ms (${retryCountRef.current}/${MAX_RETRIES})`);
+                    isRunningStep.current = false;
+                    retryTimeoutRef.current = setTimeout(() => {
+                        retryTimeoutRef.current = null;
+                        runNextStep();
+                    }, delay);
+                    return;
+                }
+
+                console.error('Step failed after max retries:', result.error);
                 isRunningStep.current = false;
                 return;
             }
 
+            // 성공 시 retryCount 리셋
+            retryCountRef.current = 0;
+
             // 완료되지 않았으면 다음 단계 실행
             if (!result.done) {
                 isRunningStep.current = false;
-                // 약간의 딜레이 후 다음 단계 호출
-                setTimeout(() => runNextStep(), 500);
+                stepTimeoutRef.current = setTimeout(() => {
+                    stepTimeoutRef.current = null;
+                    runNextStep();
+                }, 500);
             }
         } catch (err) {
             if (err instanceof Error && err.name === 'AbortError') {
                 console.log('Step aborted');
-            } else {
-                console.error('Failed to run step:', err);
+                isRunningStep.current = false;
+                return;
             }
+
+            console.error('Failed to run step:', err);
             isRunningStep.current = false;
+
+            // 네트워크 에러 재시도
+            if (retryCountRef.current < MAX_RETRIES) {
+                const delay = Math.pow(2, retryCountRef.current + 1) * 1000;
+                retryCountRef.current += 1;
+                console.warn(`Network error, retrying in ${delay}ms (${retryCountRef.current}/${MAX_RETRIES})`);
+                retryTimeoutRef.current = setTimeout(() => {
+                    retryTimeoutRef.current = null;
+                    runNextStep();
+                }, delay);
+            }
         }
     }, [requestId]);
 
@@ -64,11 +107,39 @@ export default function ProgressPage({ params }: PageProps) {
         }
     }, [data?.status, runNextStep]);
 
+    // 탭 복귀 시 파이프라인 재개
+    useEffect(() => {
+        const handleVisibility = () => {
+            if (document.visibilityState !== 'visible') return;
+
+            // 이미 타이머가 예약되어 있으면 무시
+            if (retryTimeoutRef.current || stepTimeoutRef.current) return;
+
+            // 분석 진행 중이고 step이 안 돌고 있으면 재개
+            if (
+                (data?.status === 'pending' || data?.status === 'processing') &&
+                !isRunningStep.current
+            ) {
+                retryCountRef.current = 0; // 탭 복귀는 fresh start
+                runNextStep();
+            }
+        };
+
+        document.addEventListener('visibilitychange', handleVisibility);
+        return () => document.removeEventListener('visibilitychange', handleVisibility);
+    }, [data?.status, runNextStep]);
+
     // 컴포넌트 언마운트 시 정리
     useEffect(() => {
         return () => {
             if (abortControllerRef.current) {
                 abortControllerRef.current.abort();
+            }
+            if (retryTimeoutRef.current) {
+                clearTimeout(retryTimeoutRef.current);
+            }
+            if (stepTimeoutRef.current) {
+                clearTimeout(stepTimeoutRef.current);
             }
         };
     }, []);
