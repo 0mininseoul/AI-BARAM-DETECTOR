@@ -1,13 +1,13 @@
-# AI 바람 감지기
+# AI 위장 여사친 판독기
 
-AI가 애인의 인스타그램을 분석해 바람 위험도가 높은 인물을 찾아주는 서비스
+AI가 남자친구의 인스타그램 맞팔 중 위장 여사친을 찾아주는 서비스
 
 ## 프로젝트 개요
 
 | 항목 | 내용 |
 |------|------|
-| **서비스명** | AI 바람 감지기 |
-| **한 줄 소개** | AI가 애인의 인스타그램을 분석해 바람 위험도가 높은 인물을 찾아드립니다 |
+| **서비스명** | AI 위장 여사친 판독기 |
+| **한 줄 소개** | AI가 남자친구의 인스타그램 맞팔 중 위장 여사친을 찾아드립니다 |
 | **타겟 유저** | 20대 여성, 연애 중, SNS 활발 사용 |
 | **핵심 가치** | 공개된 정보만으로 연인 관계의 불안 해소 (재미 목적) |
 
@@ -81,14 +81,23 @@ ai-baram-detector/
 │   ├── analyze/page.tsx          # 분석 입력 페이지
 │   ├── progress/[requestId]/     # 분석 진행 상황 페이지
 │   ├── result/[requestId]/       # 결과 리포트 페이지
+│   ├── mypage/page.tsx           # 마이페이지
+│   ├── share/[token]/            # 결과 공유 페이지
 │   ├── privacy/page.tsx          # 개인정보처리방침
 │   ├── terms/page.tsx            # 이용약관
 │   ├── auth/callback/route.ts    # OAuth 콜백
-│   └── api/analysis/             # 분석 API
-│       ├── start/route.ts        # 분석 요청 시작
-│       ├── run/route.ts          # 분석 파이프라인 실행
-│       ├── status/[requestId]/   # 진행 상태 조회
-│       └── result/[requestId]/   # 결과 조회
+│   └── api/
+│       ├── analysis/             # 분석 API
+│       │   ├── start/route.ts    # 분석 요청 시작
+│       │   ├── run/route.ts      # 분석 파이프라인 실행 (레거시)
+│       │   ├── step/route.ts     # 단계별 분석 실행 (현행)
+│       │   ├── status/[requestId]/   # 진행 상태 조회
+│       │   └── result/[requestId]/   # 결과 조회
+│       └── payment/              # 결제 API (Polar)
+│           ├── checkout/
+│           ├── pending/
+│           ├── success/
+│           └── webhook/
 ├── lib/
 │   ├── supabase/                 # Supabase 클라이언트
 │   │   ├── client.ts             # 브라우저 전용
@@ -96,7 +105,7 @@ ai-baram-detector/
 │   │   └── admin.ts              # Service Role (RLS 우회)
 │   ├── services/
 │   │   ├── instagram/            # Apify 기반 스크래핑
-│   │   ├── ai/                   # Gemini API (성별/외모/친밀도)
+│   │   ├── ai/                   # Gemini API (성별/외모/친밀도/종합분석)
 │   │   ├── analysis/             # 위험도/신뢰도 점수 계산
 │   │   ├── email.ts              # Resend 이메일 발송
 │   │   └── analytics.ts          # Amplitude 분석
@@ -113,16 +122,15 @@ ai-baram-detector/
 
 ## 핵심 기능
 
-### 분석 파이프라인
+### 분석 파이프라인 (`/api/analysis/step` 현행)
 
-1. **프로필 수집** - 대상 계정 기본 정보 및 공개 여부 확인
-2. **팔로워/팔로잉 수집** - 맞팔 계정 추출
-3. **AI 성별 판단** - Gemini API로 이성 계정 필터링
-4. **상호작용 분석** - 좋아요, 댓글, 태그, 멘션 수집
-5. **AI 댓글 친밀도 분석** - 친밀한 댓글 vs 일반 댓글 분류
-6. **AI 외모 분석** - 대중적 선호도 평가
-7. **위험도 점수 계산** - 가중치 적용 및 순위화
-8. **결과 저장 및 이메일 알림**
+| 단계 | 작업 | 설명 |
+|------|------|------|
+| `collect` | 프로필/팔로워/팔로잉 수집 | 맞팔 추출, 공개/비공개 분류 |
+| `profiles` | 공개 계정 프로필 배치 수집 | latestPosts 포함 (최대 350개) |
+| `analyze` | AI 종합 분석 | 성별·외모·노출도·친밀도 단일 Gemini 호출로 처리 (캐시 활용) |
+| `finalize` | 위험도 점수 계산 및 순위화 | 가중치·기간·급증 보너스 적용 |
+| `completed` | 결과 저장 및 이메일 알림 | Supabase 저장, Resend 발송 |
 
 ### 위험도 점수 계산
 
@@ -141,12 +149,13 @@ ai-baram-detector/
 | 테이블 | 설명 |
 |--------|------|
 | `users` | 사용자 정보, 분석 횟수 |
-| `analysis_requests` | 분석 요청 상태/진행률 |
-| `analysis_results` | 위험도 순위 결과 (상위 10위) |
+| `analysis_requests` | 분석 요청 상태/진행률/단계 데이터 |
+| `analysis_results` | 위험도 순위 결과 (share_token 포함) |
 | `comment_details` | 친밀한 댓글 상세 정보 |
-| `interaction_logs` | 상호작용 로그 |
 | `private_accounts` | 비공개 계정 목록 |
 | `payments` | 결제 내역 |
+| `ai_analysis_cache` | AI 분석 결과 캐시 (계정별 영구 저장) |
+| `gemini_token_usage` | Gemini API 토큰 사용량 추적 |
 
 ## 스크립트
 
@@ -168,27 +177,25 @@ npm run lint     # 린트 검사
 
 ### 완료
 - 사용자 인증 (카카오/구글 OAuth)
-- 분석 입력 및 파이프라인 실행
-- AI 성별/친밀도/외모 분석 (Gemini)
+- 팔로워/팔로잉 수집 (Apify 3rd-party 스크래퍼 연동)
+- 분석 파이프라인 (단계별 step 방식, 레거시 run 병행)
+- AI 종합 분석 (성별/외모/노출도/친밀도 단일 Gemini 호출)
+- AI 분석 캐싱 (ai_analysis_cache 테이블)
 - 위험도 점수 계산 및 순위화
 - 실시간 진행 상황 표시 (Supabase Realtime)
 - 결과 리포트 (1위 상세 + 비공개 계정 리스트)
-- 이메일 알림 (분석 완료)
+- 결과 공유 기능 (share token)
+- 이메일 알림 (분석 완료, Resend)
+- 결제 기능 (Polar 연동)
 - 무료 분석 1회 제한
 
 ### 진행 중
-- 팔로워/팔로잉 수집 (Apify 공식 API 미지원으로 대안 검토 중)
 - 프로필 이미지 blur 처리
-- 결제 기능 (Polar 연동)
+- 2위 이상 결과 결제 해제
 
 ### 예정
 - 딥 스캔 기능 (외부 댓글까지 전수 분석)
-- 2위 이상 결과 결제 해제
 - 카카오톡/인스타그램 공유 연동
-
-## 알려진 이슈
-
-1. **팔로워/팔로잉 수집**: Apify에서 공식 팔로워 스크래퍼를 제공하지 않아 현재 빈 배열 반환. 대안 솔루션 검토 필요.
 
 ## 라이선스
 
@@ -196,4 +203,5 @@ MIT
 
 ## 관련 문서
 
-- [기획서](docs/AI_바람감지기_기획서_v1.2.md)
+- [기획서](docs/AI_바람감지기_기획서.md)
+- [PRD](docs/PRD.md)
