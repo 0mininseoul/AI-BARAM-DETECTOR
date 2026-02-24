@@ -61,14 +61,25 @@ export function classifyGenderStatus(
 }
 
 /**
+ * 고위험군 인원수 산출
+ * - 30명 이하: 1명
+ * - 31~70명: 2명
+ * - 71명 이상: 3명
+ */
+export function getHighRiskCount(totalCount: number): number {
+    if (totalCount <= 30) return 1;
+    if (totalCount <= 70) return 2;
+    return 3;
+}
+
+/**
  * 위험순위 분류
  */
 export function classifyRiskGrade(
     rank: number,
     totalCount: number
 ): 'high_risk' | 'caution' | 'normal' {
-    // 고위험군: 상위 10명 (또는 상위 10%)
-    const highRiskCount = totalCount >= 100 ? 10 : Math.ceil(totalCount * 0.1);
+    const highRiskCount = getHighRiskCount(totalCount);
 
     if (rank <= highRiskCount) {
         return 'high_risk';

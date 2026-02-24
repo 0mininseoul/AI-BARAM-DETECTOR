@@ -14,23 +14,37 @@ ai-baram-detector/
 │   ├── page.tsx                      # 랜딩 페이지
 │   ├── login/page.tsx                # 로그인
 │   ├── analyze/page.tsx              # 분석 입력
-│   ├── pricing/page.tsx              # 결제 (입력 후)
 │   ├── progress/[requestId]/page.tsx # 분석 진행
 │   ├── result/[requestId]/page.tsx   # 결과 리포트
 │   ├── mypage/page.tsx               # 마이페이지
-│   ├── alert-service/page.tsx        # 알리미 서비스
+│   ├── share/[token]/                # 결과 공유
+│   ├── privacy/page.tsx              # 개인정보처리방침
+│   ├── terms/page.tsx                # 이용약관
 │   └── api/
 │       ├── analysis/
-│       ├── payment/
-│       ├── mypage/
-│       └── alert-service/
+│       │   ├── start/
+│       │   ├── run/          # 레거시 파이프라인
+│       │   ├── step/         # 현행 단계별 파이프라인
+│       │   ├── status/[requestId]/
+│       │   └── result/[requestId]/
+│       └── payment/          # Polar 결제
+│           ├── checkout/
+│           ├── pending/
+│           ├── success/
+│           └── webhook/
 ├── lib/
 │   ├── supabase/
 │   ├── services/
 │   │   ├── instagram/
-│   │   ├── ai/
-│   │   └── analysis/
-│   └── types/
+│   │   ├── ai/               # gender, photogenic, exposure, intimacy, combined
+│   │   ├── analysis/
+│   │   ├── email.ts          # Resend
+│   │   └── analytics.ts      # Amplitude
+│   ├── types/
+│   └── constants/            # scoring.ts, prompts.ts
+├── components/
+│   └── email-template.tsx
+├── hooks/
 └── supabase/migrations/
 ```
 
@@ -44,7 +58,7 @@ ai-baram-detector/
 | 배포 | Vercel (Free) |
 | 백엔드/DB | Supabase |
 | 스크래핑 | Apify |
-| AI 분석 | Gemini 3.0 Flash |
+| AI 분석 | Gemini 3 Flash (gemini-3-flash-preview) |
 | 이메일 | Resend |
 | 결제 | Polar (USD) |
 | 애널리틱스 | Amplitude |
@@ -100,11 +114,12 @@ INSTAGRAM_COOKIE=  # 팔로잉 스크래퍼용
 
 ```json
 {
-  "username": "target_username",
-  "resultsLimit": 500,
-  "cookie": "YOUR_INSTAGRAM_COOKIE"
+  "usernames": ["target_username"],
+  "cookies": "YOUR_INSTAGRAM_COOKIE"
 }
 ```
+
+> 환경 변수 `INSTAGRAM_COOKIE`에 쿠키값 저장 필요
 
 ---
 
@@ -258,27 +273,53 @@ const totalScore = photogenicScore + exposureScore + tagScore;
 
 ### 위험순위 분류
 
-- **≥100명**: 상위 **10명** = 고위험군
-- **<100명**: 상위 **10%** = 고위험군
+- **≤30명**: 상위 **1명** = 고위험군
+- **31~70명**: 상위 **2명** = 고위험군
+- **71명+**: 상위 **3명** = 고위험군
 - 나머지의 20% = 주의, 80% = 보통
 
 ---
 
 ## 11. 분석 파이프라인
 
+현행: `/api/analysis/step` (단계별, 재개 가능)
+레거시: `/api/analysis/run` (단일 패스)
+
 ```typescript
-async function runAnalysis(requestId) {
-  // 1. 프로필 수집
-  // 2. 팔로워/팔로잉 수집 (베이직 500명 / 스탠다드 1000명)
-  // 3. 맞팔 추출
-  // 4. 공개/비공개 분류 (먼저)
-  // 5. 공개 계정 프로필 스크래핑 (최대 350개)
-  // 6. 성별 판단
-  // 7. Photogenic + 노출 + 태그 분석
-  // 8. 점수 계산 및 위험순위 분류
-  // 9. 결과 저장 + 이메일
+// 현행 step 기반 파이프라인
+async function runStep(requestId, step) {
+  switch (step) {
+    case 'collect':
+      // 프로필 수집 → 팔로워/팔로잉 수집 → 맞팔 추출 → 공개/비공개 분류
+      break;
+    case 'profiles':
+      // 공개 계정 프로필 배치 수집 (apify/instagram-profile-scraper, 최대 350개)
+      break;
+    case 'analyze':
+      // 종합 AI 분석 (성별 + 외모 + 노출도 + 친밀도) - 단일 Gemini 호출
+      // ai_analysis_cache 활용 (이미 분석된 계정 스킵)
+      break;
+    case 'finalize':
+      // 위험도 점수 계산 및 위험순위 분류
+      break;
+    case 'completed':
+      // 결과 Supabase 저장 + Resend 이메일 발송
+      break;
+  }
 }
 ```
+
+---
+
+## 12. 추가 구현 기능 (MVP 이후)
+
+| 기능 | 설명 |
+|------|------|
+| **결과 공유** | share_token 기반 `/share/[token]` 공유 페이지 |
+| **AI 분석 캐싱** | `ai_analysis_cache` 테이블로 동일 계정 재분석 스킵 |
+| **토큰 사용 추적** | `gemini_token_usage` 테이블로 API 비용 모니터링 |
+| **종합 분석** | 성별/외모/노출도/친밀도를 단일 Gemini 호출로 처리 (`combined-analysis.ts`) |
+| **단계별 파이프라인** | step 기반으로 재개 가능한 분석 구조 |
 
 ---
 
@@ -290,3 +331,5 @@ async function runAnalysis(requestId) {
 | 2.0 | 2026-01-29 | 전면 재설계 |
 | 2.1 | 2026-01-29 | 유저 플로우, 요금제(500/1000), 외모 표현 제거, 파이프라인 순서 |
 | 2.2 | 2026-01-29 | 고위험군 10명/10%로 변경, 팔로잉 스크래퍼 쿠키 필요 명시 |
+| 2.3 | 2026-02-24 | 서비스명 변경, 프로젝트 구조 업데이트, step 파이프라인/캐싱/공유 기능 반영 |
+| 2.4 | 2026-02-25 | 고위험군 인원수 변경: ≤30명→1명, 31~70명→2명, 71명+→3명 |
