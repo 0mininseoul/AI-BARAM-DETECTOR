@@ -12,14 +12,17 @@ interface CombinedAnalysisInput {
 }
 
 /**
- * 캐시에서 분석 결과 조회
+ * 캐시에서 분석 결과 조회 (updated_at 기준 30일 이내만 유효)
  */
 async function getCachedAnalysis(username: string): Promise<CombinedAnalysisResponse | null> {
     try {
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
         const { data, error } = await supabaseAdmin
             .from('ai_analysis_cache')
             .select('analysis_result')
             .eq('instagram_username', username)
+            .gte('updated_at', thirtyDaysAgo)
             .single();
 
         if (error || !data) {
@@ -34,7 +37,7 @@ async function getCachedAnalysis(username: string): Promise<CombinedAnalysisResp
 }
 
 /**
- * 분석 결과를 캐시에 저장 (영구 저장, 만료 없음)
+ * 분석 결과를 캐시에 저장 (30일 후 자동 만료)
  */
 async function setCachedAnalysis(
     username: string,
@@ -154,7 +157,7 @@ export async function analyzeCombined(
         finalResult = result;
     }
 
-    // 6. 결과 캐싱 (영구 저장)
+    // 6. 결과 캐싱 (30일 후 자동 만료)
     await setCachedAnalysis(profile.username, finalResult, profile.profilePicUrl);
 
     return finalResult;
