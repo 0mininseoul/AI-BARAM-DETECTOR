@@ -1,0 +1,52 @@
+{
+  "data": {
+    "user": {
+      "username": "sample_user",
+      "full_name": "샘플 유저",
+      "biography": "안녕하세요 @friend_a 놀러오세요 #daily #seoul",
+      "external_url": "https://example.com",
+      "profile_pic_url_hd": "https://cdn.example.com/pic_hd.jpg",
+      "profile_pic_url": "https://cdn.example.com/pic.jpg",
+      "is_private": false,
+      "is_verified": true,
+      "edge_followed_by": { "count": 1234 },
+      "edge_follow": { "count": 321 },
+      "edge_owner_to_timeline_media": {
+        "count": 87,
+        "edges": [
+          {
+            "node": {
+              "id": "111",
+              "shortcode": "ABC111",
+              "__typename": "GraphImage",
+              "display_url": "https://cdn.example.com/post1.jpg",
+              "is_video": false,
+              "taken_at_timestamp": 1700000000,
+              "edge_media_preview_like": { "count": 42 },
+              "edge_media_to_comment": { "count": 5 },
+              "edge_media_to_caption": { "edges": [ { "node": { "text": "좋은 하루 @friend_b #선릉" } } ] },
+              "edge_media_to_tagged_user": {
+                "edges": [ { "node": { "user": { "username": "tagged_c" } } } ]
+              }
+            }
+          },
+          {
+            "node": {
+              "id": "222",
+              "shortcode": "ABC222",
+              "__typename": "GraphVideo",
+              "display_url": "https://cdn.example.com/post2.jpg",
+              "video_url": "https://cdn.example.com/post2.mp4",
+              "is_video": true,
+              "taken_at_timestamp": 1700000500,
+              "edge_liked_by": { "count": 10 },
+              "edge_media_to_comment": { "count": 1 },
+              "edge_media_to_caption": { "edges": [] },
+              "edge_media_to_tagged_user": { "edges": [] }
+            }
+          }
+        ]
+      }
+    }
+  }
+}
