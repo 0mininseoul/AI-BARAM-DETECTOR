@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unused-vars -- 2단계 스캐폴드: 파라미터는 향후 구현 시그니처를 문서화한다 */
 import type { InstagramFollower } from '@/lib/types/instagram';
 
 const NOT_IMPLEMENTED =
