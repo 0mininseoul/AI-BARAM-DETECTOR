@@ -142,7 +142,7 @@ export function ThreatBar({
           className="h-2.5 flex-1"
           style={{
             background: i < filled ? color : "var(--color-line)",
-            boxShadow: i < filled ? `0 0 6px ${color}55` : "none",
+            boxShadow: i < filled ? `0 0 6px color-mix(in srgb, ${color} 40%, transparent)` : "none",
           }}
         />
       ))}
