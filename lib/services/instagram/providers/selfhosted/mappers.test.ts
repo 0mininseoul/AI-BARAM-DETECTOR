@@ -22,6 +22,11 @@ describe('mapUserToProfile', () => {
         expect(profile.profilePicUrl).toBe('https://cdn.example.com/pic_hd.jpg');
     });
 
+    it('팔로워/팔로잉 count가 누락되거나 잘못되면 거부한다', () => {
+        expect(() => mapUserToProfile({ ...user, edge_followed_by: {} })).toThrow('SCHEMA');
+        expect(() => mapUserToProfile({ ...user, edge_follow: { count: -1 } })).toThrow('SCHEMA');
+    });
+
     it('게시물을 최대 10개, 타입/좋아요/이미지와 함께 매핑한다', () => {
         expect(profile.latestPosts).toHaveLength(2);
         const [p1, p2] = profile.latestPosts!;

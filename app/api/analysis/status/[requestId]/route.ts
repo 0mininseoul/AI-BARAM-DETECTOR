@@ -22,7 +22,7 @@ export async function GET(
         // 2. 분석 요청 조회 (RLS로 본인 데이터만 조회됨)
         const { data: analysisRequest, error } = await supabase
             .from('analysis_requests')
-            .select('*')
+            .select('id, status, progress, progress_step, background_processing, created_at, completed_at')
             .eq('id', requestId)
             .single();
 
@@ -33,22 +33,16 @@ export async function GET(
             );
         }
 
-        // 3. 예상 완료 시간 계산 (시작 후 약 5분)
-        let estimatedCompletionTime: string | null = null;
-        if (analysisRequest.status === 'processing') {
-            const createdAt = new Date(analysisRequest.created_at);
-            const estimatedCompletion = new Date(createdAt.getTime() + 5 * 60 * 1000);
-            estimatedCompletionTime = estimatedCompletion.toISOString();
-        }
-
         return NextResponse.json({
             requestId: analysisRequest.id,
             status: analysisRequest.status,
             progress: analysisRequest.progress,
             progressStep: analysisRequest.progress_step,
+            backgroundProcessing: analysisRequest.background_processing === true,
             createdAt: analysisRequest.created_at,
             completedAt: analysisRequest.completed_at,
-            estimatedCompletionTime,
+            // Keep the response field stable until a telemetry-based estimate is available.
+            estimatedCompletionTime: null,
         });
     } catch (error) {
         console.error('Status check error:', error);

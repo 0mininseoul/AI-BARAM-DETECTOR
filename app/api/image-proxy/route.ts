@@ -1,4 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
+import {
+    downloadSecureImage,
+    INSTAGRAM_MEDIA_HOST_SUFFIXES,
+    TRUSTED_IMAGE_PROXY_HOST_SUFFIXES,
+    validateAllowedRemoteImageUrl,
+} from '@/lib/services/media/secure-image-fetch';
+
+const IMAGE_PROXY_MAX_BYTES = 8 * 1024 * 1024;
+const IMAGE_PROXY_TIMEOUT_MS = 8_000;
+const IMAGE_ACCEPT = 'image/jpeg,image/png,image/webp,image/avif,image/*;q=0.8';
 
 const PLACEHOLDER_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="150" height="150" viewBox="0 0 150 150">
   <rect width="150" height="150" fill="#1f2937"/>
@@ -12,6 +22,18 @@ function getPlaceholderResponse() {
             'Content-Type': 'image/svg+xml',
             'Cache-Control': 'public, max-age=3600',
             'Access-Control-Allow-Origin': '*',
+            'X-Content-Type-Options': 'nosniff',
+        },
+    });
+}
+
+function imageResponse(bytes: Buffer, contentType: string) {
+    return new NextResponse(new Uint8Array(bytes), {
+        headers: {
+            'Content-Type': contentType,
+            'Cache-Control': 'public, max-age=86400',
+            'Access-Control-Allow-Origin': '*',
+            'X-Content-Type-Options': 'nosniff',
         },
     });
 }
@@ -29,92 +51,39 @@ export async function GET(request: NextRequest) {
         return NextResponse.json({ error: 'URL parameter required' }, { status: 400 });
     }
 
+    let validatedUrl: URL;
     try {
-        // URL 유효성 검사 (Instagram CDN URL만 허용)
-        const parsedUrl = new URL(url);
-        const allowedHosts = [
-            'instagram.com',
-            'cdninstagram.com',
-            'fbcdn.net',
-            'instagram.fna.fbcdn.net',
-        ];
+        validatedUrl = await validateAllowedRemoteImageUrl(url, INSTAGRAM_MEDIA_HOST_SUFFIXES);
+    } catch {
+        return NextResponse.json({ error: 'URL not allowed' }, { status: 403 });
+    }
 
-        const isAllowed = allowedHosts.some(
-            (host) => parsedUrl.hostname.includes(host)
-        );
+    try {
+        const direct = await downloadSecureImage(validatedUrl.href, {
+            allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
+            maxBytes: IMAGE_PROXY_MAX_BYTES,
+            timeoutMs: IMAGE_PROXY_TIMEOUT_MS,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                Accept: IMAGE_ACCEPT,
+                Referer: 'https://www.instagram.com/',
+            },
+        });
+        return imageResponse(direct.bytes, direct.contentType);
+    } catch {
+        // A trusted image proxy is a compatibility fallback for CDN-region failures.
+    }
 
-        if (!isAllowed) {
-            return NextResponse.json({ error: 'URL not allowed' }, { status: 403 });
-        }
-
-        let buffer: ArrayBuffer;
-        let contentType = 'image/jpeg';
-
-        // 1차 시도: 직접 fetch
-        try {
-            const controller1 = new AbortController();
-            const timeoutId1 = setTimeout(() => controller1.abort(), 8000);
-
-            const response = await fetch(url, {
-                signal: controller1.signal,
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                    'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
-                    'Referer': 'https://www.instagram.com/',
-                },
-            });
-
-            clearTimeout(timeoutId1);
-
-            if (response.ok) {
-                contentType = response.headers.get('content-type') || 'image/jpeg';
-                buffer = await response.arrayBuffer();
-
-                return new NextResponse(buffer, {
-                    headers: {
-                        'Content-Type': contentType,
-                        'Cache-Control': 'public, max-age=86400',
-                        'Access-Control-Allow-Origin': '*',
-                    },
-                });
-            }
-        } catch {
-            // 1차 시도 실패, 2차 시도로 진행
-        }
-
-        // 2차 시도: weserv.nl 프록시 사용
-        try {
-            const controller2 = new AbortController();
-            const timeoutId2 = setTimeout(() => controller2.abort(), 8000);
-
-            const proxyUrl = `https://images.weserv.nl/?url=${encodeURIComponent(url)}&default=1`;
-            const proxyResponse = await fetch(proxyUrl, {
-                signal: controller2.signal,
-            });
-
-            clearTimeout(timeoutId2);
-
-            if (proxyResponse.ok) {
-                contentType = proxyResponse.headers.get('content-type') || 'image/jpeg';
-                buffer = await proxyResponse.arrayBuffer();
-
-                return new NextResponse(buffer, {
-                    headers: {
-                        'Content-Type': contentType,
-                        'Cache-Control': 'public, max-age=86400',
-                        'Access-Control-Allow-Origin': '*',
-                    },
-                });
-            }
-        } catch {
-            // 2차 시도도 실패
-        }
-
-        // 모든 시도 실패: placeholder 반환
-        console.warn('Image proxy: all attempts failed, returning placeholder for:', url);
-        return getPlaceholderResponse();
-    } catch (error) {
-        console.error('Image proxy error:', error);
+    try {
+        const proxyUrl = `https://images.weserv.nl/?url=${encodeURIComponent(validatedUrl.href)}&default=1`;
+        const proxied = await downloadSecureImage(proxyUrl, {
+            allowedHostSuffixes: TRUSTED_IMAGE_PROXY_HOST_SUFFIXES,
+            maxBytes: IMAGE_PROXY_MAX_BYTES,
+            timeoutMs: IMAGE_PROXY_TIMEOUT_MS,
+            headers: { Accept: IMAGE_ACCEPT },
+        });
+        return imageResponse(proxied.bytes, proxied.contentType);
+    } catch {
         return getPlaceholderResponse();
     }
 }
