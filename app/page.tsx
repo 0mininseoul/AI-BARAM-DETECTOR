@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { motion, useReducedMotion, type Variants } from 'framer-motion';
@@ -101,14 +101,23 @@ export default function LandingPage() {
   const [heroError, setHeroError] = useState<string | null>(null);
   const [loginOpen, setLoginOpen] = useState(false);
 
+  const closeLogin = useCallback(() => {
+    try {
+      sessionStorage.removeItem('pending_ig');
+    } catch {
+      /* ignore */
+    }
+    setLoginOpen(false);
+  }, []);
+
   const handleStart = async () => {
-    trackEvent(EVENTS.CLICK_CTA_START);
-    const id = igId.replace('@', '').trim();
+    const id = igId.replace(/@/g, '').trim();
     if (!id) {
       setHeroError('남자친구의 인스타그램 아이디를 입력해주세요.');
       inputRef.current?.focus();
       return;
     }
+    trackEvent(EVENTS.CLICK_CTA_START);
 
     if (!user) {
       try {
@@ -429,7 +438,7 @@ export default function LandingPage() {
         </footer>
       </main>
 
-      <LoginModal open={loginOpen} onClose={() => setLoginOpen(false)} redirectTo="/analyze" />
+      <LoginModal open={loginOpen} onClose={closeLogin} redirectTo="/analyze" />
     </div>
   );
 }
