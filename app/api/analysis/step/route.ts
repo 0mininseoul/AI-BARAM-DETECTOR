@@ -20,9 +20,13 @@ import {
 } from '@/lib/services/ai/deep-risk-analysis';
 import {
     analyzePrivateAccountNames,
+    createPrivateNameBatchResponseSchema,
     type PrivateNameAnalysisResult,
 } from '@/lib/services/ai/private-name-analysis';
-import { getVertexAIAnalysisConcurrency } from '@/lib/services/ai/pipeline-config';
+import {
+    getVertexAIAnalysisConcurrency,
+} from '@/lib/services/ai/pipeline-config';
+import { isAmbiguousGeminiGenerationError } from '@/lib/services/ai/gemini-generation-policy';
 import {
     getProfileCacheMissUsernames,
     mergeCachedAndScrapedProfiles,
@@ -61,8 +65,11 @@ import {
     BATCH_SIZE,
     PROFILE_BATCH_SIZE,
     calculateBatchProgress,
+    compactCompletedStepData,
+    resolveProfileProviderBatchUsernames,
 } from '@/lib/services/analysis/steps';
 import {
+    ANALYSIS_STEP_LEASE_SECONDS,
     acquireAnalysisRequestLease,
     isAnalysisRequestOwner,
     releaseAnalysisRequestLease,
@@ -110,8 +117,37 @@ import {
     buildSafeFallbackRiskNarrative,
     parseSafePublicRiskNarrative,
 } from '@/lib/services/analysis/narrative-privacy';
+import { completeAnalysisRequest } from '@/lib/services/analysis/completion';
+import { parseRelationshipCheckpoint } from '@/lib/services/analysis/relationship-checkpoint';
+import { checkpointRelationshipList } from '@/lib/services/analysis/relationship-persistence';
+import {
+    isRetryablePipelineError,
+    MAX_CLOUD_TASK_PIPELINE_RETRIES,
+    shouldAbortPipelineBeforeExecution,
+    trustedCloudTasksRetryCount,
+} from '@/lib/services/analysis/pipeline-retry';
+import {
+    requireCompletedInteractionJob,
+    requireNoIncompleteInteractionJobs,
+} from '@/lib/services/analysis/interaction-job-state';
+import {
+    analysisProviderRunCheckpoint,
+    abortRunningAnalysisProviderRuns,
+    clearAnalysisProviderRun,
+    getAnalysisProviderRun,
+} from '@/lib/services/analysis/provider-run';
+import type { ProviderRunCheckpoint } from '@/lib/services/instagram/providers/types';
+import { failAnalysisRequest } from '@/lib/services/analysis/failure';
+import {
+    analysisSemanticRetryStateKey,
+    incrementAnalysisSemanticRetry,
+} from '@/lib/services/analysis/semantic-retry';
+import {
+    beginGeminiGeneration,
+    clearGeminiGeneration,
+    rejectUnresolvedGeminiGeneration,
+} from '@/lib/services/analysis/gemini-generation-intent';
 
-const STEP_LEASE_SECONDS = 1_800;
 const MAX_INTERACTION_EVIDENCE_ROWS = 2_500;
 
 // 단계별 분석 처리 API
@@ -166,12 +202,8 @@ export async function POST(request: Request) {
             );
         }
 
-        const currentStep = (analysisRequest.current_step || 'pending') as AnalysisStep;
-        const stepData: StepData = analysisRequest.step_data || {};
-        const scraperOptions = parseScraperProviderSelection(stepData.scraperOptions);
+        let currentStep = (analysisRequest.current_step || 'pending') as AnalysisStep;
         const scraperTelemetry = createSupabaseScraperTelemetryHook();
-        const targetId = analysisRequest.target_instagram_id;
-        const scrapeLimit = getRelationshipScrapeLimit(analysisRequest.plan_type);
 
         const lease = await acquireAnalysisRequestLease(
             supabaseAdmin,
@@ -179,19 +211,87 @@ export async function POST(request: Request) {
                 requestId,
                 userId: analysisRequest.user_id,
                 expectedStep: currentStep,
-                leaseSeconds: STEP_LEASE_SECONDS,
+                leaseSeconds: ANALYSIS_STEP_LEASE_SECONDS,
             }
         );
         if (!lease) {
+            if (isBackgroundTask) {
+                return NextResponse.json({
+                    success: true,
+                    step: currentStep,
+                    done: false,
+                    skipped: true,
+                });
+            }
             return NextResponse.json(
                 { error: 'Analysis step is already processing or has advanced.' },
                 { status: 409 }
             );
         }
 
+        let stepSucceeded = false;
+        let leasedStepData: StepData = {};
         try {
+            // The lease CASes the broad step name. Batch cursors can advance while a
+            // delayed worker waits for that lease, so execution state is read again
+            // only after this worker owns the lease.
+            const { data: leasedAnalysisRequest, error: leasedFetchError } = await supabaseAdmin
+                .from('analysis_requests')
+                .select('*, users(email)')
+                .eq('id', requestId)
+                .single();
+            if (leasedFetchError || !leasedAnalysisRequest) {
+                throw new Error('ANALYSIS_PERSISTENCE_ERROR: leased request state read failed.');
+            }
+            if (leasedAnalysisRequest.status === 'completed' || leasedAnalysisRequest.status === 'failed') {
+                stepSucceeded = true;
+                return NextResponse.json({
+                    success: true,
+                    step: leasedAnalysisRequest.current_step,
+                    status: leasedAnalysisRequest.status,
+                    done: true,
+                });
+            }
+
+            currentStep = (leasedAnalysisRequest.current_step || 'pending') as AnalysisStep;
+            const stepData: StepData = leasedAnalysisRequest.step_data || {};
+            leasedStepData = stepData;
+            const scraperOptions = parseScraperProviderSelection(stepData.scraperOptions);
+            const targetId = leasedAnalysisRequest.target_instagram_id;
+            const scrapeLimit = getRelationshipScrapeLimit(leasedAnalysisRequest.plan_type);
+            const deliveryRetryCount = trustedCloudTasksRetryCount(
+                request.headers,
+                isBackgroundTask
+            );
+            if (shouldAbortPipelineBeforeExecution(deliveryRetryCount)) {
+                await abortPaidProviderRunsBeforeFailure(
+                    requestId,
+                    leasedAnalysisRequest.user_id
+                );
+                const failed = await failAnalysisRequest(supabaseAdmin, {
+                    requestId,
+                    userId: leasedAnalysisRequest.user_id,
+                    expectedStep: currentStep,
+                    errorMessage: '분석 작업 재시도 한도를 초과했습니다. 새 분석을 시작해주세요.',
+                    compactStepData: {},
+                });
+                if (!failed) {
+                    return NextResponse.json(
+                        { error: 'Analysis state advanced while stopping exhausted work.' },
+                        { status: 409 }
+                    );
+                }
+                return NextResponse.json({
+                    success: false,
+                    step: 'failed',
+                    status: 'failed',
+                    done: true,
+                });
+            }
+
             // 현재 단계에 따라 처리
-            switch (currentStep) {
+            const stepResponse = await (async () => {
+                switch (currentStep) {
                 case 'pending':
                     // collect 단계로 전환
                     await updateStep(requestId, 'collect', stepData, 5, '분석 시작...');
@@ -204,6 +304,7 @@ export async function POST(request: Request) {
                 case 'collect':
                     return await processCollect(
                         requestId,
+                        leasedAnalysisRequest.user_id,
                         targetId,
                         scrapeLimit,
                         stepData,
@@ -214,6 +315,7 @@ export async function POST(request: Request) {
                 case 'profiles':
                     return await processProfiles(
                         requestId,
+                        leasedAnalysisRequest.user_id,
                         targetId,
                         stepData,
                         scraperOptions,
@@ -224,13 +326,18 @@ export async function POST(request: Request) {
                     return await processAnalyze(requestId, stepData);
 
                 case 'interactions':
-                    return await processInteractions(requestId, targetId, stepData);
+                    return await processInteractions(
+                        requestId,
+                        leasedAnalysisRequest.user_id,
+                        targetId,
+                        stepData
+                    );
 
                 case 'deep_analysis':
                     return await processDeepAnalysis(requestId, targetId, stepData);
 
                 case 'finalize':
-                    return await processFinalize(requestId, analysisRequest, stepData);
+                    return await processFinalize(requestId, leasedAnalysisRequest, stepData);
 
                 // 레거시 단계 처리 (하위 호환성 - analyze로 리다이렉트)
                 case 'gender':
@@ -248,29 +355,69 @@ export async function POST(request: Request) {
                         step: currentStep,
                         done: true,
                     });
-            }
+                }
+            })();
+            stepSucceeded = stepResponse.ok;
+            return stepResponse;
         } catch (pipelineError) {
             const errorMessage = pipelineError instanceof Error ? pipelineError.message : 'Unknown error';
             console.error('Analysis step failed', { requestId, currentStep });
 
-            const failedStateMutation = await supabaseAdmin
-                .from('analysis_requests')
-                .update({
-                    status: 'failed',
-                    current_step: 'failed',
-                    error_message: errorMessage,
-                })
-                .eq('id', requestId)
-                .select('id')
-                .maybeSingle();
-            if (failedStateMutation.error || !failedStateMutation.data) {
-                console.error('Failed to persist analysis failure state', { requestId, currentStep });
+            if (
+                isRetryablePipelineError(pipelineError)
+                && currentStep !== 'completed'
+                && currentStep !== 'failed'
+            ) {
+                const semanticRetryCount = await incrementAnalysisSemanticRetry(
+                    supabaseAdmin,
+                    {
+                        requestId,
+                        userId: analysisRequest.user_id,
+                        expectedStep: currentStep,
+                        stateKey: analysisSemanticRetryStateKey(currentStep, leasedStepData),
+                    }
+                );
+                if (semanticRetryCount === null) {
+                    return NextResponse.json(
+                        { error: 'Analysis state advanced before retry was recorded.' },
+                        { status: 409 }
+                    );
+                }
+                if (semanticRetryCount <= MAX_CLOUD_TASK_PIPELINE_RETRIES) {
+                    return NextResponse.json(
+                        {
+                            error: errorMessage,
+                            step: currentStep,
+                            retrying: true,
+                            retryCount: semanticRetryCount,
+                        },
+                        { status: 503 }
+                    );
+                }
+            }
+
+            await abortPaidProviderRunsBeforeFailure(
+                requestId,
+                analysisRequest.user_id
+            );
+            const failed = await failAnalysisRequest(supabaseAdmin, {
+                requestId,
+                userId: analysisRequest.user_id,
+                expectedStep: currentStep,
+                errorMessage,
+                compactStepData: {},
+            });
+            if (!failed) {
+                return NextResponse.json(
+                    { error: 'Analysis state advanced before failure was recorded.' },
+                    { status: 409 }
+                );
             }
 
             return NextResponse.json({ error: errorMessage, step: currentStep }, { status: 500 });
         } finally {
             await releaseAnalysisRequestLease(supabaseAdmin, lease);
-            if (isBackgroundTask) {
+            if (isBackgroundTask && stepSucceeded) {
                 await enqueueBackgroundContinuation(requestId);
             }
         }
@@ -284,6 +431,16 @@ export async function POST(request: Request) {
     }
 }
 
+async function abortPaidProviderRunsBeforeFailure(
+    requestId: string,
+    userId: string
+): Promise<void> {
+    await abortRunningAnalysisProviderRuns(supabaseAdmin, {
+        requestId,
+        userId,
+    });
+}
+
 async function enqueueBackgroundContinuation(requestId: string): Promise<void> {
     const { data, error } = await supabaseAdmin
         .from('analysis_requests')
@@ -293,21 +450,41 @@ async function enqueueBackgroundContinuation(requestId: string): Promise<void> {
     if (error || !data) {
         throw new Error('ANALYSIS_TASKS_ENQUEUE_ERROR: continuation state read failed.');
     }
-    if (
-        data.background_processing !== true
-        || !['pending', 'processing'].includes(data.status)
-    ) {
+    if (!['pending', 'processing'].includes(data.status)) {
+        if (data.background_processing === true) {
+            await setBackgroundProcessing(requestId, false);
+        }
         return;
     }
 
-    const outcome = await enqueueAnalysisTask(requestId, {
-        currentStep: data.current_step || 'pending',
-        progress: Number(data.progress ?? 0),
-        stepData: (data.step_data ?? {}) as StepData,
-    });
-    if (outcome === 'disabled') {
-        throw new Error('ANALYSIS_TASKS_CONFIG_ERROR: background continuation is disabled.');
+    try {
+        const outcome = await enqueueAnalysisTask(requestId, {
+            currentStep: data.current_step || 'pending',
+            progress: Number(data.progress ?? 0),
+            stepData: (data.step_data ?? {}) as StepData,
+        });
+        if (outcome === 'disabled') {
+            throw new Error('ANALYSIS_TASKS_CONFIG_ERROR: background continuation is disabled.');
+        }
+        if (data.background_processing !== true) {
+            await setBackgroundProcessing(requestId, true);
+        }
+    } catch (error) {
+        // Let the authenticated progress page resume while Cloud Tasks performs its own retry.
+        // The request lease keeps the two drivers from charging the same step concurrently.
+        await setBackgroundProcessing(requestId, false);
+        throw error;
     }
+}
+
+async function setBackgroundProcessing(requestId: string, active: boolean): Promise<void> {
+    const mutation = await supabaseAdmin
+        .from('analysis_requests')
+        .update({ background_processing: active })
+        .eq('id', requestId)
+        .select('id')
+        .maybeSingle();
+    requireSingleMutationRow(mutation, 'background processing state update');
 }
 
 function providerOptions(
@@ -315,7 +492,8 @@ function providerOptions(
     capability: Capability,
     requestId: string,
     onTelemetry: ScraperTelemetryHook,
-    expectedResultCount?: number
+    expectedResultCount?: number,
+    providerRun?: ProviderRunCheckpoint
 ): ScrapeRequestOptions {
     return {
         provider: selection[capability],
@@ -323,6 +501,7 @@ function providerOptions(
         requestId,
         onTelemetry,
         expectedResultCount,
+        providerRun,
     };
 }
 
@@ -352,73 +531,220 @@ async function updateStep(
 // Step 1: 프로필 + 팔로워/팔로잉 수집 + 맞팔 추출
 async function processCollect(
     requestId: string,
+    userId: string,
     targetId: string,
     scrapeLimit: number,
     stepData: StepData,
     scraperOptions: ScraperProviderSelection,
     scraperTelemetry: ScraperTelemetryHook
 ) {
-    // 프로필 수집
-    await updateStep(requestId, 'collect', stepData, 5, '대상 계정 정보 수집 중...');
-    const profile = await getInstagramProfile(
-        targetId,
-        providerOptions(scraperOptions, 'profile', requestId, scraperTelemetry)
-    );
+    rejectUnresolvedGeminiGeneration(stepData);
+    let collectStepData = stepData;
+    let profileCheckpoint = stepData.targetProfileCheckpoint;
+    const targetProfileOperationKey = 'profile:target';
 
-    if (!profile) {
-        throw new Error('계정을 찾을 수 없습니다.');
+    // A paid fallback can be used even when the configured primary is self-hosted.
+    // Persist the parsed profile before clearing its run ID so every crash boundary
+    // has either a resumable Actor or a reusable database result.
+    if (!profileCheckpoint) {
+        await updateStep(requestId, 'collect', collectStepData, 5, '대상 계정 정보 수집 중...');
+        const providerRun = await analysisProviderRunCheckpoint(supabaseAdmin, {
+            requestId,
+            userId,
+            expectedStep: 'collect',
+            operationKey: targetProfileOperationKey,
+        });
+        const profile = await getInstagramProfile(
+            targetId,
+            providerOptions(
+                scraperOptions,
+                'profile',
+                requestId,
+                scraperTelemetry,
+                undefined,
+                providerRun
+            )
+        );
+        if (!profile) {
+            throw new Error('계정을 찾을 수 없습니다.');
+        }
+        profileCheckpoint = {
+            profilePicUrl: profile.profilePicUrl,
+            followersCount: profile.followersCount,
+            followingCount: profile.followingCount,
+            isPrivate: profile.isPrivate,
+            targetPosts: selectRecentInteractionPosts(
+                profile.latestPosts ?? [],
+                TARGET_INTERACTION_POST_LIMIT
+            ).map(post => ({
+                id: post.id,
+                shortCode: post.shortCode,
+                type: post.type,
+                likesCount: Math.max(0, post.likesCount),
+                commentsCount: Math.max(0, post.commentsCount),
+                timestamp: post.timestamp,
+            })),
+        };
+        collectStepData = { ...collectStepData, targetProfileCheckpoint: profileCheckpoint };
+        await updateStep(
+            requestId,
+            'collect',
+            collectStepData,
+            10,
+            '대상 계정 정보 저장 완료'
+        );
     }
+    await clearAnalysisProviderRun(supabaseAdmin, {
+        requestId,
+        operationKey: targetProfileOperationKey,
+    });
 
-    if (profile.isPrivate) {
+    if (profileCheckpoint.isPrivate) {
         throw new Error('비공개 계정은 분석할 수 없습니다.');
     }
 
-    // 팔로워/팔로잉 수집
-    await updateStep(requestId, 'collect', stepData, 15, '팔로워/팔로잉 목록 수집 중...');
-    const [followers, following] = await Promise.all([
-        getFollowers(
-            targetId,
-            scrapeLimit,
-            providerOptions(
-                scraperOptions,
-                'followers',
-                requestId,
-                scraperTelemetry,
-                expectedRelationshipCount(profile.followersCount, scrapeLimit)
-            )
-        ),
-        getFollowing(
-            targetId,
-            scrapeLimit,
-            providerOptions(
-                scraperOptions,
-                'following',
-                requestId,
-                scraperTelemetry,
-                expectedRelationshipCount(profile.followingCount, scrapeLimit)
-            )
-        ),
+    // Persist both paid relationship results before name/profile work. A retry after this
+    // checkpoint reuses the lists instead of starting the Actors again.
+    await updateStep(requestId, 'collect', collectStepData, 15, '팔로워/팔로잉 목록 수집 중...');
+    const existingCheckpoint = parseRelationshipCheckpoint(
+        collectStepData.relationshipCheckpoint,
+        scrapeLimit
+    );
+    const [followersProviderRun, followingProviderRun] = await Promise.all([
+        analysisProviderRunCheckpoint(supabaseAdmin, {
+            requestId,
+            userId,
+            expectedStep: 'collect',
+            operationKey: 'relationship:followers',
+        }),
+        analysisProviderRunCheckpoint(supabaseAdmin, {
+            requestId,
+            userId,
+            expectedStep: 'collect',
+            operationKey: 'relationship:following',
+        }),
     ]);
+    const checkpointedFollowers = existingCheckpoint?.followers;
+    const checkpointedFollowing = existingCheckpoint?.following;
+    const followersPromise = checkpointedFollowers
+        ? clearAnalysisProviderRun(supabaseAdmin, {
+                requestId,
+                operationKey: 'relationship:followers',
+            }).then(() => checkpointedFollowers)
+        : getFollowers(
+                targetId,
+                scrapeLimit,
+                providerOptions(
+                    scraperOptions,
+                    'followers',
+                    requestId,
+                    scraperTelemetry,
+                    expectedRelationshipCount(profileCheckpoint.followersCount, scrapeLimit),
+                    followersProviderRun
+                )
+            ).then(async rows => {
+                await checkpointRelationshipList(supabaseAdmin, {
+                    requestId,
+                    userId,
+                    kind: 'followers',
+                    rows,
+                });
+                await clearAnalysisProviderRun(supabaseAdmin, {
+                    requestId,
+                    operationKey: 'relationship:followers',
+                });
+                return rows;
+            });
+    const followingPromise = checkpointedFollowing
+        ? clearAnalysisProviderRun(supabaseAdmin, {
+                requestId,
+                operationKey: 'relationship:following',
+            }).then(() => checkpointedFollowing)
+        : getFollowing(
+                targetId,
+                scrapeLimit,
+                providerOptions(
+                    scraperOptions,
+                    'following',
+                    requestId,
+                    scraperTelemetry,
+                    expectedRelationshipCount(profileCheckpoint.followingCount, scrapeLimit),
+                    followingProviderRun
+                )
+            ).then(async rows => {
+                await checkpointRelationshipList(supabaseAdmin, {
+                    requestId,
+                    userId,
+                    kind: 'following',
+                    rows,
+                });
+                await clearAnalysisProviderRun(supabaseAdmin, {
+                    requestId,
+                    operationKey: 'relationship:following',
+                });
+                return rows;
+            });
+    const [followersResult, followingResult] = await Promise.allSettled([
+        followersPromise,
+        followingPromise,
+    ]);
+    if (followersResult.status === 'rejected') throw followersResult.reason;
+    if (followingResult.status === 'rejected') throw followingResult.reason;
+    const followers = followersResult.value;
+    const following = followingResult.value;
+    const checkpointedStepData: StepData = {
+        ...collectStepData,
+        relationshipCheckpoint: { followers, following },
+    };
+    await updateStep(
+        requestId,
+        'collect',
+        checkpointedStepData,
+        22,
+        '맞팔 계정 분류 준비 중...'
+    );
 
     // 맞팔 추출
-    await updateStep(requestId, 'collect', stepData, 25, '맞팔 계정 분석 중...');
+    await updateStep(requestId, 'collect', checkpointedStepData, 25, '맞팔 계정 분석 중...');
     const mutualFollows = extractMutualFollows(followers, following);
 
     // 공개/비공개 분류
     const { publicAccounts, privateAccounts } = classifyByPrivacy(mutualFollows);
 
     // 비공개 계정은 사진/게시물 없이 username과 표시 이름만 100개 단위로 분류한다.
-    let privateNameResults: PrivateNameAnalysisResult[] = [];
-    if (privateAccounts.length > 0) {
+    const privateNameInputs = privateAccounts.map(account => ({
+        id: account.username,
+        username: account.username,
+        ...(account.fullName ? { fullName: account.fullName } : {}),
+    }));
+    const privateNameSchema = createPrivateNameBatchResponseSchema(
+        privateNameInputs.map(account => account.id)
+    );
+    const storedPrivateNames = checkpointedStepData.privateNameResults === undefined
+        ? null
+        : privateNameSchema.safeParse(checkpointedStepData.privateNameResults);
+    if (storedPrivateNames && !storedPrivateNames.success) {
+        throw new Error('AI_GENERATION_CHECKPOINT_ERROR: private-name checkpoint is invalid.');
+    }
+
+    let privateNameResults: PrivateNameAnalysisResult[] = storedPrivateNames?.success
+        ? storedPrivateNames.data
+        : [];
+    if (privateNameInputs.length > 0 && !storedPrivateNames) {
+        const generationStepData = beginGeminiGeneration(checkpointedStepData, {
+            kind: 'private_names',
+            operationKey: 'private-names',
+            inputIds: privateNameInputs.map(account => account.id),
+        });
+        await updateStep(
+            requestId,
+            'collect',
+            generationStepData,
+            25,
+            '비공개 계정 이름 분류 중...'
+        );
         try {
-            privateNameResults = await analyzePrivateAccountNames(
-                privateAccounts.map(account => ({
-                    id: account.username,
-                    username: account.username,
-                    ...(account.fullName ? { fullName: account.fullName } : {}),
-                })),
-                requestId
-            );
+            privateNameResults = await analyzePrivateAccountNames(privateNameInputs, requestId);
         } catch {
             console.warn('Private account name analysis input failed; using neutral ordering', {
                 requestId,
@@ -429,6 +755,24 @@ async function processCollect(
                 isName: false,
                 confidence: 0,
             }));
+        }
+
+        const privateNameCheckpoint = clearGeminiGeneration({
+            ...generationStepData,
+            privateNameResults,
+        });
+        try {
+            await updateStep(
+                requestId,
+                'collect',
+                privateNameCheckpoint,
+                27,
+                '비공개 계정 이름 분류 저장 완료'
+            );
+        } catch {
+            throw new Error(
+                'AI_RESULT_PERSISTENCE_ERROR: generated private-name results could not be checkpointed.'
+            );
         }
     }
     const privateNameByUsername = new Map(
@@ -471,20 +815,10 @@ async function processCollect(
 
     // step_data 업데이트
     const newStepData: StepData = {
-        ...stepData,
+        scraperOptions: collectStepData.scraperOptions,
         mutualFollows: mutualFollows.map((m) => m.username),
-        targetProfileImage: profile.profilePicUrl,
-        targetPosts: selectRecentInteractionPosts(
-            profile.latestPosts ?? [],
-            TARGET_INTERACTION_POST_LIMIT
-        ).map(post => ({
-            id: post.id,
-            shortCode: post.shortCode,
-            type: post.type,
-            likesCount: Math.max(0, post.likesCount),
-            commentsCount: Math.max(0, post.commentsCount),
-            timestamp: post.timestamp,
-        })),
+        targetProfileImage: profileCheckpoint.profilePicUrl,
+        targetPosts: profileCheckpoint.targetPosts,
         publicAccounts: capPublicProfiles(publicAccounts).map((a) => ({
             username: a.username,
             profilePicUrl: a.profilePicUrl,
@@ -511,6 +845,7 @@ async function processCollect(
 // Step 2: 공개 계정 프로필 배치 수집
 async function processProfiles(
     requestId: string,
+    userId: string,
     targetId: string,
     stepData: StepData,
     scraperOptions: ScraperProviderSelection,
@@ -519,6 +854,15 @@ async function processProfiles(
     const publicAccounts = stepData.publicAccounts || [];
     const batchIndex = stepData.profileBatchIndex || 0;
     const accountsWithPosts = stepData.accountsWithPosts || [];
+
+    // If a prior invocation committed the batch cursor and then lost the cleanup
+    // response, retire that already-persisted run before doing more paid work.
+    if (batchIndex > 0) {
+        await clearAnalysisProviderRun(supabaseAdmin, {
+            requestId,
+            operationKey: `profiles:${batchIndex - 1}`,
+        });
+    }
 
     if (publicAccounts.length === 0) {
         // 공개 계정이 없으면 바로 완료
@@ -568,15 +912,59 @@ async function processProfiles(
 
     // Current-version cache snapshots can skip the profile provider for up to the bounded TTL.
     // Cache/query failures return no snapshots, so the existing provider path remains the fallback.
-    const cachedSnapshots = await getCachedCombinedProfileSnapshots(
+    const cachedSnapshots = new Map(await getCachedCombinedProfileSnapshots(
         batch.map(account => account.username)
+    ));
+    const frozenInput = stepData.profileProviderBatchCheckpoint;
+    const missingUsernames = resolveProfileProviderBatchUsernames(
+        frozenInput,
+        batchIndex,
+        batch.map(account => account.username),
+        getProfileCacheMissUsernames(batch, cachedSnapshots)
     );
-    const missingUsernames = getProfileCacheMissUsernames(batch, cachedSnapshots);
+    let profilesStepData = stepData;
+    if (frozenInput) {
+        // The provider result owns these usernames for this operation even if another
+        // request populated the shared cache while the Actor was running.
+        for (const username of frozenInput.usernames) {
+            cachedSnapshots.delete(normalizedUsername(username));
+        }
+    } else if (missingUsernames.length > 0) {
+        profilesStepData = {
+            ...stepData,
+            profileProviderBatchCheckpoint: {
+                batchIndex,
+                usernames: [...missingUsernames],
+            },
+        };
+        await updateStep(
+            requestId,
+            'profiles',
+            profilesStepData,
+            progress,
+            `프로필 수집 입력 확정 중... (${batchIndex + 1}/${totalBatches})`
+        );
+    }
+    const providerRun = missingUsernames.length > 0
+        ? await analysisProviderRunCheckpoint(supabaseAdmin, {
+            requestId,
+            userId,
+            expectedStep: 'profiles',
+            operationKey: `profiles:${batchIndex}`,
+        })
+        : undefined;
     const profiles = missingUsernames.length > 0
         ? await getProfilesBatch(
             missingUsernames,
             missingUsernames.length,
-            providerOptions(scraperOptions, 'profilesBatch', requestId, scraperTelemetry)
+            providerOptions(
+                scraperOptions,
+                'profilesBatch',
+                requestId,
+                scraperTelemetry,
+                undefined,
+                providerRun
+            )
         )
         : [];
 
@@ -589,8 +977,10 @@ async function processProfiles(
     // 기존 결과에 추가
     const updatedAccountsWithPosts = [...accountsWithPosts, ...batchAccountsWithPosts];
 
+    const persistedStepData = { ...profilesStepData };
+    delete persistedStepData.profileProviderBatchCheckpoint;
     const newStepData: StepData = {
-        ...stepData,
+        ...persistedStepData,
         accountsWithPosts: updatedAccountsWithPosts,
         profileBatchIndex: batchIndex + 1,
     };
@@ -603,6 +993,12 @@ async function processProfiles(
         newProgress,
         `프로필 수집 중... (${batchIndex + 1}/${totalBatches})`
     );
+    if (providerRun) {
+        await clearAnalysisProviderRun(supabaseAdmin, {
+            requestId,
+            operationKey: `profiles:${batchIndex}`,
+        });
+    }
 
     return NextResponse.json({
         success: true,
@@ -617,6 +1013,7 @@ async function processProfiles(
 
 // Step 3: 통합 분석 (성별 + 여성인 경우 외모/노출) + 캐싱 + 토큰 추적
 async function processAnalyze(requestId: string, stepData: StepData) {
+    rejectUnresolvedGeminiGeneration(stepData);
     const accountsWithPosts = stepData.accountsWithPosts || [];
     const batchIndex = stepData.analyzeBatchIndex || 0;
     const combinedResults = stepData.combinedResults || {};
@@ -624,6 +1021,13 @@ async function processAnalyze(requestId: string, stepData: StepData) {
     const totalBatches = Math.ceil(accountsWithPosts.length / BATCH_SIZE);
 
     if (batchIndex >= totalBatches) {
+        if (accountsWithPosts.some(account => (
+            !combinedResults[account.profile.username]
+        ))) {
+            throw new Error(
+                'AI_ANALYSIS_INCOMPLETE_ERROR: classification checkpoint is incomplete.'
+            );
+        }
         // 모든 배치 완료 - 통계 계산 후 finalize 단계로
         const genderStats = { male: 0, female: 0, unknown: 0 };
         let femaleCount = 0;
@@ -688,33 +1092,55 @@ async function processAnalyze(requestId: string, stepData: StepData) {
 
     // 품질 모드의 이미지 디코딩 부하를 고려해 기본 5, 환경 변수로 최대 10까지 조절
     const subBatchSize = getVertexAIAnalysisConcurrency();
-    for (let i = 0; i < batch.length; i += subBatchSize) {
-        const subBatch = batch.slice(i, i + subBatchSize);
-        const results = await Promise.all(
-            subBatch.map(async (account) => {
-                try {
-                    const result = await analyzeCombined({
-                        profile: account.profile as Parameters<typeof analyzeCombined>[0]['profile'],
-                        recentPosts: account.recentPosts as Parameters<typeof analyzeCombined>[0]['recentPosts'],
-                        refreshCacheSnapshot: account.profileSource === 'provider',
-                        requestId, // 토큰 추적용
-                    });
-                    return { username: account.profile.username, result };
-                } catch {
-                    console.error('Combined analysis failed for one account', { requestId });
-                    return {
-                        username: account.profile.username,
-                        result: {
-                            gender: 'unknown' as const,
-                            genderConfidence: 0,
-                            genderReasoning: 'Analysis failed',
-                        },
-                    };
-                }
-            })
+    const pendingBatch = batch.filter(account => (
+        !Object.prototype.hasOwnProperty.call(combinedResults, account.profile.username)
+    ));
+    for (let i = 0; i < pendingBatch.length; i += subBatchSize) {
+        const subBatch = pendingBatch.slice(i, i + subBatchSize);
+        const generationStepData = beginGeminiGeneration(
+            { ...stepData, combinedResults: { ...combinedResults } },
+            {
+                kind: 'combined',
+                operationKey: `combined:${batchIndex}:${Math.floor(i / subBatchSize)}`,
+                inputIds: subBatch.map(account => account.profile.username),
+            }
+        );
+        await updateStep(
+            requestId,
+            'analyze',
+            generationStepData,
+            progress,
+            `AI 분석 중... (${batchIndex + 1}/${totalBatches})`
+        );
+        const outcomes = await Promise.allSettled(
+            subBatch.map(account => analyzeCombined({
+                profile: account.profile as Parameters<typeof analyzeCombined>[0]['profile'],
+                recentPosts: account.recentPosts as Parameters<typeof analyzeCombined>[0]['recentPosts'],
+                refreshCacheSnapshot: account.profileSource === 'provider',
+                requestId,
+            }))
         );
 
-        for (const { username, result } of results) {
+        let ambiguousGenerationError: unknown;
+        let accountFailure: unknown;
+        let accountFailed = false;
+        for (let resultIndex = 0; resultIndex < outcomes.length; resultIndex++) {
+            const outcome = outcomes[resultIndex];
+            const account = subBatch[resultIndex];
+            if (!account || !outcome) continue;
+            if (outcome.status === 'rejected') {
+                accountFailed = true;
+                console.error('Combined analysis failed for one account', { requestId });
+                if (isAmbiguousGeminiGenerationError(outcome.reason)) {
+                    ambiguousGenerationError ??= outcome.reason;
+                } else {
+                    accountFailure ??= outcome.reason;
+                }
+                continue;
+            }
+
+            const username = account.profile.username;
+            const result = outcome.value;
             combinedResults[username] = {
                 gender: result.gender,
                 genderConfidence: result.genderConfidence,
@@ -728,6 +1154,34 @@ async function processAnalyze(requestId: string, stepData: StepData) {
                 isForeigner: result.isForeigner,
                 foreignerConfidence: result.foreignerConfidence,
             };
+        }
+
+        let checkpointError: unknown;
+        try {
+            await updateStep(
+                requestId,
+                'analyze',
+                clearGeminiGeneration({ ...stepData, combinedResults }),
+                progress,
+                `AI 분석 중... (${batchIndex + 1}/${totalBatches})`
+            );
+        } catch (error) {
+            checkpointError = error;
+        }
+
+        // An ambiguous generation is terminal. A checkpoint failure after this
+        // sub-batch may also follow a charged success, so fail closed instead of
+        // classifying it as transient and replaying the generation.
+        if (ambiguousGenerationError) throw ambiguousGenerationError;
+        if (checkpointError) {
+            throw new Error(
+                'AI_RESULT_PERSISTENCE_ERROR: generated classification results could not be checkpointed.'
+            );
+        }
+        if (accountFailed) {
+            throw accountFailure instanceof Error
+                ? accountFailure
+                : new Error('AI_ANALYSIS_ERROR: account classification failed.');
         }
     }
 
@@ -767,8 +1221,33 @@ interface StoredInteractionJob {
     coverage: unknown;
 }
 
-function interactionUsageContext(usage: InteractionUsage) {
+function interactionUsageContext(
+    usage: InteractionUsage,
+    providerRun: ProviderRunCheckpoint
+) {
     return {
+        ...(providerRun.resumeRunId ? { resumeRunId: providerRun.resumeRunId } : {}),
+        ...(providerRun.logicalProvider
+            ? { logicalProvider: providerRun.logicalProvider }
+            : {}),
+        ...(providerRun.actorId ? { actorId: providerRun.actorId } : {}),
+        ...(providerRun.credentialSlot
+            ? { credentialSlot: providerRun.credentialSlot }
+            : {}),
+        ...(providerRun.maxChargeUsd !== undefined
+            ? { maxChargeUsd: providerRun.maxChargeUsd }
+            : {}),
+        ...(providerRun.startReserved ? { startReserved: true } : {}),
+        ...(providerRun.onBeforeRunStart
+            ? { onBeforeRunStart: providerRun.onBeforeRunStart }
+            : {}),
+        ...(providerRun.onRunStarted ? { onRunStarted: providerRun.onRunStarted } : {}),
+        ...(providerRun.onCostRunStarted
+            ? { onCostRunStarted: providerRun.onCostRunStarted }
+            : {}),
+        ...(providerRun.onCostRunFinished
+            ? { onCostRunFinished: providerRun.onCostRunFinished }
+            : {}),
         recordUsage(delta: ProviderUsageDelta) {
             usage.estimatedCostUsd += delta.estimated_cost_usd ?? 0;
         },
@@ -857,8 +1336,15 @@ function getCandidateIntermediateEvidence(
 
 function interactionErrorCode(error: unknown): string {
     const message = error instanceof Error ? error.message : '';
-    const match = message.match(/(?:SCRAPING|INTERACTION)_[A-Z_]+/);
+    const match = message.match(/(?:ANALYSIS|SCRAPING|INTERACTION)_[A-Z_]+/);
     return match?.[0]?.slice(0, 100) ?? 'INTERACTION_PROVIDER_ERROR';
+}
+
+function interactionOperationKey(
+    kind: StoredInteractionJob['kind'],
+    batchIndex: number
+): string {
+    return `interaction:${kind}:${batchIndex}`;
 }
 
 async function persistInteractionJob(input: {
@@ -897,7 +1383,11 @@ async function persistInteractionJob(input: {
     requireSingleMutationRow(mutation, 'interaction job upsert');
 }
 
-async function failInterruptedInteractionJobs(requestId: string) {
+async function failLegacyRunningInteractionJob(
+    requestId: string,
+    kind: StoredInteractionJob['kind'],
+    batchIndex: number
+) {
     const mutation = await supabaseAdmin
         .from('analysis_interaction_jobs')
         .update({
@@ -906,10 +1396,31 @@ async function failInterruptedInteractionJobs(requestId: string) {
             updated_at: new Date().toISOString(),
         })
         .eq('request_id', requestId)
-        .eq('status', 'running');
+        .eq('kind', kind)
+        .eq('batch_index', batchIndex)
+        .eq('status', 'running')
+        .select('id');
     if (mutation.error) {
         throw new Error('ANALYSIS_PERSISTENCE_ERROR: interrupted interaction jobs update failed.');
     }
+    if ((mutation.data?.length ?? 0) !== 1) {
+        throw new Error('ANALYSIS_PERSISTENCE_ERROR: legacy interaction job update missed.');
+    }
+    throw new Error(
+        'INTERACTION_RUN_CHECKPOINT_ERROR: legacy interaction job cannot be resumed safely.'
+    );
+}
+
+async function keepResumableInteractionJobRunning(
+    error: unknown,
+    requestId: string,
+    operationKey: string
+): Promise<boolean> {
+    if (!isRetryablePipelineError(error)) return false;
+    return Boolean(await getAnalysisProviderRun(supabaseAdmin, {
+        requestId,
+        operationKey,
+    }));
 }
 
 async function persistInteractionEvidence(
@@ -974,9 +1485,11 @@ async function getInteractionEvidence(requestId: string): Promise<InteractionEvi
 
 async function collectTargetInteractionKind(input: {
     requestId: string;
+    userId: string;
     kind: 'target_likers' | 'target_comments';
     posts: InstagramPost[];
     femaleUsernames: string[];
+    existingStatus?: StoredInteractionJob['status'];
 }) {
     const postLimit = input.kind === 'target_likers'
         ? TARGET_LIKER_POST_LIMIT
@@ -989,6 +1502,20 @@ async function collectTargetInteractionKind(input: {
     const limit = input.kind === 'target_likers'
         ? TARGET_LIKER_LIMIT_PER_POST
         : TARGET_COMMENT_LIMIT_PER_POST;
+    const operationKey = interactionOperationKey(input.kind, 0);
+    const providerRun = await analysisProviderRunCheckpoint(supabaseAdmin, {
+        requestId: input.requestId,
+        userId: input.userId,
+        expectedStep: 'interactions',
+        operationKey,
+    });
+    if (
+        input.existingStatus === 'running'
+        && !providerRun.resumeRunId
+        && !providerRun.startReserved
+    ) {
+        await failLegacyRunningInteractionJob(input.requestId, input.kind, 0);
+    }
 
     await persistInteractionJob({
         requestId: input.requestId,
@@ -1007,13 +1534,13 @@ async function collectTargetInteractionKind(input: {
             likers = await apifyInteractionAdapter.getPostLikers(
                 urls,
                 limit,
-                interactionUsageContext(usage)
+                interactionUsageContext(usage, providerRun)
             );
         } else {
             comments = await apifyInteractionAdapter.getPostComments(
                 urls,
                 limit,
-                interactionUsageContext(usage)
+                interactionUsageContext(usage, providerRun)
             );
         }
         const extracted = extractTargetInteractions(
@@ -1038,6 +1565,13 @@ async function collectTargetInteractionKind(input: {
             status: 'completed',
         });
     } catch (error) {
+        if (await keepResumableInteractionJobRunning(
+            error,
+            input.requestId,
+            operationKey
+        )) {
+            throw error;
+        }
         await persistInteractionJob({
             requestId: input.requestId,
             kind: input.kind,
@@ -1050,11 +1584,19 @@ async function collectTargetInteractionKind(input: {
             status: 'failed',
             errorCode: interactionErrorCode(error),
         });
+        throw new Error(
+            `${interactionErrorCode(error)}: target interaction collection failed.`
+        );
     }
+    await clearAnalysisProviderRun(supabaseAdmin, {
+        requestId: input.requestId,
+        operationKey,
+    });
 }
 
 async function processTargetInteractions(
     requestId: string,
+    userId: string,
     targetId: string,
     stepData: StepData,
     targetPosts: InstagramPost[],
@@ -1062,28 +1604,63 @@ async function processTargetInteractions(
     enabled: { likers: boolean; comments: boolean }
 ) {
     const existingJobs = await getInteractionJobs(requestId);
-    const terminalKinds = new Set(existingJobs.map(job => job.kind));
-    if (!enabled.likers) terminalKinds.add('target_likers');
-    if (!enabled.comments) terminalKinds.add('target_comments');
+    const completedKinds = new Set(existingJobs
+        .filter(job => job.status === 'completed')
+        .map(job => job.kind));
+    if (enabled.likers && existingJobs.some(job =>
+        job.kind === 'target_likers' && job.status === 'failed'
+    )) {
+        throw new Error('INTERACTION_PROVIDER_ERROR: target liker job did not complete.');
+    }
+    if (enabled.comments && existingJobs.some(job =>
+        job.kind === 'target_comments' && job.status === 'failed'
+    )) {
+        throw new Error('INTERACTION_PROVIDER_ERROR: target comment job did not complete.');
+    }
+    await Promise.all(existingJobs
+        .filter(job => job.status === 'completed' && (
+            (enabled.likers && job.kind === 'target_likers')
+            || (enabled.comments && job.kind === 'target_comments')
+        ))
+        .map(job => clearAnalysisProviderRun(supabaseAdmin, {
+            requestId,
+            operationKey: interactionOperationKey(job.kind, job.batch_index),
+        })));
     const femaleUsernames = femaleAccounts.map(account => account.profile.username);
     const tasks: Promise<void>[] = [];
-    if (!terminalKinds.has('target_likers')) {
+    if (enabled.likers && !completedKinds.has('target_likers')) {
+        const existing = existingJobs.find(job => job.kind === 'target_likers');
         tasks.push(collectTargetInteractionKind({
             requestId,
+            userId,
             kind: 'target_likers',
             posts: targetPosts,
             femaleUsernames,
+            existingStatus: existing?.status,
         }));
     }
-    if (!terminalKinds.has('target_comments')) {
+    if (enabled.comments && !completedKinds.has('target_comments')) {
+        const existing = existingJobs.find(job => job.kind === 'target_comments');
         tasks.push(collectTargetInteractionKind({
             requestId,
+            userId,
             kind: 'target_comments',
             posts: targetPosts,
             femaleUsernames,
+            existingStatus: existing?.status,
         }));
     }
-    await Promise.all(tasks);
+    const taskResults = await Promise.allSettled(tasks);
+    const rejectedTask = taskResults.find(result => result.status === 'rejected');
+    if (rejectedTask?.status === 'rejected') throw rejectedTask.reason;
+
+    const completedJobs = await getInteractionJobs(requestId);
+    if (enabled.likers) {
+        requireCompletedInteractionJob(completedJobs, 'target_likers', 0);
+    }
+    if (enabled.comments) {
+        requireCompletedInteractionJob(completedJobs, 'target_comments', 0);
+    }
 
     const evidence = await getInteractionEvidence(requestId);
     const observedCandidates = new Set(evidence
@@ -1122,6 +1699,7 @@ async function processTargetInteractions(
 
 async function processCandidateInteractionBatch(
     requestId: string,
+    userId: string,
     targetId: string,
     stepData: StepData,
     femaleAccounts: ReturnType<typeof femaleInteractionAccounts>
@@ -1136,7 +1714,32 @@ async function processCandidateInteractionBatch(
     }
 
     const existingJobs = await getInteractionJobs(requestId, 'candidate_likers');
-    if (!existingJobs.some(job => job.batch_index === batchIndex)) {
+    const existingJob = existingJobs.find(job => job.batch_index === batchIndex);
+    if (existingJob?.status === 'failed') {
+        throw new Error('INTERACTION_PROVIDER_ERROR: candidate liker job did not complete.');
+    }
+    const operationKey = interactionOperationKey('candidate_likers', batchIndex);
+    if (existingJob?.status === 'completed') {
+        await clearAnalysisProviderRun(supabaseAdmin, { requestId, operationKey });
+    }
+    if (!existingJob || existingJob.status === 'running') {
+        const providerRun = await analysisProviderRunCheckpoint(supabaseAdmin, {
+            requestId,
+            userId,
+            expectedStep: 'interactions',
+            operationKey,
+        });
+        if (
+            existingJob?.status === 'running'
+            && !providerRun.resumeRunId
+            && !providerRun.startReserved
+        ) {
+            await failLegacyRunningInteractionJob(
+                requestId,
+                'candidate_likers',
+                batchIndex
+            );
+        }
         const batchUsernames = new Set(usernames.slice(
             batchIndex * CANDIDATE_INTERACTION_BATCH_SIZE,
             (batchIndex + 1) * CANDIDATE_INTERACTION_BATCH_SIZE
@@ -1169,7 +1772,7 @@ async function processCandidateInteractionBatch(
                 const likers = await apifyInteractionAdapter.getPostLikers(
                     urls,
                     CANDIDATE_LIKER_LIMIT_PER_POST,
-                    interactionUsageContext(usage)
+                    interactionUsageContext(usage, providerRun)
                 );
                 const extracted = extractCandidateInteractions(accounts, likers, targetId);
                 await persistInteractionEvidence(requestId, extracted.evidence);
@@ -1185,6 +1788,13 @@ async function processCandidateInteractionBatch(
                     status: 'completed',
                 });
             } catch (error) {
+                if (await keepResumableInteractionJobRunning(
+                    error,
+                    requestId,
+                    operationKey
+                )) {
+                    throw error;
+                }
                 await persistInteractionJob({
                     requestId,
                     kind: 'candidate_likers',
@@ -1197,7 +1807,11 @@ async function processCandidateInteractionBatch(
                     status: 'failed',
                     errorCode: interactionErrorCode(error),
                 });
+                throw new Error(
+                    `${interactionErrorCode(error)}: candidate interaction collection failed.`
+                );
             }
+            await clearAnalysisProviderRun(supabaseAdmin, { requestId, operationKey });
         }
     }
 
@@ -1233,6 +1847,7 @@ async function processInteractionScores(
         getInteractionJobs(requestId),
         getInteractionEvidence(requestId),
     ]);
+    requireNoIncompleteInteractionJobs(jobs);
     const completedJobs = jobs.filter(job => job.status === 'completed');
     const targetLikeCoverage = completedJobs
         .filter(job => job.kind === 'target_likers')
@@ -1296,10 +1911,10 @@ async function processInteractionScores(
 // Step 4: 관측된 양방향 좋아요/댓글 수집 + 커버리지 점수화
 async function processInteractions(
     requestId: string,
+    userId: string,
     targetId: string,
     stepData: StepData
 ) {
-    await failInterruptedInteractionJobs(requestId);
     const targetPosts = targetPostsFromStepData(stepData);
     const femaleAccounts = femaleInteractionAccounts(stepData);
     const enabled = {
@@ -1317,6 +1932,7 @@ async function processInteractions(
         case 'target':
             return processTargetInteractions(
                 requestId,
+                userId,
                 targetId,
                 stepData,
                 targetPosts,
@@ -1329,6 +1945,7 @@ async function processInteractions(
             }
             return processCandidateInteractionBatch(
                 requestId,
+                userId,
                 targetId,
                 stepData,
                 femaleAccounts
@@ -1424,6 +2041,7 @@ async function processDeepAnalysis(
     targetId: string,
     stepData: StepData
 ) {
+    rejectUnresolvedGeminiGeneration(stepData);
     const femaleAccounts = femaleInteractionAccounts(stepData);
     const [scores, evidence] = await Promise.all([
         getPersistedInteractionScores(requestId),
@@ -1458,15 +2076,35 @@ async function processDeepAnalysis(
         femaleAccounts.map(account => account.profile.username)
     );
 
+    if (highRiskAccounts.length === 0) {
+        const newStepData: StepData = { ...stepData, deepAnalysisStage: 'complete' };
+        await updateStep(requestId, 'finalize', newStepData, 97, '결과 저장 준비 중...');
+        return NextResponse.json({
+            success: true,
+            step: 'finalize',
+            done: false,
+            stats: { deepRiskAccounts: 0 },
+        });
+    }
+
+    const generationStepData = beginGeminiGeneration(
+        { ...stepData, deepAnalysisStage: 'pending' },
+        {
+            kind: 'deep_risk',
+            operationKey: 'deep-risk:0',
+            inputIds: highRiskAccounts.map(entry => entry.username),
+        }
+    );
     await updateStep(
         requestId,
         'deep_analysis',
-        { ...stepData, deepAnalysisStage: 'pending' },
+        generationStepData,
         94,
         `위험 계정 심층 분석 중... (${highRiskAccounts.length}명)`
     );
 
-    await Promise.all(highRiskAccounts.map(async ({ account, username, score }) => {
+    const deepAnalysisResults = await Promise.allSettled(
+        highRiskAccounts.map(async ({ account, username, score }) => {
         const candidateEvidence = evidence.filter(
             row => normalizedUsername(row.candidateUsername) === username
         );
@@ -1539,10 +2177,10 @@ async function processDeepAnalysis(
         try {
             const result = await analyzeDeepRiskNarrative(deepInput);
             lines = parseDeepRiskNarrativeForInput(result.lines, deepInput)?.lines ?? fallback;
-        } catch {
+        } catch (error) {
+            if (isAmbiguousGeminiGenerationError(error)) throw error;
             console.error('Deep risk narrative analysis failed for one account', {
                 requestId,
-                username,
             });
         }
 
@@ -1553,10 +2191,26 @@ async function processDeepAnalysis(
             .eq('candidate_username', username)
             .select('id')
             .maybeSingle();
-        requireSingleMutationRow(mutation, 'deep risk analysis update');
-    }));
+        try {
+            requireSingleMutationRow(mutation, 'deep risk analysis update');
+        } catch {
+            // The Gemini request may already have been billed. Replaying it after
+            // losing the result would trade a database outage for duplicate cost.
+            throw new Error(
+                'AI_RESULT_PERSISTENCE_ERROR: generated deep analysis could not be checkpointed.'
+            );
+        }
+        })
+    );
+    const deepAnalysisFailure = deepAnalysisResults.find(
+        (result): result is PromiseRejectedResult => result.status === 'rejected'
+    );
+    if (deepAnalysisFailure) throw deepAnalysisFailure.reason;
 
-    const newStepData: StepData = { ...stepData, deepAnalysisStage: 'complete' };
+    const newStepData: StepData = clearGeminiGeneration({
+        ...generationStepData,
+        deepAnalysisStage: 'complete',
+    });
     await updateStep(requestId, 'finalize', newStepData, 97, '결과 저장 준비 중...');
     return NextResponse.json({
         success: true,
@@ -1697,20 +2351,11 @@ async function processFinalize(
         requireInsertedMutationRows(insertedResults, resultRows.length, 'analysis results insert');
     }
 
-    // 완료 상태 업데이트
-    const completionMutation = await supabaseAdmin
-        .from('analysis_requests')
-        .update({
-            status: 'completed',
-            current_step: 'completed',
-            progress: 100,
-            progress_step: '분석 완료!',
-            completed_at: new Date().toISOString(),
-        })
-        .eq('id', requestId)
-        .select('id')
-        .maybeSingle();
-    requireSingleMutationRow(completionMutation, 'analysis completion update');
+    await completeAnalysisRequest(supabaseAdmin, {
+        requestId,
+        userId: analysisRequest.user_id,
+        compactStepData: compactCompletedStepData(stepData),
+    });
 
     // 이메일 알림 발송
     if (analysisRequest.users?.email) {

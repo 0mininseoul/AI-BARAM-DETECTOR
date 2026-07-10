@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+    ANALYSIS_STEP_LEASE_SECONDS,
     acquireAnalysisRequestLease,
     isAnalysisRequestOwner,
     releaseAnalysisRequestLease,
@@ -12,6 +13,11 @@ function clientWith(data: unknown, error: { code?: string } | null = null) {
 }
 
 describe('analysis request ownership and lease', () => {
+    it('expires shortly after the serverless hard timeout so queue retries can recover', () => {
+        expect(ANALYSIS_STEP_LEASE_SECONDS).toBeGreaterThan(300);
+        expect(ANALYSIS_STEP_LEASE_SECONDS).toBeLessThanOrEqual(360);
+    });
+
     it('requires the authenticated user to own the analysis request', () => {
         expect(isAnalysisRequestOwner('user-1', 'user-1')).toBe(true);
         expect(isAnalysisRequestOwner('user-1', 'user-2')).toBe(false);

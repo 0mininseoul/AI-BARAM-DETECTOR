@@ -7,6 +7,7 @@ import {
     integerSetting,
     numberSetting,
     runApifyRelationshipActor,
+    selectApifyCredentialSlot,
     type ApifyClientLike,
     type ApifyRelationshipActorDefinition,
     type ApifyRelationshipKind,
@@ -94,6 +95,8 @@ export function parseCoderXRelationshipDataset(
 
 function definition(env: Record<string, string | undefined>): ApifyRelationshipActorDefinition {
     return {
+        logicalProvider: 'coderx',
+        credentialSlot: selectApifyCredentialSlot(env),
         actorId: CODERX_RELATIONSHIP_ACTOR_ID,
         actorConcurrency: integerSetting(env, 'APIFY_ACTOR_CONCURRENCY', 1, 1, 10),
         minimumLimit: 1,
@@ -146,7 +149,8 @@ function definition(env: Record<string, string | undefined>): ApifyRelationshipA
 
 export function makeCoderXProvider(deps: CoderXProviderDeps = {}): ScraperProvider {
     const env = deps.env ?? process.env;
-    const client = () => deps.client ?? getApifyClient(env);
+    const client = (credentialSlot?: ProviderCallContext['credentialSlot']) =>
+        deps.client ?? getApifyClient(env, credentialSlot);
 
     async function collect(
         username: string,
@@ -155,7 +159,7 @@ export function makeCoderXProvider(deps: CoderXProviderDeps = {}): ScraperProvid
         context?: ProviderCallContext
     ) {
         return runApifyRelationshipActor(
-            client(),
+            client(context?.credentialSlot),
             definition(env),
             username,
             kind,

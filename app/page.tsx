@@ -8,6 +8,10 @@ import { trackEvent, EVENTS } from '@/lib/services/analytics';
 import { useAuth } from '@/hooks/useAuth';
 import { LoginModal } from '@/components/login-modal';
 import {
+  getAnalysisStartIdempotency,
+  type AnalysisStartIdempotency,
+} from '@/lib/services/analysis/client-idempotency';
+import {
   TopBar,
   BrandMark,
   Eyebrow,
@@ -96,6 +100,7 @@ export default function LandingPage() {
   const reduce = useReducedMotion();
 
   const inputRef = useRef<HTMLInputElement>(null);
+  const idempotencyRef = useRef<AnalysisStartIdempotency | null>(null);
   const [igId, setIgId] = useState('');
   const [starting, setStarting] = useState(false);
   const [heroError, setHeroError] = useState<string | null>(null);
@@ -132,9 +137,17 @@ export default function LandingPage() {
     setStarting(true);
     setHeroError(null);
     try {
+      idempotencyRef.current = getAnalysisStartIdempotency(
+        idempotencyRef.current,
+        id,
+        'male'
+      );
       const res = await fetch('/api/analysis/start', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyRef.current.key,
+        },
         body: JSON.stringify({ targetInstagramId: id, targetGender: 'male' }),
       });
       const data = await res.json();

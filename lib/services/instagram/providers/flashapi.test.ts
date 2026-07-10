@@ -430,7 +430,7 @@ describe('FlashAPI pagination and reliability', () => {
             })
         );
         const client = clientWith(fetchFn, { timeoutMs: 5 });
-        await expect(client.resolveUserId('target')).rejects.toThrow('TIMEOUT');
+        await expect(client.resolveUserId('target')).rejects.toThrow('AMBIGUOUS');
     });
 
     it('rejects an empty page with a cursor', async () => {

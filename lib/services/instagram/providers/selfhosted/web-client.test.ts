@@ -36,6 +36,12 @@ function rawUser(username: string) {
 }
 
 describe('selfhosted web profile client', () => {
+    it('keeps the default cold-profile start schedule within two minutes', () => {
+        const config = getWebProfileConfig({});
+        expect(config.minIntervalMs).toBe(300);
+        expect((350 - 1) * config.minIntervalMs).toBeLessThan(120_000);
+    });
+
     it('returns null only for HTTP 404 or an explicit data.user=null', async () => {
         const fetchFn = vi.fn<typeof fetch>()
             .mockResolvedValueOnce(response({}, 404))

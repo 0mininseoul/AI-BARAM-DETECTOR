@@ -19,7 +19,11 @@ function item(username: string) {
 }
 
 function mockClient(items: Array<Record<string, unknown>>) {
-    const call = vi.fn().mockResolvedValue({ status: 'SUCCEEDED', defaultDatasetId: 'dataset' });
+    const call = vi.fn().mockResolvedValue({ id: 'CoderxRun12345678' });
+    const waitForFinish = vi.fn().mockResolvedValue({
+        status: 'SUCCEEDED',
+        defaultDatasetId: 'dataset',
+    });
     const listItems = vi.fn(async ({ offset = 0, limit = items.length }: { offset?: number; limit?: number } = {}) => ({
         items: items.slice(offset, offset + limit),
         total: items.length,
@@ -28,7 +32,8 @@ function mockClient(items: Array<Record<string, unknown>>) {
         limit,
     }));
     const client = {
-        actor: vi.fn(() => ({ call })),
+        actor: vi.fn(() => ({ start: call })),
+        run: vi.fn(() => ({ waitForFinish, abort: vi.fn() })),
         dataset: vi.fn(() => ({ listItems })),
     } as unknown as ApifyClientLike;
     return { client, call, listItems };
@@ -49,10 +54,15 @@ describe('CoderX manual provider', () => {
             item('bob'),
             { cursor: 'resume', total_scraped: 2 },
         ]);
-        const provider = makeCoderXProvider({ client, env: {} });
+        const provider = makeCoderXProvider({
+            client,
+            env: { APIFY_API_TOKEN_SLOT: 'secondary' },
+        });
         let estimatedCost = 0;
+        const onCostRunStarted = vi.fn();
 
         const result = await provider.getFollowers!('target', 2, {
+            onCostRunStarted,
             recordUsage(delta) {
                 estimatedCost += delta.estimated_cost_usd ?? 0;
             },
@@ -62,10 +72,43 @@ describe('CoderX manual provider', () => {
         expect(client.actor).toHaveBeenCalledWith(CODERX_RELATIONSHIP_ACTOR_ID);
         expect(call).toHaveBeenCalledWith(
             { username: 'target', scrape_type: 'followers', max_items: 2 },
-            expect.objectContaining({ maxItems: 3, log: null })
+            expect.objectContaining({
+                maxItems: 3,
+                timeout: 300,
+                restartOnError: false,
+            })
         );
         expect(call.mock.calls[0]?.[1]).not.toHaveProperty('build');
         expect(estimatedCost).toBeCloseTo(3 * 0.0013);
+        expect(onCostRunStarted).toHaveBeenCalledWith(expect.objectContaining({
+            logicalProvider: 'coderx',
+            actorId: CODERX_RELATIONSHIP_ACTOR_ID,
+            credentialSlot: 'secondary',
+            maxChargeUsd: 0.0039,
+        }));
+    });
+
+    it('resumes only the stored CoderX Actor identity without starting a new run', async () => {
+        const { client, call } = mockClient([item('alice')]);
+        const provider = makeCoderXProvider({ client, env: {} });
+        const onCostRunStarted = vi.fn();
+
+        await expect(provider.getFollowers!('target', 1, {
+            logicalProvider: 'coderx',
+            actorId: CODERX_RELATIONSHIP_ACTOR_ID,
+            credentialSlot: 'secondary',
+            maxChargeUsd: 0.0039,
+            resumeRunId: 'CoderxRun12345678',
+            onCostRunStarted,
+            recordUsage: vi.fn(),
+        })).resolves.toHaveLength(1);
+
+        expect(call).not.toHaveBeenCalled();
+        expect(client.run).toHaveBeenCalledWith('CoderxRun12345678');
+        expect(onCostRunStarted).toHaveBeenCalledWith(expect.objectContaining({
+            credentialSlot: 'secondary',
+            maxChargeUsd: 0.0039,
+        }));
     });
 
     it('rejects cursor totals that do not match delivered users', async () => {

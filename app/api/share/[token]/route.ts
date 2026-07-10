@@ -7,6 +7,7 @@ import {
     targetProfileImageFromStepData,
     toResultInteractionSummary,
 } from '@/lib/services/analysis/result-interactions';
+import { createImageProxyPath } from '@/lib/services/media/image-proxy-token';
 import { NextResponse } from 'next/server';
 
 export async function GET(
@@ -112,7 +113,7 @@ export async function GET(
             return {
                 instagramId,
                 fullName: result.suspect_full_name,
-                profileImage: result.suspect_profile_image,
+                profileImage: createImageProxyPath(result.suspect_profile_image),
                 instagramUrl: `https://instagram.com/${instagramId}`,
                 riskGrade: result.risk_grade as 'high_risk' | 'caution' | 'normal',
                 bio: result.bio || '',
@@ -125,7 +126,7 @@ export async function GET(
         const privateAccountsList = privateAccounts?.map((account) => ({
             instagramId: account.instagram_id,
             fullName: account.full_name,
-            profileImage: account.profile_image,
+            profileImage: createImageProxyPath(account.profile_image),
             instagramUrl: `https://instagram.com/${account.instagram_id}`,
         })) || [];
 
@@ -136,7 +137,9 @@ export async function GET(
             isShared: true, // 공유 링크로 접근했음을 표시
             summary: {
                 targetInstagramId: analysisRequest.target_instagram_id,
-                targetProfileImage: targetProfileImageFromStepData(analysisRequest.step_data),
+                targetProfileImage: createImageProxyPath(
+                    targetProfileImageFromStepData(analysisRequest.step_data)
+                ),
                 mutualFollows: analysisRequest.mutual_follows || 0,
                 genderRatio,
             },

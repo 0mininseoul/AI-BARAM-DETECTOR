@@ -45,6 +45,13 @@ export class AnalysisIdempotencyConflictError extends Error {
     }
 }
 
+export class AnalysisAlreadyInProgressError extends Error {
+    constructor() {
+        super('ANALYSIS_ALREADY_IN_PROGRESS');
+        this.name = 'AnalysisAlreadyInProgressError';
+    }
+}
+
 function safeErrorCode(error: RpcError): string {
     return typeof error.code === 'string' && /^[A-Za-z0-9_]{1,32}$/.test(error.code)
         ? error.code
@@ -72,6 +79,9 @@ export async function consumeQuotaAndCreateAnalysisRequest(
         }
         if (error.message === 'ANALYSIS_IDEMPOTENCY_CONFLICT') {
             throw new AnalysisIdempotencyConflictError();
+        }
+        if (error.message === 'ANALYSIS_ALREADY_IN_PROGRESS') {
+            throw new AnalysisAlreadyInProgressError();
         }
         throw new Error(
             `ANALYSIS_START_TRANSACTION_ERROR: request creation failed (${safeErrorCode(error)}).`

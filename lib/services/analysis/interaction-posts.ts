@@ -1,15 +1,7 @@
 import type { InstagramPost } from '@/lib/types/instagram';
+import { instagramTimestampMs } from '@/lib/services/instagram/timestamp';
 
 const INSTAGRAM_SHORTCODE_PATTERN = /^[A-Za-z0-9_-]{5,64}$/;
-
-function timestampMs(value: string): number {
-    const numeric = Number(value);
-    if (Number.isFinite(numeric) && numeric > 0) {
-        return numeric > 10_000_000_000 ? numeric : numeric * 1_000;
-    }
-    const parsed = Date.parse(value);
-    return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
-}
 
 export function instagramPostUrl(post: Pick<InstagramPost, 'shortCode' | 'type'>): string {
     if (!INSTAGRAM_SHORTCODE_PATTERN.test(post.shortCode)) {
@@ -30,7 +22,11 @@ export function selectRecentInteractionPosts(
 
     const seen = new Set<string>();
     return posts
-        .map((post, index) => ({ post, index, timestamp: timestampMs(post.timestamp) }))
+        .map((post, index) => ({
+            post,
+            index,
+            timestamp: instagramTimestampMs(post.timestamp),
+        }))
         .filter(({ post }) => {
             if (!post.id.trim() || !INSTAGRAM_SHORTCODE_PATTERN.test(post.shortCode)) return false;
             const key = post.shortCode.toLowerCase();

@@ -5,6 +5,8 @@ import {
     integerSetting,
     numberSetting,
     runWithApifyActorSlot,
+    selectApifyCredentialSlot,
+    startOrResumeApifyActor,
     type ApifyClientLike,
 } from './apify-relationship';
 import type { ProviderCallContext } from './types';
@@ -66,6 +68,7 @@ interface ActorDefinition {
     actorId: string;
     actorBuild: string;
     actorConcurrency: number;
+    credentialSlot: 'primary' | 'secondary';
     datasetReadRetries: number;
     datasetRetryBaseDelayMs: number;
     estimatedCostPerResultUsd: number;
@@ -184,6 +187,7 @@ function definition(
             kind === 'likers' ? DEFAULT_LIKERS_BUILD : DEFAULT_COMMENTS_BUILD
         ),
         actorConcurrency: integerSetting(env, 'APIFY_ACTOR_CONCURRENCY', 2, 1, 10),
+        credentialSlot: selectApifyCredentialSlot(env),
         datasetReadRetries: integerSetting(env, 'APIFY_DATASET_READ_RETRIES', 5, 0, 8),
         datasetRetryBaseDelayMs: integerSetting(
             env,
@@ -241,7 +245,8 @@ function definition(
 function assertOperationBudget(
     urlCount: number,
     limitPerPost: number,
-    config: ActorDefinition
+    config: ActorDefinition,
+    storedMaximumChargeUsd?: number
 ): { maximumChargeUsd: number; totalLimit: number } {
     if (urlCount < 1 || urlCount > config.maximumUrls) {
         throw new Error(
@@ -264,12 +269,18 @@ function assertOperationBudget(
         );
     }
     const rawEstimate = totalLimit * config.estimatedCostPerResultUsd;
-    if (rawEstimate > config.maximumEstimatedCostUsd + Number.EPSILON) {
+    if (
+        storedMaximumChargeUsd === undefined
+        && rawEstimate > config.maximumEstimatedCostUsd + Number.EPSILON
+    ) {
         throw new Error(
             'SCRAPING_BUDGET_ERROR: Apify interaction estimated-cost ceiling would be exceeded.'
         );
     }
-    return { maximumChargeUsd: Number(rawEstimate.toFixed(12)), totalLimit };
+    return {
+        maximumChargeUsd: storedMaximumChargeUsd ?? Number(rawEstimate.toFixed(12)),
+        totalLimit,
+    };
 }
 
 function actorRequestError(error: unknown): Error {
@@ -405,21 +416,32 @@ async function runActor(
     const { maximumChargeUsd, totalLimit } = assertOperationBudget(
         urlCount,
         limitPerPost,
-        config
+        config,
+        context?.maxChargeUsd
     );
     return runWithApifyActorSlot(config.actorConcurrency, async () => {
         context?.recordUsage({ request_count: 1 });
         let run;
         try {
-            run = await client.actor(config.actorId).call(input, {
-                build: config.actorBuild,
-                timeout: config.timeoutSecs,
-                waitSecs: config.timeoutSecs,
+            run = await startOrResumeApifyActor(client, config.actorId, input, {
+                logicalProvider: 'apify',
+                credentialSlot: config.credentialSlot,
+                actorBuild: config.actorBuild,
+                timeoutSecs: config.timeoutSecs,
                 maxItems: totalLimit,
                 maxTotalChargeUsd: maximumChargeUsd,
-                log: null,
-            });
+            }, context);
         } catch (error) {
+            if (
+                error instanceof Error
+                && (
+                    error.message.startsWith('SCRAPING_AMBIGUOUS_START_ERROR:')
+                    || error.message.startsWith('SCRAPING_RUN_CHECKPOINT_ERROR:')
+                    || error.message.startsWith('ANALYSIS_PERSISTENCE_ERROR:')
+                )
+            ) {
+                throw error;
+            }
             throw actorRequestError(error);
         }
 
@@ -644,14 +666,15 @@ export function makeApifyInteractionAdapter(
     deps: ApifyInteractionDeps = {}
 ): ApifyInteractionAdapter {
     const env = deps.env ?? process.env;
-    const client = () => deps.client ?? getApifyClient(env);
+    const client = (credentialSlot?: ProviderCallContext['credentialSlot']) =>
+        deps.client ?? getApifyClient(env, credentialSlot);
 
     return {
         async getPostLikers(postUrls, limitPerPost, context) {
             const posts = parseRequestedPosts(postUrls);
             const config = definition(env, 'likers');
             const items = await runActor(
-                client(),
+                client(context?.credentialSlot),
                 config,
                 {
                     posts: [...posts.values()].map((post) => post.canonicalUrl),
@@ -675,7 +698,7 @@ export function makeApifyInteractionAdapter(
             const posts = parseRequestedPosts(postUrls);
             const config = definition(env, 'comments');
             const items = await runActor(
-                client(),
+                client(context?.credentialSlot),
                 config,
                 {
                     directUrls: [...posts.values()].map((post) => post.canonicalUrl),

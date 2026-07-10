@@ -162,7 +162,7 @@ export function getFlashApiConfig(
         host,
         baseUrl: `https://${host}`,
         timeoutMs: integerFromEnv(env, 'FLASHAPI_TIMEOUT_MS', 10_000, 250, 120_000),
-        retries: integerFromEnv(env, 'FLASHAPI_RETRIES', 2, 0, 5),
+        retries: integerFromEnv(env, 'FLASHAPI_RETRIES', 0, 0, 5),
         retryBaseDelayMs: integerFromEnv(env, 'FLASHAPI_RETRY_BASE_DELAY_MS', 500, 0, 30_000),
         minIntervalMs: integerFromEnv(env, 'FLASHAPI_MIN_INTERVAL_MS', 1_100, 0, 60_000),
         maxPages: integerFromEnv(env, 'FLASHAPI_MAX_PAGES', 200, 1, 10_000),
@@ -520,7 +520,7 @@ export function makeFlashApiClient(deps: FlashApiClientDeps = {}): FlashApiClien
 
                 if (!response.ok) {
                     throw new FlashApiRequestError(
-                        `SCRAPING_ERROR: FlashAPI 요청 실패 (HTTP ${response.status}).`,
+                        `SCRAPING_PAID_REQUEST_ERROR: FlashAPI 요청 실패 (HTTP ${response.status}).`,
                         isRetryableStatus(response.status),
                         parseRetryAfter(response, now)
                     );
@@ -548,8 +548,8 @@ export function makeFlashApiClient(deps: FlashApiClientDeps = {}): FlashApiClien
         const timedOut = lastError instanceof Error && lastError.name === 'AbortError';
         throw new Error(
             timedOut
-                ? 'SCRAPING_TIMEOUT_ERROR: FlashAPI 요청 시간이 초과되었습니다.'
-                : 'SCRAPING_ERROR: FlashAPI transport request failed.'
+                ? 'SCRAPING_PAID_REQUEST_AMBIGUOUS_ERROR: FlashAPI 요청 시간이 초과되었습니다.'
+                : 'SCRAPING_PAID_REQUEST_AMBIGUOUS_ERROR: FlashAPI transport request failed.'
         );
     }
 

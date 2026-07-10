@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto';
 
+// Vercel terminates a step after 300 seconds. The short crash margin lets the current
+// Cloud Tasks retry schedule reacquire before its bounded attempts are exhausted.
+export const ANALYSIS_STEP_LEASE_SECONDS = 330;
+
 interface RpcError {
     code?: string;
 }

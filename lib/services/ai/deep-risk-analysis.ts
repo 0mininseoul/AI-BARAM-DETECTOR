@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { INSTAGRAM_USERNAME_PATTERN } from '@/lib/services/instagram/username';
+import { normalizeInstagramTimestamp } from '@/lib/services/instagram/timestamp';
 import { analyzeWithGemini } from './gemini';
 import {
     getAnalysisImagePolicy,
@@ -70,7 +71,9 @@ const postSchema = z.object({
     shortCode: z.string().trim().min(1).max(100).optional(),
     caption: z.string().max(5_000).optional(),
     imageUrl: z.string().url().max(8_192).optional(),
-    timestamp: z.string().datetime({ offset: true }),
+    timestamp: z.string().optional().transform(value => (
+        normalizeInstagramTimestamp(value) || undefined
+    )),
 }).strict();
 
 const matchedCommentSchema = z.object({
@@ -281,7 +284,11 @@ function truncateText(value: string | undefined, maximum: number): string | null
 
 function recentPosts(input: z.output<typeof deepRiskNarrativeInputSchema>) {
     return input.recentPosts
-        .map((post, index) => ({ post, index, time: Date.parse(post.timestamp) }))
+        .map((post, index) => ({
+            post,
+            index,
+            time: post.timestamp ? Date.parse(post.timestamp) : Number.NEGATIVE_INFINITY,
+        }))
         .sort((left, right) => right.time - left.time || left.index - right.index)
         .slice(0, MAX_DEEP_RISK_POSTS)
         .map(item => item.post);
@@ -306,7 +313,7 @@ function buildPrompt(input: z.output<typeof deepRiskNarrativeInputSchema>, prepa
         },
         recentPosts: posts.map(post => ({
             id: post.id,
-            timestamp: post.timestamp,
+            timestamp: post.timestamp ?? null,
             caption: truncateText(post.caption, MAX_PROMPT_CAPTION_LENGTH),
             attachedImageNumber: post.imageUrl
                 ? imageNumberByUrl.get(post.imageUrl) ?? null

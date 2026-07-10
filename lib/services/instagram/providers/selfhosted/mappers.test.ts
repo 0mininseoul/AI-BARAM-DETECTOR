@@ -34,6 +34,7 @@ describe('mapUserToProfile', () => {
         expect(p1.imageUrl).toBe('https://cdn.example.com/post1.jpg');
         expect(p1.likesCount).toBe(42);
         expect(p1.commentsCount).toBe(5);
+        expect(p1.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
         expect(p2.type).toBe('video');
         expect(p2.videoUrl).toBe('https://cdn.example.com/post2.mp4');
         expect(p2.likesCount).toBe(10);

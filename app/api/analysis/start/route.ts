@@ -4,6 +4,7 @@ import { NextResponse } from 'next/server';
 import { parseScraperProviderSelection } from '@/lib/services/instagram/config';
 import { hasValidScraperAdminAuthorization } from '@/lib/services/instagram/admin-selection';
 import {
+    AnalysisAlreadyInProgressError,
     AnalysisIdempotencyConflictError,
     AnalysisLimitExceededError,
     consumeQuotaAndCreateAnalysisRequest,
@@ -14,6 +15,14 @@ import {
     getAnalysisTasksConfig,
     startAnalysisInBackground,
 } from '@/lib/services/analysis/background-tasks';
+import { expireStaleAnalysisBeforeStart } from '@/lib/services/analysis/start-cleanup';
+import { abortRunningAnalysisProviderRuns } from '@/lib/services/analysis/provider-run';
+import { failAnalysisRequest } from '@/lib/services/analysis/failure';
+import {
+    ANALYSIS_STEP_LEASE_SECONDS,
+    acquireAnalysisRequestLease,
+    releaseAnalysisRequestLease,
+} from '@/lib/services/analysis/request-lease';
 
 // 무료 분석 횟수 제한
 const FREE_ANALYSIS_LIMIT = 1;
@@ -145,6 +154,48 @@ export async function POST(request: Request) {
             return NextResponse.json({ error: '인증 이메일을 확인할 수 없습니다.' }, { status: 400 });
         }
 
+        await expireStaleAnalysisBeforeStart(idempotencyKey, {
+            loadActiveRequest: async () => {
+                const active = await supabaseAdmin
+                    .from('analysis_requests')
+                    .select('id, status, current_step, created_at, idempotency_key')
+                    .eq('user_id', user.id)
+                    .in('status', ['pending', 'processing'])
+                    .maybeSingle();
+                if (active.error) {
+                    throw new Error(
+                        'ANALYSIS_PERSISTENCE_ERROR: active analysis cleanup read failed.'
+                    );
+                }
+                return active.data;
+            },
+            acquireCleanupLease: async (candidate) => acquireAnalysisRequestLease(
+                supabaseAdmin,
+                {
+                    requestId: candidate.id,
+                    userId: user.id,
+                    expectedStep: candidate.currentStep,
+                    leaseSeconds: ANALYSIS_STEP_LEASE_SECONDS,
+                }
+            ),
+            releaseCleanupLease: async (lease) => {
+                await releaseAnalysisRequestLease(supabaseAdmin, lease);
+            },
+            abortProviderRuns: async (candidate) => {
+                await abortRunningAnalysisProviderRuns(supabaseAdmin, {
+                    requestId: candidate.id,
+                    userId: user.id,
+                });
+            },
+            failRequest: async (candidate) => failAnalysisRequest(supabaseAdmin, {
+                requestId: candidate.id,
+                userId: user.id,
+                expectedStep: candidate.currentStep,
+                errorMessage: '분석 처리 시간이 초과되었습니다. 새 분석을 시작해주세요.',
+                compactStepData: {},
+            }),
+        });
+
         let analysisRequest;
         try {
             analysisRequest = await consumeQuotaAndCreateAnalysisRequest(supabaseAdmin, {
@@ -171,6 +222,15 @@ export async function POST(request: Request) {
                 return NextResponse.json(
                     { error: '무료 분석 횟수를 모두 사용했습니다.', code: 'LIMIT_EXCEEDED' },
                     { status: 403 }
+                );
+            }
+            if (error instanceof AnalysisAlreadyInProgressError) {
+                return NextResponse.json(
+                    {
+                        error: '이미 진행 중인 분석이 있습니다.',
+                        code: 'ANALYSIS_ALREADY_IN_PROGRESS',
+                    },
+                    { status: 409 }
                 );
             }
             const message = error instanceof Error ? error.message : 'unknown';

@@ -49,7 +49,7 @@ async function defaultResolveHostname(hostname: string): Promise<ResolvedAddress
     return lookup(hostname, { all: true, verbatim: true });
 }
 
-function matchesAllowedSuffix(hostname: string, suffix: string): boolean {
+export function matchesAllowedHostSuffix(hostname: string, suffix: string): boolean {
     const normalizedSuffix = suffix.toLowerCase().replace(/^\.+|\.+$/g, '');
     return hostname === normalizedSuffix || hostname.endsWith(`.${normalizedSuffix}`);
 }
@@ -167,7 +167,7 @@ export async function validateAllowedRemoteImageUrl(
 
     const hostname = parsed.hostname.toLowerCase().replace(/\.$/, '');
     if (isIP(hostname) !== 0) throw new Error('IP-literal image URLs are not allowed');
-    if (!allowedHostSuffixes.some((suffix) => matchesAllowedSuffix(hostname, suffix))) {
+    if (!allowedHostSuffixes.some((suffix) => matchesAllowedHostSuffix(hostname, suffix))) {
         throw new Error('Image URL host is not allowed');
     }
 

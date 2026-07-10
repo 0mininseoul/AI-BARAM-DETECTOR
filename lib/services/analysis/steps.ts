@@ -1,6 +1,8 @@
 // 분석 단계 정의 및 유틸리티
 
 import type { ScraperProviderSelection } from '@/lib/services/instagram/providers/types';
+import { INSTAGRAM_USERNAME_PATTERN } from '@/lib/services/instagram/username';
+import type { RelationshipCheckpoint } from './relationship-checkpoint';
 
 export type AnalysisStep =
     | 'pending'
@@ -68,10 +70,32 @@ export function calculateBatchProgress(
 // step_data 타입 정의
 export interface StepData {
     scraperOptions?: ScraperProviderSelection;
+    geminiGenerationIntent?: {
+        kind: 'private_names' | 'combined' | 'deep_risk';
+        operationKey: string;
+        inputIds: string[];
+        createdAt: string;
+    };
 
     // collect 단계 결과
     mutualFollows?: string[];
     targetProfileImage?: string;
+    // Durable collect checkpoint. It lets a retry reuse a paid profile Actor result
+    // after the run checkpoint has been cleared.
+    targetProfileCheckpoint?: {
+        profilePicUrl?: string;
+        followersCount: number;
+        followingCount: number;
+        isPrivate: boolean;
+        targetPosts: NonNullable<StepData['targetPosts']>;
+    };
+    relationshipCheckpoint?: RelationshipCheckpoint;
+    privateNameResults?: Array<{
+        id: string;
+        femaleScore: number;
+        isName: boolean;
+        confidence: number;
+    }>;
     publicAccounts?: Array<{
         username: string;
         profilePicUrl?: string;
@@ -87,6 +111,10 @@ export interface StepData {
     }>;
 
     // profiles 단계 결과
+    profileProviderBatchCheckpoint?: {
+        batchIndex: number;
+        usernames: string[];
+    };
     accountsWithPosts?: Array<{
         profileSource?: 'cache' | 'provider';
         profile: {
@@ -165,6 +193,50 @@ export interface StepData {
         confidence: number;
     }>;
     featureBatchIndex?: number;
+}
+
+export function resolveProfileProviderBatchUsernames(
+    checkpoint: StepData['profileProviderBatchCheckpoint'],
+    expectedBatchIndex: number,
+    batchUsernames: readonly string[],
+    currentCacheMissUsernames: readonly string[]
+): string[] {
+    if (!checkpoint) return [...currentCacheMissUsernames];
+    const normalizedBatch = new Set(
+        batchUsernames.map(username => username.trim().toLowerCase())
+    );
+    const normalizedCheckpoint = checkpoint.usernames.map(
+        username => username.trim().toLowerCase()
+    );
+    if (
+        checkpoint.batchIndex !== expectedBatchIndex
+        || checkpoint.usernames.length === 0
+        || checkpoint.usernames.length > PROFILE_BATCH_SIZE
+        || new Set(normalizedCheckpoint).size !== checkpoint.usernames.length
+        || normalizedCheckpoint.some(username => !normalizedBatch.has(username))
+    ) {
+        throw new Error('ANALYSIS_PROVIDER_RUN_ERROR: frozen profile batch input is invalid.');
+    }
+    return [...checkpoint.usernames];
+}
+
+export function compactCompletedStepData(stepData: StepData): StepData {
+    const mutualFollows: string[] = [];
+    const seen = new Set<string>();
+    for (const value of stepData.mutualFollows ?? []) {
+        if (typeof value !== 'string') continue;
+        const username = value.trim().toLowerCase();
+        if (!INSTAGRAM_USERNAME_PATTERN.test(username) || seen.has(username)) continue;
+        seen.add(username);
+        mutualFollows.push(username);
+        if (mutualFollows.length === 10) break;
+    }
+    return {
+        ...(mutualFollows.length > 0 ? { mutualFollows } : {}),
+        ...(typeof stepData.targetProfileImage === 'string' && stepData.targetProfileImage
+            ? { targetProfileImage: stepData.targetProfileImage }
+            : {}),
+    };
 }
 
 // profiles 단계 배치 크기 (더 작게 설정하여 타임아웃 방지)

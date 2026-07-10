@@ -5,6 +5,10 @@ import { useRouter } from 'next/navigation';
 import { useAuth } from '@/hooks/useAuth';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
 import { TopBar, Eyebrow, CaseCard, PrimaryButton } from '@/components/case-ui';
+import {
+    getAnalysisStartIdempotency,
+    type AnalysisStartIdempotency,
+} from '@/lib/services/analysis/client-idempotency';
 
 export default function AnalyzePage() {
     const [instagramId, setInstagramId] = useState('');
@@ -12,7 +16,7 @@ export default function AnalyzePage() {
     const [error, setError] = useState<string | null>(null);
     const router = useRouter();
     const { user } = useAuth();
-    const idempotencyRef = useRef<{ fingerprint: string; key: string } | null>(null);
+    const idempotencyRef = useRef<AnalysisStartIdempotency | null>(null);
 
     // 랜딩 히어로에서 입력한 아이디를 로그인 후 이어받아 프리필
     useEffect(() => {
@@ -49,10 +53,11 @@ export default function AnalyzePage() {
 
         try {
             const targetInstagramId = instagramId.replace('@', '').trim();
-            const fingerprint = `${targetInstagramId.toLowerCase()}:male`;
-            if (idempotencyRef.current?.fingerprint !== fingerprint) {
-                idempotencyRef.current = { fingerprint, key: crypto.randomUUID() };
-            }
+            idempotencyRef.current = getAnalysisStartIdempotency(
+                idempotencyRef.current,
+                targetInstagramId,
+                'male'
+            );
             const response = await fetch('/api/analysis/start', {
                 method: 'POST',
                 headers: {

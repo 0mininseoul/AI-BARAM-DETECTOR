@@ -3,11 +3,12 @@ import {
     downloadSecureImage,
     INSTAGRAM_MEDIA_HOST_SUFFIXES,
     TRUSTED_IMAGE_PROXY_HOST_SUFFIXES,
-    validateAllowedRemoteImageUrl,
 } from '@/lib/services/media/secure-image-fetch';
+import { verifyImageProxyToken } from '@/lib/services/media/image-proxy-token';
 
-const IMAGE_PROXY_MAX_BYTES = 8 * 1024 * 1024;
-const IMAGE_PROXY_TIMEOUT_MS = 8_000;
+const IMAGE_PROXY_MAX_BYTES = 3 * 1024 * 1024;
+const IMAGE_PROXY_TOTAL_TIMEOUT_MS = 6_000;
+const IMAGE_PROXY_DIRECT_TIMEOUT_MS = 4_000;
 const IMAGE_ACCEPT = 'image/jpeg,image/png,image/webp,image/avif,image/*;q=0.8';
 
 const PLACEHOLDER_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="150" height="150" viewBox="0 0 150 150">
@@ -20,21 +21,53 @@ function getPlaceholderResponse() {
     return new NextResponse(PLACEHOLDER_SVG, {
         headers: {
             'Content-Type': 'image/svg+xml',
-            'Cache-Control': 'public, max-age=3600',
-            'Access-Control-Allow-Origin': '*',
+            'Cache-Control': 'private, max-age=300',
+            'Content-Length': String(Buffer.byteLength(PLACEHOLDER_SVG)),
+            'Content-Security-Policy': "default-src 'none'; sandbox",
+            'Cross-Origin-Resource-Policy': 'same-origin',
             'X-Content-Type-Options': 'nosniff',
         },
     });
 }
 
-function imageResponse(bytes: Buffer, contentType: string) {
+function imageCacheHeaders(expiresAt: string): Record<string, string> {
+    const remainingSeconds = Math.max(
+        0,
+        Number(expiresAt) - Math.ceil(Date.now() / 1_000)
+    );
+    if (remainingSeconds === 0) {
+        return {
+            'Cache-Control': 'private, no-store',
+            'CDN-Cache-Control': 'private, no-store',
+            'Vercel-CDN-Cache-Control': 'private, no-store',
+        };
+    }
+
+    const browserCache = `public, max-age=${remainingSeconds}, must-revalidate`;
+    const cdnCache = `public, s-maxage=${remainingSeconds}, must-revalidate`;
+    return {
+        'Cache-Control': browserCache,
+        'CDN-Cache-Control': cdnCache,
+        'Vercel-CDN-Cache-Control': cdnCache,
+    };
+}
+
+function imageResponse(bytes: Buffer, contentType: string, expiresAt: string) {
     return new NextResponse(new Uint8Array(bytes), {
         headers: {
             'Content-Type': contentType,
-            'Cache-Control': 'public, max-age=86400',
-            'Access-Control-Allow-Origin': '*',
+            'Content-Length': String(bytes.byteLength),
+            ...imageCacheHeaders(expiresAt),
+            'Cross-Origin-Resource-Policy': 'same-origin',
             'X-Content-Type-Options': 'nosniff',
         },
+    });
+}
+
+function errorResponse(error: string, status: number) {
+    return NextResponse.json({ error }, {
+        status,
+        headers: { 'Cache-Control': 'private, no-store' },
     });
 }
 
@@ -45,44 +78,70 @@ function imageResponse(bytes: Buffer, contentType: string) {
  * 모든 시도 실패 시 placeholder 이미지 반환
  */
 export async function GET(request: NextRequest) {
-    const url = request.nextUrl.searchParams.get('url');
-
-    if (!url) {
-        return NextResponse.json({ error: 'URL parameter required' }, { status: 400 });
+    const searchParams = request.nextUrl.searchParams;
+    const allowedParameters = ['url', 'expires', 'signature'] as const;
+    const parameterNames = Array.from(searchParams.keys());
+    if (
+        parameterNames.length !== allowedParameters.length
+        || allowedParameters.some((name) => searchParams.getAll(name).length !== 1)
+        || parameterNames.some((name) => !allowedParameters.includes(
+            name as typeof allowedParameters[number]
+        ))
+    ) {
+        return errorResponse('Invalid image proxy token', 400);
     }
 
-    let validatedUrl: URL;
-    try {
-        validatedUrl = await validateAllowedRemoteImageUrl(url, INSTAGRAM_MEDIA_HOST_SUFFIXES);
-    } catch {
-        return NextResponse.json({ error: 'URL not allowed' }, { status: 403 });
+    const url = searchParams.get('url');
+    const expires = searchParams.get('expires');
+    const signature = searchParams.get('signature');
+    if (!url || !expires || !signature) {
+        return errorResponse('Invalid image proxy token', 400);
+    }
+    const canonicalQuery = new URLSearchParams({ url, expires, signature }).toString();
+    if (new URL(request.url).search.slice(1) !== canonicalQuery) {
+        return errorResponse('Invalid image proxy token', 400);
     }
 
+    const authorizedUrl = verifyImageProxyToken(url, expires, signature);
+    if (!authorizedUrl) {
+        return errorResponse('Image proxy token rejected', 403);
+    }
+
+    const startedAt = Date.now();
+    const remainingTimeoutMs = () => Math.max(
+        1,
+        IMAGE_PROXY_TOTAL_TIMEOUT_MS - (Date.now() - startedAt)
+    );
+
     try {
-        const direct = await downloadSecureImage(validatedUrl.href, {
+        const direct = await downloadSecureImage(authorizedUrl, {
             allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
             maxBytes: IMAGE_PROXY_MAX_BYTES,
-            timeoutMs: IMAGE_PROXY_TIMEOUT_MS,
+            timeoutMs: Math.min(IMAGE_PROXY_DIRECT_TIMEOUT_MS, remainingTimeoutMs()),
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 Accept: IMAGE_ACCEPT,
                 Referer: 'https://www.instagram.com/',
             },
         });
-        return imageResponse(direct.bytes, direct.contentType);
+        return imageResponse(direct.bytes, direct.contentType, expires);
     } catch {
         // A trusted image proxy is a compatibility fallback for CDN-region failures.
     }
 
+    if (Date.now() - startedAt >= IMAGE_PROXY_TOTAL_TIMEOUT_MS) {
+        return getPlaceholderResponse();
+    }
+
     try {
-        const proxyUrl = `https://images.weserv.nl/?url=${encodeURIComponent(validatedUrl.href)}&default=1`;
+        const proxyUrl = `https://images.weserv.nl/?url=${encodeURIComponent(authorizedUrl)}&default=1`;
         const proxied = await downloadSecureImage(proxyUrl, {
             allowedHostSuffixes: TRUSTED_IMAGE_PROXY_HOST_SUFFIXES,
             maxBytes: IMAGE_PROXY_MAX_BYTES,
-            timeoutMs: IMAGE_PROXY_TIMEOUT_MS,
+            timeoutMs: remainingTimeoutMs(),
             headers: { Accept: IMAGE_ACCEPT },
         });
-        return imageResponse(proxied.bytes, proxied.contentType);
+        return imageResponse(proxied.bytes, proxied.contentType, expires);
     } catch {
         return getPlaceholderResponse();
     }

@@ -22,3 +22,19 @@ export function getVertexAIAnalysisConcurrency(
         Math.max(1, Math.floor(parsed))
     );
 }
+
+export function isAnalysisBatchFailureAboveThreshold(
+    totalAccounts: number,
+    failedAccounts: number
+): boolean {
+    if (
+        !Number.isSafeInteger(totalAccounts)
+        || !Number.isSafeInteger(failedAccounts)
+        || totalAccounts < 1
+        || failedAccounts < 0
+        || failedAccounts > totalAccounts
+    ) {
+        throw new Error('AI_ANALYSIS_CONFIG_ERROR: invalid batch failure counts.');
+    }
+    return failedAccounts > 0 && failedAccounts * 2 >= totalAccounts;
+}

@@ -2,12 +2,15 @@ import { z } from 'zod';
 import type { InstagramProfile, InstagramPost } from '@/lib/types/instagram';
 import type { ProviderCallContext, ScraperProvider } from './types';
 import { INSTAGRAM_USERNAME_PATTERN } from '../username';
+import { normalizeInstagramTimestamp } from '../timestamp';
 import {
     getApifyClient,
     integerSetting,
     numberSetting,
     runApifyRelationshipActor,
     runWithApifyActorSlot,
+    selectApifyCredentialSlot,
+    startOrResumeApifyActor,
     type ApifyClientLike,
     type ApifyRelationshipActorDefinition,
     type ApifyRelationshipKind,
@@ -123,7 +126,7 @@ function parseLatestPosts(rawPosts: unknown): InstagramPost[] {
                   : 'image',
             likesCount: post.likesCount ?? 0,
             commentsCount: post.commentsCount ?? 0,
-            timestamp: post.timestamp === undefined ? '' : String(post.timestamp),
+            timestamp: normalizeInstagramTimestamp(post.timestamp),
             taggedUsers,
             mentionedUsers,
         };
@@ -193,6 +196,8 @@ function relationshipDefinition(
     env: Record<string, string | undefined>
 ): ApifyRelationshipActorDefinition {
     return {
+        logicalProvider: 'apify',
+        credentialSlot: selectApifyCredentialSlot(env),
         actorId: APIFY_RELATIONSHIP_ACTOR_ID,
         actorBuild: relationshipBuildSetting(env),
         actorConcurrency: integerSetting(env, 'APIFY_ACTOR_CONCURRENCY', 2, 1, 10),
@@ -246,8 +251,10 @@ function relationshipDefinition(
 
 export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider {
     const env = deps.env ?? process.env;
-    const client = () => deps.client ?? getApifyClient(env);
+    const client = (credentialSlot?: ProviderCallContext['credentialSlot']) =>
+        deps.client ?? getApifyClient(env, credentialSlot);
     const profileSettings = () => ({
+        credentialSlot: selectApifyCredentialSlot(env),
         actorConcurrency: integerSetting(env, 'APIFY_ACTOR_CONCURRENCY', 2, 1, 10),
         timeoutSecs: integerSetting(env, 'APIFY_PROFILE_TIMEOUT_SECS', 300, 30, 3_600),
         estimatedCostPerResultUsd: numberSetting(
@@ -257,30 +264,66 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
             0,
             100
         ),
+        maximumEstimatedCostUsd: numberSetting(
+            env,
+            'APIFY_PROFILE_MAX_ESTIMATED_COST_USD_PER_OPERATION',
+            1,
+            0.00000001,
+            100_000
+        ),
     });
+
+    function profileMaximumChargeUsd(
+        resultLimit: number,
+        settings: ReturnType<typeof profileSettings>
+    ): number {
+        const estimate = resultLimit * settings.estimatedCostPerResultUsd;
+        if (estimate > settings.maximumEstimatedCostUsd + Number.EPSILON) {
+            throw new Error(
+                'SCRAPING_BUDGET_ERROR: Apify profile estimated-cost ceiling would be exceeded.'
+            );
+        }
+        return Number(estimate.toFixed(12));
+    }
 
     async function getProfile(
         username: string,
         context?: ProviderCallContext
     ): Promise<InstagramProfile | null> {
         const settings = profileSettings();
-        const apify = client();
+        const maximumChargeUsd = context?.maxChargeUsd
+            ?? profileMaximumChargeUsd(1, settings);
+        const apify = client(context?.credentialSlot);
         context?.recordUsage({ request_count: 1 });
         let run;
         try {
             run = await runWithApifyActorSlot(
                 settings.actorConcurrency,
-                () => apify.actor(PROFILE_ACTOR_ID).call(
+                () => startOrResumeApifyActor(
+                    apify,
+                    PROFILE_ACTOR_ID,
                     { usernames: [username] },
                     {
-                        log: null,
-                        timeout: settings.timeoutSecs,
-                        waitSecs: settings.timeoutSecs,
+                        logicalProvider: 'apify',
+                        credentialSlot: settings.credentialSlot,
+                        timeoutSecs: settings.timeoutSecs,
                         maxItems: 1,
-                    }
+                        maxTotalChargeUsd: maximumChargeUsd,
+                    },
+                    context
                 )
             );
-        } catch {
+        } catch (error) {
+            if (
+                error instanceof Error
+                && (
+                    error.message.startsWith('SCRAPING_AMBIGUOUS_START_ERROR:')
+                    || error.message.startsWith('SCRAPING_RUN_CHECKPOINT_ERROR:')
+                    || error.message.startsWith('ANALYSIS_PERSISTENCE_ERROR:')
+                )
+            ) {
+                throw error;
+            }
             throw new Error('SCRAPING_ERROR: Apify profile actor transport request failed.');
         }
         if (run.status !== 'SUCCEEDED') {
@@ -308,7 +351,7 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
             throw new Error('SCRAPING_SCHEMA_ERROR: 단일 프로필 요청에 여러 결과가 반환되었습니다.');
         }
         context?.recordUsage({ result_count: 1 });
-        const profile = mapProfile(items[0] as Record<string, unknown>, false);
+        const profile = mapProfile(items[0] as Record<string, unknown>, true);
         if (profile.username.toLowerCase() !== username.toLowerCase()) {
             throw new Error('SCRAPING_SCHEMA_ERROR: Apify profile username이 요청과 다릅니다.');
         }
@@ -323,28 +366,52 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
         if (!Number.isInteger(batchSize) || batchSize <= 0) {
             throw new Error('SCRAPING_CONFIG_ERROR: batchSize는 양의 정수여야 합니다.');
         }
+        if (
+            (context?.resumeRunId || context?.onRunStarted)
+            && usernames.length > batchSize
+        ) {
+            throw new Error(
+                'SCRAPING_CONFIG_ERROR: a durable Apify profile operation must fit in one batch.'
+            );
+        }
         const settings = profileSettings();
-        const apify = client();
+        const apify = client(context?.credentialSlot);
         const requested = new Set(usernames.map((username) => username.toLowerCase()));
         const resultMap = new Map<string, InstagramProfile>();
         for (let i = 0; i < usernames.length; i += batchSize) {
             const batch = usernames.slice(i, i + batchSize);
+            const maximumChargeUsd = context?.maxChargeUsd
+                ?? profileMaximumChargeUsd(batch.length, settings);
             context?.recordUsage({ request_count: 1 });
             let run;
             try {
                 run = await runWithApifyActorSlot(
                     settings.actorConcurrency,
-                    () => apify.actor(PROFILE_ACTOR_ID).call(
+                    () => startOrResumeApifyActor(
+                        apify,
+                        PROFILE_ACTOR_ID,
                         { usernames: batch },
                         {
-                            log: null,
-                            timeout: settings.timeoutSecs,
-                            waitSecs: settings.timeoutSecs,
+                            logicalProvider: 'apify',
+                            credentialSlot: settings.credentialSlot,
+                            timeoutSecs: settings.timeoutSecs,
                             maxItems: batch.length,
-                        }
+                            maxTotalChargeUsd: maximumChargeUsd,
+                        },
+                        context
                     )
                 );
-            } catch {
+            } catch (error) {
+                if (
+                    error instanceof Error
+                    && (
+                        error.message.startsWith('SCRAPING_AMBIGUOUS_START_ERROR:')
+                        || error.message.startsWith('SCRAPING_RUN_CHECKPOINT_ERROR:')
+                        || error.message.startsWith('ANALYSIS_PERSISTENCE_ERROR:')
+                    )
+                ) {
+                    throw error;
+                }
                 throw new Error('SCRAPING_ERROR: Apify profile actor transport request failed.');
             }
             if (run.status !== 'SUCCEEDED') {
@@ -400,7 +467,7 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
         context?: ProviderCallContext
     ) {
         return runApifyRelationshipActor(
-            client(),
+            client(context?.credentialSlot),
             relationshipDefinition(env),
             username,
             kind,

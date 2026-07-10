@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import type { ScraperProvider, ScraperTelemetryEvent } from './providers/types';
+import type { InstagramProfile } from '@/lib/types/instagram';
 import {
     getInstagramProfile,
     getFollowers,
@@ -46,6 +47,72 @@ describe('라우팅', () => {
 
         expect(apify).toHaveBeenCalledOnce();
         expect(flash).not.toHaveBeenCalled();
+    });
+
+    it('stored Apify run ID가 있으면 원래 primary 대신 같은 run을 재개한다', async () => {
+        const selfhosted = vi.fn().mockResolvedValue({ username: 'selfhosted-result' });
+        const apify = vi.fn().mockResolvedValue({ username: 'apify-result' });
+        const onCostRunStarted = vi.fn();
+        const onCostRunFinished = vi.fn();
+        __setProvidersForTest(
+            { SCRAPER_PROFILE: 'selfhosted', SCRAPER_FALLBACK: 'true' },
+            {
+                selfhosted: providerWith({ name: 'selfhosted', getProfile: selfhosted }),
+                apify: providerWith({ name: 'apify', getProfile: apify }),
+            }
+        );
+
+        await expect(getInstagramProfile('x', {
+            providerRun: {
+                resumeRunId: 'StoredRun12345678',
+                logicalProvider: 'apify',
+                actorId: 'apify/profile-scraper',
+                credentialSlot: 'secondary',
+                maxChargeUsd: 0.25,
+                onRunStarted: vi.fn(),
+                onCostRunStarted,
+                onCostRunFinished,
+            },
+        })).resolves.toEqual({ username: 'apify-result' });
+
+        expect(selfhosted).not.toHaveBeenCalled();
+        expect(apify).toHaveBeenCalledWith('x', expect.objectContaining({
+            resumeRunId: 'StoredRun12345678',
+            credentialSlot: 'secondary',
+            maxChargeUsd: 0.25,
+            onCostRunStarted,
+            onCostRunFinished,
+        }));
+    });
+
+    it('stored CoderX run ID는 Scraping Solutions parser로 보내지 않는다', async () => {
+        const apify = vi.fn().mockResolvedValue([]);
+        const coderx = vi.fn().mockResolvedValue([]);
+        __setProvidersForTest(
+            { SCRAPER_FOLLOWERS: 'apify', SCRAPER_FALLBACK: 'false' },
+            {
+                apify: providerWith({ name: 'apify', getFollowers: apify }),
+                coderx: providerWith({ name: 'coderx', getFollowers: coderx }),
+            }
+        );
+
+        await getFollowers('x', 1, {
+            providerRun: {
+                resumeRunId: 'CoderxRun12345678',
+                logicalProvider: 'coderx',
+                actorId: 'coderx/instagram-followers',
+                credentialSlot: 'primary',
+                maxChargeUsd: 0.1,
+            },
+        });
+
+        expect(coderx).toHaveBeenCalledWith('x', 1, expect.objectContaining({
+            logicalProvider: 'coderx',
+            resumeRunId: 'CoderxRun12345678',
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.1,
+        }));
+        expect(apify).not.toHaveBeenCalled();
     });
 
     it('프로필 provider에 outer batch 크기를 그대로 전달할 수 있다', async () => {
@@ -315,6 +382,45 @@ describe('폴백', () => {
         complete.mockResolvedValue([]);
         await expect(getProfilesBatch(['alice', 'bob']))
             .rejects.toThrow('SCRAPING_INCOMPLETE_ERROR');
+    });
+
+    it('durable 프로필 fallback은 재개 가능한 고정 배치 전체를 실행한다', async () => {
+        const makeProfile = (username: string): InstagramProfile => ({
+            username,
+            followersCount: 0,
+            followingCount: 0,
+            postsCount: 0,
+            isPrivate: false,
+            isVerified: false,
+        });
+        const primary = vi.fn(async () => [makeProfile('first')]);
+        const fallback = vi.fn(async (usernames: string[]) => usernames.map(makeProfile));
+        __setProvidersForTest({
+            SCRAPER_PROFILES_BATCH: 'selfhosted',
+            SCRAPER_FALLBACK: 'true',
+        }, {
+            selfhosted: providerWith({
+                name: 'selfhosted',
+                paid: false,
+                getProfilesBatch: primary,
+            }),
+            apify: providerWith({
+                name: 'apify',
+                paid: true,
+                getProfilesBatch: fallback,
+            }),
+        });
+
+        const result = await getProfilesBatch(['first', 'second'], 2, {
+            providerRun: {},
+        });
+
+        expect(fallback).toHaveBeenCalledWith(
+            ['first', 'second'],
+            2,
+            expect.any(Object)
+        );
+        expect(result.map(item => item.username)).toEqual(['first', 'second']);
     });
 });
 

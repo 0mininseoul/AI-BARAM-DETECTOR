@@ -4,6 +4,26 @@ export type Capability = 'profile' | 'profilesBatch' | 'followers' | 'following'
 
 export type ProviderName = 'apify' | 'coderx' | 'flashapi' | 'rapidapi' | 'selfhosted';
 export type InteractionProviderName = 'apify' | 'disabled';
+export type ApifyCredentialSlot = 'primary' | 'secondary';
+export type ProviderCostTerminalStatus = 'succeeded' | 'failed' | 'aborted' | 'timed_out';
+
+export interface ProviderCostRunStarted {
+    logicalProvider: Extract<ProviderName, 'apify' | 'coderx'>;
+    actorId: string;
+    credentialSlot: ApifyCredentialSlot;
+    runId: string;
+    maxChargeUsd: number;
+}
+
+export interface ProviderCostRunFinished extends ProviderCostRunStarted {
+    status: ProviderCostTerminalStatus;
+    usageTotalUsd: number | null;
+}
+
+interface ProviderCostRunCallbacks {
+    onCostRunStarted?(input: ProviderCostRunStarted): void | Promise<void>;
+    onCostRunFinished?(input: ProviderCostRunFinished): void | Promise<void>;
+}
 
 export type ScraperTelemetryStatus = 'success' | 'error';
 export type ScraperFailureCategory =
@@ -46,6 +66,24 @@ export interface ScrapeRequestOptions {
     expectedResultCount?: number;
     requestId?: string;
     onTelemetry?: ScraperTelemetryHook;
+    providerRun?: ProviderRunCheckpoint;
+}
+
+/** Durable hand-off for paid provider runs that may outlive one serverless invocation. */
+export interface ProviderRunCheckpoint extends ProviderCostRunCallbacks {
+    resumeRunId?: string;
+    logicalProvider?: Extract<ProviderName, 'apify' | 'coderx'>;
+    actorId?: string;
+    credentialSlot?: ApifyCredentialSlot;
+    maxChargeUsd?: number;
+    startReserved?: boolean;
+    onBeforeRunStart?(input: {
+        logicalProvider: Extract<ProviderName, 'apify' | 'coderx'>;
+        actorId: string;
+        credentialSlot: ApifyCredentialSlot;
+        maxChargeUsd: number;
+    }): void | Promise<void>;
+    onRunStarted?(runId: string): void | Promise<void>;
 }
 
 /** Serializable subset stored with an analysis request. */
@@ -69,8 +107,21 @@ export interface ProviderUsageDelta {
     rate_limit_remaining?: number;
 }
 
-export interface ProviderCallContext {
+export interface ProviderCallContext extends ProviderCostRunCallbacks {
     requestId?: string;
+    resumeRunId?: string;
+    logicalProvider?: Extract<ProviderName, 'apify' | 'coderx'>;
+    actorId?: string;
+    credentialSlot?: ApifyCredentialSlot;
+    maxChargeUsd?: number;
+    startReserved?: boolean;
+    onBeforeRunStart?(input: {
+        logicalProvider: Extract<ProviderName, 'apify' | 'coderx'>;
+        actorId: string;
+        credentialSlot: ApifyCredentialSlot;
+        maxChargeUsd: number;
+    }): void | Promise<void>;
+    onRunStarted?(runId: string): void | Promise<void>;
     recordUsage(delta: ProviderUsageDelta): void;
 }
 

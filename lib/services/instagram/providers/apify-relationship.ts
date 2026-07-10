@@ -1,12 +1,31 @@
 import { ApifyClient } from 'apify-client';
 import type { InstagramFollower } from '@/lib/types/instagram';
-import type { ProviderCallContext } from './types';
+import type {
+    ApifyCredentialSlot,
+    ProviderCallContext,
+    ProviderCostRunStarted,
+    ProviderCostTerminalStatus,
+} from './types';
 import { isInstagramUsername } from '../username';
 
-export type ApifyClientLike = Pick<ApifyClient, 'actor' | 'dataset'>;
+export type ApifyClientLike = Pick<ApifyClient, 'actor' | 'dataset' | 'run'>;
 export type ApifyRelationshipKind = 'followers' | 'following';
 
+const APIFY_RUN_ID_PATTERN = /^[A-Za-z0-9]{8,64}$/;
+const MAX_INVOCATION_WAIT_SECS = 240;
+
+export interface ApifyActorRunOptions {
+    logicalProvider: 'apify' | 'coderx';
+    credentialSlot: ApifyCredentialSlot;
+    actorBuild?: string;
+    timeoutSecs: number;
+    maxItems: number;
+    maxTotalChargeUsd: number;
+}
+
 export interface ApifyRelationshipActorDefinition {
+    logicalProvider: 'apify' | 'coderx';
+    credentialSlot: ApifyCredentialSlot;
     actorId: string;
     actorBuild?: string;
     actorConcurrency: number;
@@ -83,12 +102,197 @@ function assertLimit(limit: number, maximum: number): void {
     }
 }
 
-export function getApifyClient(
+export function selectApifyCredentialSlot(
     env: Record<string, string | undefined> = process.env
+): ApifyCredentialSlot {
+    const slot = env.APIFY_API_TOKEN_SLOT?.trim().toLowerCase() || 'primary';
+    if (slot !== 'primary' && slot !== 'secondary') {
+        throw new Error(
+            'SCRAPING_CONFIG_ERROR: APIFY_API_TOKEN_SLOT은 primary 또는 secondary여야 합니다.'
+        );
+    }
+    return slot;
+}
+
+export function selectApifyApiToken(
+    env: Record<string, string | undefined> = process.env,
+    requestedSlot?: ApifyCredentialSlot
+): string {
+    const slot = requestedSlot ?? selectApifyCredentialSlot(env);
+    if (slot !== 'primary' && slot !== 'secondary') {
+        throw new Error('SCRAPING_CONFIG_ERROR: invalid Apify credential slot.');
+    }
+    const key = slot === 'secondary' ? 'APIFY_SECONDARY_API_TOKEN' : 'APIFY_API_TOKEN';
+    const token = env[key]?.trim();
+    if (!token) throw new Error(`SCRAPING_CONFIG_ERROR: ${key}이 설정되지 않았습니다.`);
+    return token;
+}
+
+export function getApifyClient(
+    env: Record<string, string | undefined> = process.env,
+    credentialSlot?: ApifyCredentialSlot
 ): ApifyClient {
-    const token = env.APIFY_API_TOKEN;
-    if (!token) throw new Error('SCRAPING_CONFIG_ERROR: APIFY_API_TOKEN이 설정되지 않았습니다.');
-    return new ApifyClient({ token });
+    // Starting an Actor is not idempotent. The client must not retry the POST after an
+    // ambiguous transport failure because that can create and charge a second run.
+    return new ApifyClient({ token: selectApifyApiToken(env, credentialSlot), maxRetries: 0 });
+}
+
+export async function startOrResumeApifyActor(
+    client: ApifyClientLike,
+    actorId: string,
+    input: unknown,
+    options: ApifyActorRunOptions,
+    context?: ProviderCallContext
+) {
+    const resumeRunId = context?.resumeRunId?.trim();
+    if (resumeRunId && !APIFY_RUN_ID_PATTERN.test(resumeRunId)) {
+        throw new Error('SCRAPING_RUN_CHECKPOINT_ERROR: invalid Apify run id.');
+    }
+    if (
+        context?.logicalProvider
+        && context.logicalProvider !== options.logicalProvider
+    ) {
+        throw new Error('SCRAPING_RUN_CHECKPOINT_ERROR: logical provider does not match.');
+    }
+    if (context?.actorId && context.actorId !== actorId) {
+        throw new Error('SCRAPING_RUN_CHECKPOINT_ERROR: Actor id does not match.');
+    }
+    if (
+        (resumeRunId || context?.startReserved)
+        && (context?.credentialSlot === undefined || context?.maxChargeUsd === undefined)
+    ) {
+        throw new Error('SCRAPING_RUN_CHECKPOINT_ERROR: stored Actor billing identity is missing.');
+    }
+    if (options.credentialSlot !== 'primary' && options.credentialSlot !== 'secondary') {
+        throw new Error('SCRAPING_CONFIG_ERROR: invalid Apify credential slot.');
+    }
+    if (
+        !Number.isFinite(options.maxTotalChargeUsd)
+        || options.maxTotalChargeUsd < 0
+        || options.maxTotalChargeUsd > 100_000
+    ) {
+        throw new Error('SCRAPING_CONFIG_ERROR: invalid Apify maximum charge.');
+    }
+    const credentialSlot = context?.credentialSlot ?? options.credentialSlot;
+    const maxTotalChargeUsd = context?.maxChargeUsd ?? options.maxTotalChargeUsd;
+    if (credentialSlot !== 'primary' && credentialSlot !== 'secondary') {
+        throw new Error('SCRAPING_RUN_CHECKPOINT_ERROR: stored credential slot is invalid.');
+    }
+    if (
+        !Number.isFinite(maxTotalChargeUsd)
+        || maxTotalChargeUsd < 0
+        || maxTotalChargeUsd > 100_000
+    ) {
+        throw new Error('SCRAPING_RUN_CHECKPOINT_ERROR: stored maximum charge is invalid.');
+    }
+
+    let runId = resumeRunId;
+    if (!runId) {
+        if (context?.startReserved) {
+            throw new Error(
+                'SCRAPING_AMBIGUOUS_START_ERROR: a reserved Actor start has no confirmed run id.'
+            );
+        }
+        try {
+            await context?.onBeforeRunStart?.({
+                logicalProvider: options.logicalProvider,
+                actorId,
+                credentialSlot,
+                maxChargeUsd: maxTotalChargeUsd,
+            });
+        } catch {
+            throw new Error(
+                'ANALYSIS_PERSISTENCE_ERROR: Apify Actor start intent could not be reserved.'
+            );
+        }
+        let startedRun;
+        try {
+            startedRun = await client.actor(actorId).start(input, {
+                ...(options.actorBuild ? { build: options.actorBuild } : {}),
+                timeout: options.timeoutSecs,
+                maxItems: options.maxItems,
+                maxTotalChargeUsd,
+                restartOnError: false,
+            });
+        } catch {
+            // Apify does not expose an idempotency key for Actor starts. Retrying an
+            // ambiguous POST can double-charge, so this error is intentionally terminal.
+            throw new Error(
+                'SCRAPING_AMBIGUOUS_START_ERROR: Apify Actor start response was not confirmed.'
+            );
+        }
+        if (!APIFY_RUN_ID_PATTERN.test(startedRun.id)) {
+            throw new Error('SCRAPING_SCHEMA_ERROR: Apify run id is invalid.');
+        }
+        runId = startedRun.id;
+        try {
+            await context?.onRunStarted?.(runId);
+        } catch {
+            try {
+                await client.run(runId).abort();
+            } catch {
+                // The run checkpoint failure remains terminal even if best-effort abort fails.
+            }
+            throw new Error(
+                'SCRAPING_RUN_CHECKPOINT_ERROR: Apify run id could not be persisted.'
+            );
+        }
+    }
+
+    const costRun: ProviderCostRunStarted = {
+        logicalProvider: options.logicalProvider,
+        actorId,
+        credentialSlot,
+        runId,
+        maxChargeUsd: maxTotalChargeUsd,
+    };
+    try {
+        await context?.onCostRunStarted?.(costRun);
+    } catch {
+        throw new Error(
+            'ANALYSIS_PERSISTENCE_ERROR: Apify run cost start could not be persisted.'
+        );
+    }
+
+    let run;
+    try {
+        run = await client.run(runId).waitForFinish({
+            waitSecs: Math.min(options.timeoutSecs, MAX_INVOCATION_WAIT_SECS),
+        });
+    } catch {
+        throw new Error('SCRAPING_ERROR: Apify run status request failed.');
+    }
+
+    const terminalStatus: ProviderCostTerminalStatus | undefined = (() => {
+        switch (run.status) {
+            case 'SUCCEEDED':
+                return 'succeeded';
+            case 'FAILED':
+                return 'failed';
+            case 'ABORTED':
+                return 'aborted';
+            case 'TIMED-OUT':
+                return 'timed_out';
+            default:
+                return undefined;
+        }
+    })();
+    if (terminalStatus) {
+        try {
+            await context?.onCostRunFinished?.({
+                ...costRun,
+                status: terminalStatus,
+                usageTotalUsd: typeof run.usageTotalUsd === 'number'
+                    ? run.usageTotalUsd
+                    : null,
+            });
+        } catch {
+            throw new Error(
+                'ANALYSIS_PERSISTENCE_ERROR: Apify terminal cost could not be persisted.'
+            );
+        }
+    }
+    return run;
 }
 
 function actorRequestError(error: unknown): Error {
@@ -156,9 +360,11 @@ export async function runApifyRelationshipActor(
 
     const actorLimit = Math.max(definition.minimumLimit, limit);
     const datasetLimit = actorLimit + definition.maximumMetadataItems;
-    const maximumEstimatedCostUsd = datasetLimit * definition.estimatedCostPerResultUsd;
+    const estimatedOperationCostUsd = datasetLimit * definition.estimatedCostPerResultUsd;
     if (
-        maximumEstimatedCostUsd >
+        context?.maxChargeUsd === undefined
+        &&
+        estimatedOperationCostUsd >
         definition.maximumEstimatedCostUsd + Number.EPSILON
     ) {
         throw new Error(
@@ -169,17 +375,32 @@ export async function runApifyRelationshipActor(
         context?.recordUsage({ request_count: 1 });
         let run;
         try {
-            run = await client.actor(definition.actorId).call(
+            run = await startOrResumeApifyActor(
+                client,
+                definition.actorId,
                 definition.buildInput(account, kind, actorLimit),
                 {
-                    timeout: definition.timeoutSecs,
-                    waitSecs: definition.timeoutSecs,
+                    logicalProvider: definition.logicalProvider,
+                    credentialSlot: definition.credentialSlot,
+                    timeoutSecs: definition.timeoutSecs,
                     maxItems: datasetLimit,
-                    log: null,
-                    ...(definition.actorBuild ? { build: definition.actorBuild } : {}),
-                }
+                    maxTotalChargeUsd: context?.maxChargeUsd
+                        ?? Number(estimatedOperationCostUsd.toFixed(12)),
+                    actorBuild: definition.actorBuild,
+                },
+                context
             );
         } catch (error) {
+            if (
+                error instanceof Error
+                && (
+                    error.message.startsWith('SCRAPING_AMBIGUOUS_START_ERROR:')
+                    || error.message.startsWith('SCRAPING_RUN_CHECKPOINT_ERROR:')
+                    || error.message.startsWith('ANALYSIS_PERSISTENCE_ERROR:')
+                )
+            ) {
+                throw error;
+            }
             throw actorRequestError(error);
         }
 

@@ -8,7 +8,9 @@ import {
     targetProfileImageFromStepData,
     toResultInteractionSummary,
 } from '@/lib/services/analysis/result-interactions';
+import { createImageProxyPath } from '@/lib/services/media/image-proxy-token';
 import { NextResponse } from 'next/server';
+import { isAnalysisDeletable } from '@/lib/services/analysis/deletion';
 
 export async function GET(
     request: Request,
@@ -120,7 +122,7 @@ export async function GET(
             return {
                 instagramId,
                 fullName: result.suspect_full_name,
-                profileImage: result.suspect_profile_image,
+                profileImage: createImageProxyPath(result.suspect_profile_image),
                 instagramUrl: `https://instagram.com/${instagramId}`,
                 riskGrade: result.risk_grade as 'high_risk' | 'caution' | 'normal',
                 bio: result.bio || '',
@@ -133,7 +135,7 @@ export async function GET(
         const privateAccountsList = privateAccounts?.map((account) => ({
             instagramId: account.instagram_id,
             fullName: account.full_name,
-            profileImage: account.profile_image,
+            profileImage: createImageProxyPath(account.profile_image),
             instagramUrl: `https://instagram.com/${account.instagram_id}`,
         })) || [];
 
@@ -143,7 +145,9 @@ export async function GET(
             status: analysisRequest.status,
             summary: {
                 targetInstagramId: analysisRequest.target_instagram_id,
-                targetProfileImage: targetProfileImageFromStepData(analysisRequest.step_data),
+                targetProfileImage: createImageProxyPath(
+                    targetProfileImageFromStepData(analysisRequest.step_data)
+                ),
                 mutualFollows: analysisRequest.mutual_follows || 0,
                 genderRatio,
             },
@@ -156,5 +160,59 @@ export async function GET(
             { error: '서버 오류가 발생했습니다.' },
             { status: 500 }
         );
+    }
+}
+
+export async function DELETE(
+    _request: Request,
+    { params }: { params: Promise<{ requestId: string }> }
+) {
+    try {
+        const { requestId } = await params;
+        const supabase = await createClient();
+        const { data: { user }, error: authError } = await supabase.auth.getUser();
+        if (authError || !user) {
+            return NextResponse.json({ error: '로그인이 필요합니다.' }, { status: 401 });
+        }
+
+        const mutation = await supabaseAdmin
+            .from('analysis_requests')
+            .delete()
+            .eq('id', requestId)
+            .eq('user_id', user.id)
+            .in('status', ['completed', 'failed'])
+            .select('id')
+            .maybeSingle();
+        if (mutation.error) {
+            console.error('Analysis deletion failed', { requestId });
+            return NextResponse.json({ error: '삭제에 실패했습니다.' }, { status: 500 });
+        }
+        if (!mutation.data) {
+            const existing = await supabaseAdmin
+                .from('analysis_requests')
+                .select('status')
+                .eq('id', requestId)
+                .eq('user_id', user.id)
+                .maybeSingle();
+            if (existing.error) {
+                console.error('Analysis deletion status check failed', { requestId });
+                return NextResponse.json({ error: '삭제에 실패했습니다.' }, { status: 500 });
+            }
+            if (existing.data && !isAnalysisDeletable(existing.data.status)) {
+                return NextResponse.json(
+                    { error: '진행 중인 판독은 삭제할 수 없습니다.' },
+                    { status: 409 }
+                );
+            }
+            return NextResponse.json(
+                { error: '판독 기록을 찾을 수 없습니다.' },
+                { status: 404 }
+            );
+        }
+
+        return new NextResponse(null, { status: 204 });
+    } catch {
+        console.error('Analysis deletion API failed');
+        return NextResponse.json({ error: '서버 오류가 발생했습니다.' }, { status: 500 });
     }
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+    AnalysisAlreadyInProgressError,
     AnalysisIdempotencyConflictError,
     AnalysisLimitExceededError,
     consumeQuotaAndCreateAnalysisRequest,
@@ -74,5 +75,15 @@ describe('transactional analysis request creation', () => {
 
         await expect(consumeQuotaAndCreateAnalysisRequest(conflict.client, input))
             .rejects.toBeInstanceOf(AnalysisIdempotencyConflictError);
+    });
+
+    it('maps the database active-request guard to a typed conflict', async () => {
+        const active = clientWith(null, {
+            code: 'P0001',
+            message: 'ANALYSIS_ALREADY_IN_PROGRESS',
+        });
+
+        await expect(consumeQuotaAndCreateAnalysisRequest(active.client, input))
+            .rejects.toBeInstanceOf(AnalysisAlreadyInProgressError);
     });
 });

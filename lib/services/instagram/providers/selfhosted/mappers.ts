@@ -1,5 +1,6 @@
 import type { InstagramProfile, InstagramPost } from '@/lib/types/instagram';
 import { isInstagramUsername } from '../../username';
+import { normalizeInstagramTimestamp } from '../../timestamp';
 
 export function extractHashtags(caption?: string): string[] {
     if (!caption) return [];
@@ -67,7 +68,7 @@ function mapPost(node: Record<string, unknown>): InstagramPost {
         type,
         likesCount: likes,
         commentsCount: count(node, 'edge_media_to_comment'),
-        timestamp: node.taken_at_timestamp ? String(node.taken_at_timestamp) : '',
+        timestamp: normalizeInstagramTimestamp(node.taken_at_timestamp),
         taggedUsers,
         mentionedUsers: extractMentions(caption),
     };

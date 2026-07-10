@@ -132,15 +132,21 @@ async function getFollowing(
         text = await response.text();
     } catch (error) {
         if (error instanceof Error && error.name === 'AbortError') {
-            throw new Error('SCRAPING_TIMEOUT_ERROR: Stable API 요청 시간이 초과되었습니다.');
+            throw new Error(
+                'SCRAPING_PAID_REQUEST_AMBIGUOUS_ERROR: Stable API 요청 시간이 초과되었습니다.'
+            );
         }
-        throw new Error('SCRAPING_ERROR: Stable API transport request failed.');
+        throw new Error(
+            'SCRAPING_PAID_REQUEST_AMBIGUOUS_ERROR: Stable API transport request failed.'
+        );
     } finally {
         clearTimeout(timer);
     }
 
     if (!response.ok) {
-        throw new Error(`SCRAPING_ERROR: 팔로잉 수집에 실패했습니다. HTTP ${response.status}`);
+        throw new Error(
+            `SCRAPING_PAID_REQUEST_ERROR: 팔로잉 수집에 실패했습니다. HTTP ${response.status}`
+        );
     }
     let data: unknown;
     try {
@@ -149,7 +155,7 @@ async function getFollowing(
         throw new Error('SCRAPING_SCHEMA_ERROR: Stable API가 유효한 JSON을 반환하지 않았습니다.');
     }
     if (data && typeof data === 'object' && ('error' in data || 'message' in data)) {
-        throw new Error('SCRAPING_ERROR: Stable API가 오류 응답을 반환했습니다.');
+        throw new Error('SCRAPING_PAID_REQUEST_ERROR: Stable API가 오류 응답을 반환했습니다.');
     }
 
     const rawItems = extractUserList(data);
@@ -162,7 +168,9 @@ async function getFollowing(
     const items = [...unique.values()].slice(0, limit);
 
     if (items.length === 0) {
-        throw new Error('SCRAPING_ERROR: 팔로잉 목록을 가져올 수 없습니다. 계정 접근이 제한되었을 수 있습니다.');
+        throw new Error(
+            'SCRAPING_PAID_REQUEST_ERROR: 팔로잉 목록을 가져올 수 없습니다. 계정 접근이 제한되었을 수 있습니다.'
+        );
     }
     context?.recordUsage({
         result_count: items.length,

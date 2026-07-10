@@ -19,11 +19,9 @@ interface PageProps {
     params: Promise<{ requestId: string }>;
 }
 
-// Instagram CDN URL을 프록시 URL로 변환
 const getProxyImageUrl = (url: string | undefined): string | undefined => {
     if (!url) return undefined;
-    if (url.startsWith('/api/image-proxy')) return url;
-    return `/api/image-proxy?url=${encodeURIComponent(url)}`;
+    return url.startsWith('/api/image-proxy?') ? url : undefined;
 };
 
 function FallbackGlyph({ variant }: { variant: 'person' | 'private' }) {

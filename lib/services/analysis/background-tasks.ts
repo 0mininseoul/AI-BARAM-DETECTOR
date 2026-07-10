@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { CloudTasksClient } from '@google-cloud/tasks';
 import { OAuth2Client } from 'google-auth-library';
+import { prepareGoogleApplicationCredentials } from '@/lib/services/google/credentials';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PROJECT_PATTERN = /^[a-z][a-z0-9-]{4,28}[a-z0-9]$/;
@@ -57,10 +58,20 @@ let sharedTokenVerifier: OAuth2Client | undefined;
 
 async function getSharedTasksClient(): Promise<CloudTasksClientLike> {
     if (!sharedTasksClient) {
-        const { CloudTasksClient: TasksClient } = await import('@google-cloud/tasks');
-        sharedTasksClient = new TasksClient();
+        sharedTasksClient = await createCloudTasksClient();
     }
     return sharedTasksClient;
+}
+
+export async function createCloudTasksClient(
+    prepareCredentials: () => unknown = prepareGoogleApplicationCredentials,
+    createClient: () => Promise<CloudTasksClient> = async () => {
+        const { CloudTasksClient: TasksClient } = await import('@google-cloud/tasks');
+        return new TasksClient();
+    }
+): Promise<CloudTasksClient> {
+    prepareCredentials();
+    return createClient();
 }
 
 function booleanSetting(value: string | undefined): boolean {
@@ -235,7 +246,9 @@ export async function enqueueAnalysisTask(
     const parent = client.queuePath(config.project, config.location, config.queue);
     const task: Record<string, unknown> = {
         name: client.taskPath(config.project, config.location, config.queue, taskId),
-        dispatchDeadline: { seconds: 600 },
+        // Match the Vercel function ceiling so a terminated invocation enters the
+        // queue's bounded retry path immediately instead of waiting another five minutes.
+        dispatchDeadline: { seconds: 300 },
         httpRequest: {
             httpMethod: 'POST',
             url: config.targetUrl,

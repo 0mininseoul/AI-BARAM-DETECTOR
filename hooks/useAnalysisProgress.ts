@@ -1,7 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
-import { createClient } from '@/lib/supabase/client';
+import { useEffect, useState, useCallback, useRef } from 'react';
 
 interface AnalysisProgress {
     id: string;
@@ -16,27 +15,33 @@ export function useAnalysisProgress(requestId: string) {
     const [data, setData] = useState<AnalysisProgress | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const supabase = useMemo(() => createClient(), []);
     const hasDataRef = useRef(false);
 
     // 초기 데이터 로드
     const fetchData = useCallback(async () => {
         try {
-            const { data: request, error } = await supabase
-                .from('analysis_requests')
-                .select('id, status, progress, progress_step, error_message, background_processing')
-                .eq('id', requestId)
-                .single();
-
-            if (error) throw error;
+            const response = await fetch(`/api/analysis/status/${encodeURIComponent(requestId)}`, {
+                cache: 'no-store',
+            });
+            if (!response.ok) {
+                throw new Error(`Analysis status request failed (${response.status}).`);
+            }
+            const request = await response.json() as {
+                requestId: string;
+                status: AnalysisProgress['status'];
+                progress: number;
+                progressStep: string | null;
+                errorMessage: string | null;
+                backgroundProcessing: boolean;
+            };
 
             setData({
-                id: request.id,
+                id: request.requestId,
                 status: request.status,
                 progress: request.progress,
-                progressStep: request.progress_step,
-                errorMessage: request.error_message,
-                backgroundProcessing: request.background_processing === true,
+                progressStep: request.progressStep,
+                errorMessage: request.errorMessage,
+                backgroundProcessing: request.backgroundProcessing === true,
             });
             hasDataRef.current = true;
             setError(null);
@@ -48,7 +53,7 @@ export function useAnalysisProgress(requestId: string) {
         } finally {
             setLoading(false);
         }
-    }, [requestId, supabase]);
+    }, [requestId]);
 
     useEffect(() => {
         void fetchData();

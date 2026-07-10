@@ -6,6 +6,7 @@ import {
     MAX_VERTEX_AI_ANALYSIS_CONCURRENCY,
     MAX_VERTEX_AI_IMAGE_PREPARATION_CONCURRENCY,
     getVertexAIAnalysisConcurrency,
+    isAnalysisBatchFailureAboveThreshold,
 } from './pipeline-config';
 
 describe('getVertexAIAnalysisConcurrency', () => {
@@ -27,5 +28,18 @@ describe('getVertexAIAnalysisConcurrency', () => {
         expect(MAX_VERTEX_AI_CONCURRENT_IMAGE_PREPARATIONS).toBeLessThan(
             MAX_VERTEX_AI_ANALYSIS_CONCURRENCY * MAX_VERTEX_AI_IMAGE_PREPARATION_CONCURRENCY
         );
+    });
+});
+
+describe('AI batch failure threshold', () => {
+    it('fails closed when at least half of a paid analysis batch cannot be classified', () => {
+        expect(isAnalysisBatchFailureAboveThreshold(1, 1)).toBe(true);
+        expect(isAnalysisBatchFailureAboveThreshold(10, 5)).toBe(true);
+        expect(isAnalysisBatchFailureAboveThreshold(10, 4)).toBe(false);
+    });
+
+    it('rejects invalid counters', () => {
+        expect(() => isAnalysisBatchFailureAboveThreshold(0, 0)).toThrow('CONFIG');
+        expect(() => isAnalysisBatchFailureAboveThreshold(3, 4)).toThrow('CONFIG');
     });
 });

@@ -85,7 +85,7 @@ export function getWebProfileConfig(
         minIntervalMs: integerSetting(
             env,
             'SELFHOSTED_PROFILE_MIN_INTERVAL_MS',
-            1_500,
+            300,
             0,
             60_000
         ),

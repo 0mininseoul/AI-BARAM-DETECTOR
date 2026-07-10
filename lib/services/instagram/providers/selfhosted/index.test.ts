@@ -1,10 +1,17 @@
 import { describe, it, expect, vi } from 'vitest';
 import fixture from './__fixtures__/web-profile-info.json';
-import { makeSelfHostedProvider } from './index';
+import { getSelfHostedProfileConcurrency, makeSelfHostedProvider } from './index';
 
 const user = (fixture as { data: { user: Record<string, unknown> } }).data.user;
 
 describe('selfHostedProvider', () => {
+    it('uses the bounded production concurrency needed for the cold-profile latency budget', () => {
+        expect(getSelfHostedProfileConcurrency({})).toBe(4);
+        expect(() => getSelfHostedProfileConcurrency({
+            SELFHOSTED_PROFILE_CONCURRENCY: '6',
+        })).toThrow('SCRAPING_CONFIG_ERROR');
+    });
+
     it('getProfile은 web-client 결과를 InstagramProfile로 매핑한다', async () => {
         const fetchUser = vi.fn().mockResolvedValue(user);
         const provider = makeSelfHostedProvider({ fetchUser });

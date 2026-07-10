@@ -106,6 +106,31 @@ describe('analyzeDeepRiskNarrative', () => {
         }));
     });
 
+    it('accepts provider Unix-second timestamps and normalizes them before analysis', () => {
+        const raw = input({
+            recentPosts: [{
+                id: 'post-1',
+                shortCode: 'short-1',
+                timestamp: '1767225600',
+            }],
+        });
+
+        expect(deepRiskNarrativeInputSchema.parse(raw).recentPosts[0].timestamp)
+            .toBe('2026-01-01T00:00:00.000Z');
+    });
+
+    it('keeps a post with a missing timestamp without invalidating the full narrative input', () => {
+        const raw = input({
+            recentPosts: [{
+                id: 'post-1',
+                shortCode: 'short-1',
+                timestamp: '',
+            }],
+        });
+
+        expect(deepRiskNarrativeInputSchema.parse(raw).recentPosts[0].timestamp).toBeUndefined();
+    });
+
     it('uses the profile and ten newest feed images and sends captions and evidence to Gemini', async () => {
         const result = await analyzeDeepRiskNarrative(input());
 

@@ -59,7 +59,36 @@ npx supabase db push
 
 운영 분석 전에 `007`~`010`과 이후의 모든 timestamp migration을 순서대로 적용해야 합니다. 최신 migration은 상호작용 증거/점수, background task 상태, 고위험 심층 분석, 비공개 계정 이름 정렬, 내부 증거 열의 client 접근 차단을 포함합니다.
 
-### 4. 개발 서버 실행
+### 4. Cloud Tasks 운영 설정
+
+운영 환경은 앱 런타임의 Google Cloud 서비스 계정과 Cloud Tasks가 OIDC 토큰에 사용할 전용 계정을 분리합니다. 런타임 계정은 이미 존재해야 하며, 스크립트는 전용 task invoker 계정이 없을 때만 키 없이 생성합니다.
+
+```bash
+export ANALYSIS_TASKS_PROJECT=your-project-id
+export ANALYSIS_TASKS_LOCATION=asia-northeast3
+export ANALYSIS_TASKS_QUEUE=analysis-pipeline
+export ANALYSIS_TASKS_SERVICE_ACCOUNT_EMAIL=analysis-task@your-project-id.iam.gserviceaccount.com
+export ANALYSIS_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL=app-runtime@your-project-id.iam.gserviceaccount.com
+
+# API, IAM, service agent, queue 변경 예정 내용만 확인
+./scripts/configure-analysis-tasks-queue.sh --dry-run
+
+# 멱등적 설정 후 전체 구성 검증
+./scripts/configure-analysis-tasks-queue.sh
+./scripts/configure-analysis-tasks-queue.sh --check
+```
+
+`ANALYSIS_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL`은 이 설정 스크립트에서만 쓰는 입력입니다. 앱 런타임은 [`.env.example`](.env.example)의 기존 `ANALYSIS_TASKS_*` 값을 그대로 사용합니다. 스크립트는 다음을 보장합니다.
+
+- `cloudtasks.googleapis.com` API와 Cloud Tasks service agent
+- 런타임 계정의 `roles/cloudtasks.enqueuer`
+- task invoker 계정에 대한 런타임 계정의 `iam.serviceAccounts.actAs`
+- task invoker 계정에 대한 Cloud Tasks service agent의 OIDC 토큰 발급 권한
+- 최대 동시 2개·초당 2개, 최대 8회, `40s`~`300s` backoff의 `analysis-pipeline` 큐 정책
+
+실행자에게는 해당 프로젝트의 Service Usage, IAM/service account, Cloud Tasks 큐 설정 권한이 필요합니다. 스크립트는 중지된 큐를 자동으로 재개하지 않고 상태 이상을 보고하므로, 운영자가 중지 의도를 확인한 뒤 직접 재개해야 합니다.
+
+### 5. 개발 서버 실행
 
 ```bash
 npm run dev

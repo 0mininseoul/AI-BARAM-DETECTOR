@@ -66,6 +66,6 @@ describe('rapidApiProvider', () => {
         vi.stubGlobal('fetch', fetchMock);
 
         await expect(rapidApiProvider.getFollowing!('target', 1)).rejects.toThrow('SCHEMA');
-        await expect(rapidApiProvider.getFollowing!('target', 1)).rejects.toThrow('TIMEOUT');
+        await expect(rapidApiProvider.getFollowing!('target', 1)).rejects.toThrow('AMBIGUOUS');
     });
 });

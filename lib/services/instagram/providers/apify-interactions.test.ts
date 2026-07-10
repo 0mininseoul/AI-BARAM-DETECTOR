@@ -44,11 +44,15 @@ function comment(id: string, postUrl?: string) {
 
 function mockClient(
     items: Array<Record<string, unknown>>,
-    options: { status?: string; total?: number } = {}
+    options: { status?: string; total?: number; usageTotalUsd?: number } = {}
 ) {
-    const call = vi.fn().mockResolvedValue({
+    const call = vi.fn().mockResolvedValue({ id: 'RunAbcd1234567890' });
+    const waitForFinish = vi.fn().mockResolvedValue({
         status: options.status ?? 'SUCCEEDED',
         defaultDatasetId: 'dataset',
+        ...(options.usageTotalUsd === undefined
+            ? {}
+            : { usageTotalUsd: options.usageTotalUsd }),
     });
     const total = options.total ?? items.length;
     const listItems = vi.fn(async (
@@ -64,10 +68,11 @@ function mockClient(
         };
     });
     const client = {
-        actor: vi.fn(() => ({ call })),
+        actor: vi.fn(() => ({ start: call })),
+        run: vi.fn(() => ({ waitForFinish, abort: vi.fn() })),
         dataset: vi.fn(() => ({ listItems })),
     } as unknown as ApifyClientLike;
-    return { client, call, listItems };
+    return { client, call, waitForFinish, listItems };
 }
 
 describe('Apify interaction adapter', () => {
@@ -100,9 +105,61 @@ describe('Apify interaction adapter', () => {
                 build: '0.0.9',
                 maxItems: 300,
                 maxTotalChargeUsd: 0.465,
-                log: null,
+                timeout: 300,
+                restartOnError: false,
             })
         );
+    });
+
+    it('forwards the selected interaction credential and actual usage to cost callbacks', async () => {
+        const post = 'https://www.instagram.com/p/PostA/';
+        const { client } = mockClient([liker('alice', post)], { usageTotalUsd: 0.0014 });
+        const adapter = makeApifyInteractionAdapter({
+            client,
+            env: { ...BASE_ENV, APIFY_API_TOKEN_SLOT: 'secondary' },
+        });
+        const onCostRunStarted = vi.fn();
+        const onCostRunFinished = vi.fn();
+
+        await expect(adapter.getPostLikers([post], 1, {
+            onCostRunStarted,
+            onCostRunFinished,
+            recordUsage: vi.fn(),
+        })).resolves.toHaveLength(1);
+
+        expect(onCostRunStarted).toHaveBeenCalledWith(expect.objectContaining({
+            actorId: APIFY_LIKERS_ACTOR_ID,
+            credentialSlot: 'secondary',
+            maxChargeUsd: 0.00155,
+        }));
+        expect(onCostRunFinished).toHaveBeenCalledWith(expect.objectContaining({
+            status: 'succeeded',
+            usageTotalUsd: 0.0014,
+        }));
+    });
+
+    it('resumes interactions with the stored credential slot and charge cap', async () => {
+        const post = 'https://www.instagram.com/p/PostA/';
+        const { client, call } = mockClient([liker('alice', post)]);
+        const adapter = makeApifyInteractionAdapter({ client, env: BASE_ENV });
+        const onCostRunStarted = vi.fn();
+
+        await expect(adapter.getPostLikers([post], 1, {
+            logicalProvider: 'apify',
+            actorId: APIFY_LIKERS_ACTOR_ID,
+            credentialSlot: 'secondary',
+            maxChargeUsd: 0.009,
+            resumeRunId: 'StoredRun12345678',
+            onCostRunStarted,
+            recordUsage: vi.fn(),
+        })).resolves.toHaveLength(1);
+
+        expect(call).not.toHaveBeenCalled();
+        expect(client.run).toHaveBeenCalledWith('StoredRun12345678');
+        expect(onCostRunStarted).toHaveBeenCalledWith(expect.objectContaining({
+            credentialSlot: 'secondary',
+            maxChargeUsd: 0.009,
+        }));
     });
 
     it('supports the ten URL x one hundred candidate-liker product ceiling', async () => {
@@ -217,7 +274,8 @@ describe('Apify interaction adapter', () => {
                 build: '0.0.498',
                 maxItems: 30,
                 maxTotalChargeUsd: 0.078,
-                log: null,
+                timeout: 300,
+                restartOnError: false,
             })
         );
     });

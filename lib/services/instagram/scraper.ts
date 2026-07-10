@@ -198,6 +198,16 @@ async function runAttempt<T>(
     };
     const context: ProviderCallContext = {
         requestId: options?.requestId,
+        resumeRunId: options?.providerRun?.resumeRunId,
+        logicalProvider: options?.providerRun?.logicalProvider,
+        actorId: options?.providerRun?.actorId,
+        credentialSlot: options?.providerRun?.credentialSlot,
+        maxChargeUsd: options?.providerRun?.maxChargeUsd,
+        startReserved: options?.providerRun?.startReserved,
+        onBeforeRunStart: options?.providerRun?.onBeforeRunStart,
+        onRunStarted: options?.providerRun?.onRunStarted,
+        onCostRunStarted: options?.providerRun?.onCostRunStarted,
+        onCostRunFinished: options?.providerRun?.onCostRunFinished,
         recordUsage: (delta) => addUsage(usage, delta),
     };
 
@@ -298,6 +308,18 @@ function selectedProvider(
     configured: ProviderName,
     options?: ScrapeRequestOptions
 ): ProviderName {
+    // Durable run IDs in analysis_provider_runs are explicitly Apify-owned. A retry
+    // must wait/read that Actor even if the original operation reached Apify only as
+    // a fallback from the self-hosted provider.
+    const resumeProvider = options?.providerRun?.logicalProvider;
+    if (resumeProvider) {
+        if (!isProviderAllowed(capability, resumeProvider)) {
+            throw new Error(
+                `SCRAPING_CONFIG_ERROR: '${resumeProvider}' cannot resume capability '${capability}'.`
+            );
+        }
+        return resumeProvider;
+    }
     if (options?.provider === undefined) return configured;
     if (!isProviderAllowed(capability, options.provider)) {
         throw new Error(
@@ -409,17 +431,26 @@ export async function getProfilesBatch(
         const missing = missingProfileUsernames(primaryResult, usernames);
         if (missing.length === 0) return primaryResult;
 
+        // The analysis route freezes `usernames` before a paid Actor starts. If that
+        // Actor outlives the invocation, a retry can only reconstruct the full frozen
+        // input; free-provider partial rows have not been committed independently.
+        // Therefore the durable path sends the full bounded batch to the fallback.
+        const fallbackUsernames = options?.providerRun ? usernames : missing;
         console.warn(
             `[scraper] ${selected} profilesBatch 누락 ${missing.length}건 → ${fallbackName}로 보충`
         );
         const supplement = await runAttempt(
             'profilesBatch',
             fallback,
-            (p, context) => p.getProfilesBatch?.(missing, missing.length, context)
-                .then(result => validateProfileBatchCompleteness(result, missing)),
+            (p, context) => p.getProfilesBatch?.(
+                fallbackUsernames,
+                fallbackUsernames.length,
+                context
+            ).then(result => validateProfileBatchCompleteness(result, fallbackUsernames)),
             true,
             options
         );
+        if (options?.providerRun) return supplement;
         return validateProfileBatchCompleteness(
             [...primaryResult, ...supplement],
             usernames

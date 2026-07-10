@@ -148,7 +148,8 @@ export interface AnalysisProgress {
     progressStep: string | null;
     backgroundProcessing: boolean;
     createdAt: string;
-    estimatedCompletionTime?: string;
+    completedAt: string | null;
+    estimatedCompletionTime: string | null;
 }
 
 // 기존 호환성 유지 (deprecated)

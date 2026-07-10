@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
     analysisTaskStateFromRow,
     analysisTaskStateKey,
+    createCloudTasksClient,
     enqueueAnalysisTask,
     getAnalysisTasksConfig,
     startAnalysisInBackground,
@@ -20,6 +21,20 @@ const config: AnalysisTasksConfig = {
 };
 
 describe('analysis background tasks', () => {
+    it('prepares deployment ADC before constructing the Cloud Tasks client', async () => {
+        const order: string[] = [];
+        const client = {} as never;
+
+        await expect(createCloudTasksClient(
+            () => { order.push('credentials'); },
+            async () => {
+                order.push('client');
+                return client;
+            }
+        )).resolves.toBe(client);
+        expect(order).toEqual(['credentials', 'client']);
+    });
+
     it('is disabled by default and fails closed on partial configuration', () => {
         expect(getAnalysisTasksConfig({})).toBeNull();
         expect(() => getAnalysisTasksConfig({ ANALYSIS_TASKS_ENABLED: 'true' }))
@@ -106,7 +121,7 @@ describe('analysis background tasks', () => {
                 };
             };
         };
-        expect(request.task.dispatchDeadline.seconds).toBe(600);
+        expect(request.task.dispatchDeadline.seconds).toBe(300);
         expect(request.task.httpRequest.oidcToken).toEqual({
             audience: config.oidcAudience,
             serviceAccountEmail: config.serviceAccountEmail,

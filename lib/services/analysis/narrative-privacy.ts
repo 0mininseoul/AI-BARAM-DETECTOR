@@ -6,6 +6,7 @@ const interactionTermPattern = /(?:좋아요|댓글|상호작용)/u;
 const coverageCaveatPattern = /(?:(?:수집|관측|확인)\s*(?:범위|비율)|coverage|커버리지|누락|표본)/iu;
 const cynicalTonePattern = /(?:굳이|공교롭게|하필|제법\s*친절|순진하게|우연치고는|모른\s*척|알아서)/u;
 const koreanQuantityPattern = /(?:하나|한|둘|두|셋|세|넷|네|다섯|여섯|일곱|여덟|아홉|열|한두|두어|두세|서너|너덧|너댓|대여섯|예닐곱|일여덟|스무|스물(?:한|두|세|네)?|서른|마흔|쉰|예순|일흔|여든|아흔|수십|수백|수천|여러|몇몇|몇|[일이삼사오육칠팔구]?(?:십|백|천)(?:여|남짓)?|일|이|삼|사|오|육|칠|팔|구)(?=\s*(?:건|개|회|번|차례|점|퍼센트|%|[이가을를은는만도,.!?。]|$))/u;
+const englishQuantityPattern = /\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|once|twice|thrice|single|double|triple|few|several|many|multiple|dozen|times?|counts?)\b/iu;
 const genericCommentTerms = new Set([
     '그래', '그런데', '그리고', '그냥', '너무', '오늘', '정말', '진짜',
     'comment', 'instagram', 'like', 'this', 'that', 'with',
@@ -25,11 +26,12 @@ export function sanitizePublicRiskNarrativeLine(value: unknown): string | null {
 }
 
 export function containsExposedInteractionMetric(value: string): boolean {
-    if (/\d/u.test(value)) return true;
+    const normalized = value.normalize('NFKC');
+    if (/\p{N}/u.test(value) || /\p{N}/u.test(normalized)) return true;
 
-    const clauses = value.split(/[.!?。]/u);
+    const clauses = normalized.split(/[.!?。]/u);
     return clauses.some(clause => (
-        interactionTermPattern.test(clause) && koreanQuantityPattern.test(clause)
+        koreanQuantityPattern.test(clause) || englishQuantityPattern.test(clause)
     ));
 }
 

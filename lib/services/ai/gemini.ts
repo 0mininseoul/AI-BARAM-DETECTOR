@@ -1,5 +1,3 @@
-import { writeFileSync } from 'fs';
-import { join } from 'path';
 import {
     GoogleGenAI,
     MediaResolution,
@@ -18,42 +16,23 @@ import {
     imageUrlToNormalizedBase64,
 } from './image-preprocessing';
 import { parseGeminiJsonResponse } from './gemini-response';
+import { prepareGoogleApplicationCredentials } from '@/lib/services/google/credentials';
+import {
+    AI_AMBIGUOUS_GENERATION_ERROR_PREFIX,
+    classifyGeminiGenerationError,
+} from './gemini-generation-policy';
 
 const GOOGLE_CLOUD_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || 'global';
 
 let genAI: GoogleGenAI | null = null;
-let credentialsPrepared = false;
 let extendedTelemetrySupported: boolean | null = null;
-
-function prepareGoogleCredentials(): void {
-    if (credentialsPrepared) {
-        return;
-    }
-
-    credentialsPrepared = true;
-
-    if (process.env.GOOGLE_APPLICATION_CREDENTIALS || !process.env.GOOGLE_SERVICE_ACCOUNT_KEY_BASE64) {
-        return;
-    }
-
-    const credentialsJson = Buffer.from(
-        process.env.GOOGLE_SERVICE_ACCOUNT_KEY_BASE64,
-        'base64'
-    ).toString('utf8');
-
-    JSON.parse(credentialsJson);
-
-    const credentialsPath = join('/tmp', 'google-service-account.json');
-    writeFileSync(credentialsPath, credentialsJson, { mode: 0o600 });
-    process.env.GOOGLE_APPLICATION_CREDENTIALS = credentialsPath;
-}
 
 function getGenAIClient(): GoogleGenAI {
     if (genAI) {
         return genAI;
     }
 
-    prepareGoogleCredentials();
+    prepareGoogleApplicationCredentials();
 
     const project = process.env.GOOGLE_CLOUD_PROJECT;
     if (!project) {
@@ -119,25 +98,24 @@ function sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-/**
- * 재시도 가능한 에러인지 확인
- */
-function isRetryableError(error: unknown): boolean {
-    if (error instanceof Error) {
-        const message = error.message.toLowerCase();
-        // Rate limit, 서버 에러, 네트워크 에러는 재시도
-        return (
-            message.includes('rate limit') ||
-            message.includes('429') ||
-            message.includes('500') ||
-            message.includes('503') ||
-            message.includes('timeout') ||
-            message.includes('network') ||
-            message.includes('econnreset') ||
-            message.includes('fetch failed')
+class RetryableGeminiRateLimitError extends Error {
+    constructor() {
+        super('AI_RATE_LIMIT_ERROR: Gemini rejected the request due to rate limiting.');
+        this.name = 'RetryableGeminiRateLimitError';
+    }
+}
+
+function sanitizeGenerationError(error: unknown): Error {
+    const disposition = classifyGeminiGenerationError(error);
+    if (disposition === 'rate_limited') {
+        return new RetryableGeminiRateLimitError();
+    }
+    if (disposition === 'ambiguous') {
+        return new Error(
+            `${AI_AMBIGUOUS_GENERATION_ERROR_PREFIX} Gemini generation status is unknown; the request was not retried.`
         );
     }
-    return false;
+    return new Error('AI_GENERATION_REQUEST_ERROR: Gemini rejected the generation request.');
 }
 
 /**
@@ -277,26 +255,31 @@ export async function analyzeWithGemini<T>(
                 }
             }
 
-            const response = await client.models.generateContent({
-                model: modelName,
-                contents: [{ role: 'user', parts }],
-                ...(costOptimized || maxOutputTokens !== undefined
-                    ? {
-                        config: {
-                            maxOutputTokens: maxOutputTokens ?? 1_024,
-                            responseMimeType: 'application/json',
-                            ...(costOptimized
-                                ? {
-                                    mediaResolution: MediaResolution.MEDIA_RESOLUTION_LOW,
-                                    ...(modelName.startsWith('gemini-3')
-                                        ? { thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL } }
-                                        : {}),
-                                }
-                                : {}),
-                        },
-                    }
-                    : {}),
-            });
+            let response;
+            try {
+                response = await client.models.generateContent({
+                    model: modelName,
+                    contents: [{ role: 'user', parts }],
+                    ...(costOptimized || maxOutputTokens !== undefined
+                        ? {
+                            config: {
+                                maxOutputTokens: maxOutputTokens ?? 1_024,
+                                responseMimeType: 'application/json',
+                                ...(costOptimized
+                                    ? {
+                                        mediaResolution: MediaResolution.MEDIA_RESOLUTION_LOW,
+                                        ...(modelName.startsWith('gemini-3')
+                                            ? { thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL } }
+                                            : {}),
+                                    }
+                                    : {}),
+                            },
+                        }
+                        : {}),
+                });
+            } catch (generationError) {
+                throw sanitizeGenerationError(generationError);
+            }
             const text = response.text;
 
             if (!text) {
@@ -353,7 +336,8 @@ export async function analyzeWithGemini<T>(
             console.error(`Gemini API Error (attempt ${attempt + 1}):`, lastError.message);
 
             // 재시도 불가능한 에러거나 마지막 시도면 throw
-            if (!isRetryableError(error) || attempt >= RETRY_CONFIG.maxRetries) {
+            if (!(error instanceof RetryableGeminiRateLimitError)
+                || attempt >= RETRY_CONFIG.maxRetries) {
                 console.error('--- AnalyzeWithGemini End (Failed) ---');
                 throw lastError;
             }

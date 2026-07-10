@@ -11,9 +11,11 @@ interface SelfHostedDeps {
     env?: Record<string, string | undefined>;
 }
 
-function concurrencySetting(env: Record<string, string | undefined>): number {
+export function getSelfHostedProfileConcurrency(
+    env: Record<string, string | undefined>
+): number {
     const raw = env.SELFHOSTED_PROFILE_CONCURRENCY;
-    if (raw === undefined) return 1;
+    if (raw === undefined) return 4;
     const value = Number(raw);
     if (!Number.isSafeInteger(value) || value < 1 || value > 5) {
         throw new Error(
@@ -25,7 +27,7 @@ function concurrencySetting(env: Record<string, string | undefined>): number {
 
 export function makeSelfHostedProvider(deps: SelfHostedDeps = {}): ScraperProvider {
     const env = deps.env ?? process.env;
-    const concurrency = deps.concurrency ?? concurrencySetting(env);
+    const concurrency = deps.concurrency ?? getSelfHostedProfileConcurrency(env);
     const injectedRetries = deps.retries ?? 0;
 
     async function fetchUser(
