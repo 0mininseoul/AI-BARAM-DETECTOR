@@ -138,7 +138,7 @@ BEGIN
        ) IS NOT TRUE
        OR p_object_name <> 'analysis-v2/' || p_request_id::TEXT || '/'
             || p_artifact_key || '/' || p_content_sha256
-            || CASE p_artifact_kind WHEN 'jpeg' THEN '.jpg' ELSE '.bin' END THEN
+            || (CASE p_artifact_kind WHEN 'jpeg' THEN '.jpg' ELSE '.bin' END) THEN
         RAISE EXCEPTION USING
             MESSAGE = 'ANALYSIS_V2_MEDIA_ARTIFACT_INVALID',
             ERRCODE = 'P0001';

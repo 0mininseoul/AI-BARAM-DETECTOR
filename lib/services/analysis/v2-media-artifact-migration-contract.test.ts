@@ -60,6 +60,16 @@ describe('analysis V2 media artifact migration contract', () => {
         );
     });
 
+    it('parenthesizes the CASE expression inside the registration IF predicate', () => {
+        const registration = functionDefinition('register_analysis_v2_media_artifact');
+        expect(registration).toContain(
+            "|| (CASE p_artifact_kind WHEN 'jpeg' THEN '.jpg' ELSE '.bin' END) THEN"
+        );
+        expect(registration).not.toContain(
+            "|| CASE p_artifact_kind WHEN 'jpeg' THEN '.jpg' ELSE '.bin' END THEN"
+        );
+    });
+
     it('provides bounded retryable terminal cleanup with an exact cleanup lease', () => {
         expect(migration).toContain('p_limit NOT BETWEEN 1 AND 500');
         expect(migration).toContain('FOR UPDATE OF artifact SKIP LOCKED');
