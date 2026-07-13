@@ -325,7 +325,7 @@ GRANT EXECUTE ON FUNCTION public.analysis_v2_valid_policy_versions_snapshot(JSON
 GRANT EXECUTE ON FUNCTION public.analysis_v2_valid_scope_snapshot(JSONB) TO service_role;
 
 CREATE TABLE public.analysis_preflights (
-    id UUID PRIMARY KEY DEFAULT public.uuid_generate_v4(),
+    id UUID PRIMARY KEY DEFAULT extensions.gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
     idempotency_key VARCHAR(128) NOT NULL,
     target_instagram_id VARCHAR(30) NOT NULL,
@@ -977,7 +977,7 @@ BEGIN
     WHERE preflight.user_id = p_user_id
       AND preflight.status IN ('pending', 'processing', 'ready');
 
-    v_preflight_id := public.uuid_generate_v4();
+    v_preflight_id := extensions.gen_random_uuid();
     INSERT INTO public.analysis_preflights (
         id,
         user_id,
@@ -1868,7 +1868,7 @@ BEGIN
         RAISE EXCEPTION USING MESSAGE = 'ANALYSIS_V2_PLAN_NOT_ALLOWED', ERRCODE = 'P0001';
     END IF;
 
-    v_request_id := public.uuid_generate_v4();
+    v_request_id := extensions.gen_random_uuid();
     INSERT INTO public.analysis_requests (
         id,
         user_id,
