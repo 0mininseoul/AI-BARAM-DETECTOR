@@ -9,6 +9,9 @@ import {
     lookupAnalysisV2Task,
     type AnalysisV2TaskLookupOutcome,
 } from './v2-tasks';
+import {
+    cleanupConfiguredAnalysisV2TerminalMedia,
+} from './v2-media-artifact-store';
 
 export const ANALYSIS_V2_RECOVERY_MAX_JOBS = 100;
 export const ANALYSIS_V2_RECOVERY_CONCURRENCY = 10;
@@ -28,6 +31,7 @@ type RecoveryLookup = (job: {
 }) => Promise<AnalysisV2TaskLookupOutcome>;
 
 type RecoveryDispatch = (requestId: string, jobKey: string) => Promise<unknown>;
+type TerminalMediaCleanup = () => Promise<unknown>;
 
 type RecoveryOutcome = keyof Omit<AnalysisV2RecoverySummary, 'scanned'>;
 
@@ -82,6 +86,10 @@ async function recoverOne(
     return 'dispatched';
 }
 
+async function cleanupTerminalMedia(): Promise<void> {
+    await cleanupConfiguredAnalysisV2TerminalMedia();
+}
+
 export async function recoverAnalysisV2Jobs(
     dependencies: {
         store?: AnalysisV2JobStore;
@@ -89,6 +97,7 @@ export async function recoverAnalysisV2Jobs(
         dispatch?: RecoveryDispatch;
         limit?: number;
         concurrency?: number;
+        cleanupTerminalMedia?: TerminalMediaCleanup;
     } = {}
 ): Promise<AnalysisV2RecoverySummary> {
     const store = dependencies.store ?? analysisV2JobStore;
@@ -126,5 +135,10 @@ export async function recoverAnalysisV2Jobs(
     await Promise.all(
         Array.from({ length: Math.min(concurrency, jobs.length) }, () => worker())
     );
+    try {
+        await (dependencies.cleanupTerminalMedia ?? cleanupTerminalMedia)();
+    } catch {
+        summary.failed += 1;
+    }
     return Object.freeze(summary);
 }

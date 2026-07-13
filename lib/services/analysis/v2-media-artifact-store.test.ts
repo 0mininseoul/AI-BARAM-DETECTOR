@@ -5,6 +5,7 @@ import {
     analysisV2MediaArtifactKey,
     analysisV2MediaArtifactObjectName,
     analysisV2MediaBundleArtifactKey,
+    cleanupConfiguredAnalysisV2TerminalMedia,
     createAnalysisV2MediaArtifactRegistry,
     createAnalysisV2MediaArtifactStore,
     createGoogleCloudPrivateMediaObjectClient,
@@ -358,6 +359,59 @@ describe('analysis V2 media artifact orchestration', () => {
         });
         expect(registryClient.completeCleanup).toHaveBeenCalledTimes(1);
         expect(registryClient.completeCleanup).toHaveBeenCalledWith(first);
+    });
+
+    it.each([101, 300, 900])(
+        'drains all %i terminal artifacts across bounded cleanup batches',
+        async artifactCount => {
+            const pending: AnalysisV2MediaArtifactCleanupRef[] = Array.from(
+                { length: artifactCount },
+                (_, index) => {
+                    const artifactKey = index.toString(16).padStart(64, '0');
+                    const base = reference({ artifactKey });
+                    return {
+                        ...base,
+                        objectName: analysisV2MediaArtifactObjectName(base),
+                        cleanupToken: claimToken,
+                    };
+                }
+            );
+            const claimCleanup = vi.fn(async (limit = 100) => pending.splice(0, limit));
+            const registryClient = registry({ claimCleanup });
+            const objectClient = objects();
+            const store = createAnalysisV2MediaArtifactStore({
+                objects: objectClient,
+                registry: registryClient,
+            });
+
+            await expect(store.cleanupTerminal()).resolves.toEqual({
+                claimed: artifactCount,
+                deleted: artifactCount,
+                failed: 0,
+            });
+            expect(objectClient.delete).toHaveBeenCalledTimes(artifactCount);
+            expect(registryClient.completeCleanup).toHaveBeenCalledTimes(artifactCount);
+            expect(claimCleanup).toHaveBeenCalledTimes(artifactCount > 500 ? 2 : 1);
+        }
+    );
+
+    it('bounds the number of cleanup batches accepted by a worker invocation', async () => {
+        const store = createAnalysisV2MediaArtifactStore({
+            objects: objects(),
+            registry: registry(),
+        });
+
+        await expect(store.cleanupTerminal({ maxBatches: 11 }))
+            .rejects.toThrow('invalid cleanup batch count');
+    });
+
+    it('turns partial deletion into a recovery-visible failure signal', async () => {
+        const partialStore = {
+            cleanupTerminal: vi.fn(async () => ({ claimed: 2, deleted: 1, failed: 1 })),
+        } as unknown as ReturnType<typeof createAnalysisV2MediaArtifactStore>;
+
+        await expect(cleanupConfiguredAnalysisV2TerminalMedia({ store: partialStore }))
+            .rejects.toThrow('ANALYSIS_V2_MEDIA_ARTIFACT_CLEANUP_INCOMPLETE');
     });
 
     it('stores and reloads all normalized feature media through one bundle object', async () => {

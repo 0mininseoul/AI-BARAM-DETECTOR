@@ -64,11 +64,13 @@ describe('analysis V2 dispatch recovery', () => {
         ]);
         const dispatch = vi.fn(async () => 'enqueued');
         const lookup = vi.fn(async () => 'exists' as const);
+        const cleanupTerminalMedia = vi.fn(async () => undefined);
 
         await expect(recoverAnalysisV2Jobs({
             store: jobStore,
             dispatch,
             lookup,
+            cleanupTerminalMedia,
         })).resolves.toEqual({
             scanned: 3,
             dispatched: 2,
@@ -78,6 +80,7 @@ describe('analysis V2 dispatch recovery', () => {
         });
         expect(dispatch).toHaveBeenCalledTimes(2);
         expect(jobStore.rearmDispatch).not.toHaveBeenCalled();
+        expect(cleanupTerminalMedia).toHaveBeenCalledOnce();
     });
 
     it('rearms only after Cloud Tasks proves the exact generation is missing', async () => {
@@ -120,5 +123,20 @@ describe('analysis V2 dispatch recovery', () => {
             lookup: async () => 'not_found',
             dispatch: vi.fn(),
         })).resolves.toMatchObject({ lostRace: 1, failed: 0 });
+    });
+
+    it('reports a terminal media cleanup failure for the scheduler to retry', async () => {
+        await expect(recoverAnalysisV2Jobs({
+            store: store([]),
+            cleanupTerminalMedia: async () => {
+                throw new Error('temporary cleanup failure');
+            },
+        })).resolves.toEqual({
+            scanned: 0,
+            dispatched: 0,
+            taskPresent: 0,
+            lostRace: 0,
+            failed: 1,
+        });
     });
 });

@@ -92,7 +92,11 @@ export interface AnalysisV2MediaArtifactStore {
         bundleId: string;
         expectedSelectionIds: readonly string[];
     }): Promise<AnalysisV2LoadedMediaBundleItem[] | null>;
-    cleanupTerminal(input?: { limit?: number; leaseSeconds?: number }): Promise<{
+    cleanupTerminal(input?: {
+        limit?: number;
+        leaseSeconds?: number;
+        maxBatches?: number;
+    }): Promise<{
         claimed: number;
         deleted: number;
         failed: number;
@@ -1035,20 +1039,38 @@ export function createAnalysisV2MediaArtifactStore(input: {
         },
 
         async cleanupTerminal(options = {}) {
-            const claimed = await registry.claimCleanup(options.limit, options.leaseSeconds);
-            const results = await runBounded(
-                claimed,
-                ANALYSIS_V2_MEDIA_ARTIFACT_CLEANUP_CONCURRENCY,
-                async artifact => {
-                    await input.objects.delete(artifact);
-                    await registry.completeCleanup(artifact);
-                }
-            );
-            const deleted = results.filter(result => result.status === 'fulfilled').length;
+            const limit = options.limit ?? 500;
+            const maxBatches = options.maxBatches ?? 4;
+            if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+                throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_VALIDATION_ERROR: invalid cleanup limit.');
+            }
+            if (!Number.isSafeInteger(maxBatches) || maxBatches < 1 || maxBatches > 10) {
+                throw new Error(
+                    'ANALYSIS_V2_MEDIA_ARTIFACT_VALIDATION_ERROR: invalid cleanup batch count.'
+                );
+            }
+
+            let claimedCount = 0;
+            let deletedCount = 0;
+            for (let batch = 0; batch < maxBatches; batch += 1) {
+                const claimed = await registry.claimCleanup(limit, options.leaseSeconds);
+                if (claimed.length === 0) break;
+                const results = await runBounded(
+                    claimed,
+                    ANALYSIS_V2_MEDIA_ARTIFACT_CLEANUP_CONCURRENCY,
+                    async artifact => {
+                        await input.objects.delete(artifact);
+                        await registry.completeCleanup(artifact);
+                    }
+                );
+                claimedCount += claimed.length;
+                deletedCount += results.filter(result => result.status === 'fulfilled').length;
+                if (claimed.length < limit) break;
+            }
             return {
-                claimed: claimed.length,
-                deleted,
-                failed: claimed.length - deleted,
+                claimed: claimedCount,
+                deleted: deletedCount,
+                failed: claimedCount - deletedCount,
             };
         },
     };
@@ -1075,4 +1097,21 @@ export function createConfiguredAnalysisV2MediaArtifactStore(
     return createAnalysisV2MediaArtifactStore({
         objects: createGoogleCloudPrivateMediaObjectClient({ bucketName }),
     });
+}
+
+export async function cleanupConfiguredAnalysisV2TerminalMedia(input: {
+    env?: Readonly<Record<string, string | undefined>>;
+    store?: AnalysisV2MediaArtifactStore;
+} = {}): Promise<{ claimed: number; deleted: number; failed: number }> {
+    const env = input.env ?? process.env;
+    if (!input.store && !getAnalysisV2MediaArtifactBucket(env)) {
+        return { claimed: 0, deleted: 0, failed: 0 };
+    }
+    const result = await (
+        input.store ?? createConfiguredAnalysisV2MediaArtifactStore(env)
+    ).cleanupTerminal();
+    if (result.failed > 0) {
+        throw new Error('ANALYSIS_V2_MEDIA_ARTIFACT_CLEANUP_INCOMPLETE');
+    }
+    return result;
 }
