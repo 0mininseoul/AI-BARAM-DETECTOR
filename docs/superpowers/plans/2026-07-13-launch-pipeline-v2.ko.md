@@ -130,7 +130,7 @@ Instagram 로그인 세션이 필요한 자체 팔로워/팔로잉 수집은 비
 11. 백그라운드 큐가 없으면 브라우저 실행에 의존해 사용자가 이탈 시 작업을 잃을 수 있다.
 12. 플랜·점수·모델·진행률 규칙이 코드와 문서 여러 곳에 중복되어 있다.
 
-이전 `0_min._.00` canary에서는 대상 자체 조회 성공과 18개 프로필 요청 중 17개 반환까지는 확인됐지만, 빠진 username의 최종 실패 사유는 저장되지 않았다. 같은 실행은 Apify 프로필 fallback을 사용했고, 최초 파이프라인 실패는 Apify dataset shape 불일치였다. 따라서 V2는 username별 최종 telemetry를 배포하고 canary를 다시 돌리기 전까지 자체 누락 원인을 미확정으로 둔다.
+이전 `0_min._.00` canary는 자체 크롤러 전체 실패를 보여준 것이 아니다. 영속 provider telemetry에서 대상 프로필 자체 조회 성공과 프로필 batch `30/30`, `30/30`, `15/16`, 이어진 다른 미캐시 batch `17/18`이 확인됐다. 다만 미해결 username의 최종 사유를 저장하지 않아 그 1개 누락을 특정 HTTP, 파싱, 비공개, rate-limit 원인으로 단정할 수는 없다. 같은 실행은 Apify 프로필 fallback을 사용했고, 최초 파이프라인 실패는 Apify dataset shape 불일치였다. V2는 정확한 누락 원인만 미확정으로 두고 username별 최종 telemetry를 저장하며, 고정된 미해결 username 집합만 fallback으로 보낸다.
 
 ## 5. 목표 아키텍처
 

@@ -130,7 +130,7 @@ These are extended, not replaced wholesale.
 11. Browser-driven execution remains a fallback; production users can still lose progress when background queueing is unavailable.
 12. Plan rules are duplicated and stale in code, product docs, cost docs, my-page labels, and database comments.
 
-The previous `0_min._.00` canary proved that the target self-hosted lookup succeeded and that an 18-profile batch returned 17 results, but the omitted username's terminal reason was not retained. The run also exercised Apify profile fallback, while its initial pipeline failure was an Apify dataset-shape mismatch. V2 therefore treats the exact missing self-hosted cause as unknown until per-username terminal telemetry is deployed and the canary is repeated.
+The previous `0_min._.00` canaries did not show a total self-hosted crawler failure. Durable provider telemetry records self-hosted target-profile success and profile batches of `30/30`, `30/30`, `15/16`, followed by another uncached batch of `17/18`. The unresolved username's terminal reason was not retained, so that one omission cannot be attributed to a specific HTTP, parsing, privacy, or rate-limit cause. The run also exercised Apify profile fallback, while its initial pipeline failure was an Apify dataset-shape mismatch. V2 therefore treats only the exact missing cause as unknown, persists per-username terminal telemetry, and sends only the frozen unresolved username set to fallback.
 
 ## 5. Target Architecture
 
