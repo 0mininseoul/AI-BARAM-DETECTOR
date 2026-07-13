@@ -1,4 +1,7 @@
-// 점수 계산 상수
+/**
+ * V1 legacy scoring for active requests only. New V2 code must import
+ * `lib/domain/analysis/risk-policy.ts` instead.
+ */
 
 // 성별 판단 신뢰도 임계값
 export const GENDER_CONFIDENCE = {

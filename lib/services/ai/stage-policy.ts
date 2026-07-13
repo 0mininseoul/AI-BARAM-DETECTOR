@@ -1,0 +1,76 @@
+export const AI_STAGE_NAMES = [
+    'genderTriage',
+    'featureAnalysis',
+    'highRiskNarrative',
+    'privateAccountName',
+] as const;
+
+export type AiStageName = typeof AI_STAGE_NAMES[number];
+export type AiThinkingLevel = 'MINIMAL' | 'MEDIUM' | 'HIGH';
+export type AiMediaResolution = 'LOW' | 'MEDIUM';
+
+export interface AiStagePolicy {
+    model: 'gemini-3.1-flash-lite' | 'gemini-3-flash-preview';
+    thinkingLevel: AiThinkingLevel;
+    mediaResolution: AiMediaResolution;
+    profileImageLimit: 0 | 1;
+    feedImageLimit: number;
+    maxOutputTokens: number;
+    concurrency: number;
+    promptVersion: string;
+    schemaVersion: number;
+}
+
+export const AI_STAGE_POLICY_VERSION = 'ai-stage-policy-v2.1';
+export const AI_SHARED_CONCURRENCY_LIMIT = 10;
+
+export const AI_STAGE_POLICIES = Object.freeze({
+    genderTriage: Object.freeze({
+        model: 'gemini-3.1-flash-lite',
+        thinkingLevel: 'MINIMAL',
+        mediaResolution: 'LOW',
+        profileImageLimit: 1,
+        feedImageLimit: 4,
+        maxOutputTokens: 512,
+        concurrency: 10,
+        promptVersion: 'gender-triage-v1',
+        schemaVersion: 1,
+    }),
+    featureAnalysis: Object.freeze({
+        model: 'gemini-3.1-flash-lite',
+        thinkingLevel: 'MEDIUM',
+        mediaResolution: 'MEDIUM',
+        profileImageLimit: 1,
+        feedImageLimit: 10,
+        maxOutputTokens: 2_048,
+        concurrency: 8,
+        promptVersion: 'feature-analysis-v1',
+        schemaVersion: 1,
+    }),
+    highRiskNarrative: Object.freeze({
+        model: 'gemini-3-flash-preview',
+        thinkingLevel: 'HIGH',
+        mediaResolution: 'MEDIUM',
+        profileImageLimit: 1,
+        feedImageLimit: 10,
+        maxOutputTokens: 1_024,
+        concurrency: 3,
+        promptVersion: 'high-risk-narrative-v1',
+        schemaVersion: 1,
+    }),
+    privateAccountName: Object.freeze({
+        model: 'gemini-3.1-flash-lite',
+        thinkingLevel: 'MINIMAL',
+        mediaResolution: 'LOW',
+        profileImageLimit: 0,
+        feedImageLimit: 0,
+        maxOutputTokens: 1_024,
+        concurrency: 4,
+        promptVersion: 'private-account-name-v1',
+        schemaVersion: 1,
+    }),
+} satisfies Record<AiStageName, Readonly<AiStagePolicy>>);
+
+export function getAiStagePolicy(stage: AiStageName): Readonly<AiStagePolicy> {
+    return AI_STAGE_POLICIES[stage];
+}

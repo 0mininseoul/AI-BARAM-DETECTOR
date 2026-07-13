@@ -1,3 +1,7 @@
+/**
+ * V1 legacy policy for active requests only. New V2 code must import
+ * `lib/domain/analysis/plan-catalog.ts` instead.
+ */
 export const BASIC_RELATIONSHIP_LIMIT = 500;
 export const STANDARD_RELATIONSHIP_LIMIT = 1_000;
 export const MAX_PUBLIC_PROFILES_PER_ANALYSIS = 350;
