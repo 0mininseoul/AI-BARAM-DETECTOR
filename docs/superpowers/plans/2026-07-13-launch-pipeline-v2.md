@@ -365,7 +365,7 @@ the independent recovery scheduler are connected and verified.
 1. Add per-call model, thinking level, media resolution, output limit, JSON schema, stage metadata, and a process-shared concurrency limit of 10 to the Gemini wrapper. Stage limits remain lower where configured.
 2. Stage 1 triage: `gemini-3.1-flash-lite`, `MINIMAL`, profile plus four representative feed images, tiny gender/owner schema. Exclude only high-confidence male results.
 3. Stage 2 features: initially `gemini-3.1-flash-lite`, routed female/unknown/borderline accounts, profile plus ten selected feed images, `MEDIUM`; return final gender, appearance, exposure, business, marriage/partner evidence, one-line overview, and evidence IDs. A labeled A/B can promote this stage to Gemini 3 Flash only when the accuracy gain justifies its latency and cost.
-4. High narrative: Gemini 3 Flash, featured high-risk accounts only, maximum three calls in parallel, `HIGH`, profile image, selected feed images, bio, captions, validated interaction facts, and actual sanitized comment text. Reuse the normalized image artifacts from Stage 2 so this call does not download or decode the same media again.
+4. High narrative: Gemini 3 Flash, featured high-risk accounts only, maximum three calls in parallel, `HIGH`, profile image, selected feed images, bio, captions, validated interaction facts, and actual sanitized comment text. Stage 2 stores one private, content-addressed normalized-media bundle per verified woman, rather than one GCS object per image, and the narrative reuses that bundle without another download/decode of Instagram media. Terminal cleanup deletes the exact object generation.
 5. Cache triage and features separately by model, prompt/schema version, and media snapshot hash. V1 combined cache is a V2 miss.
 6. Run an independent human-labeled A/B. Do not treat Stage 2 as Stage 1 ground truth. Keep `MINIMAL` only if the false-female quality gate passes.
 
@@ -406,10 +406,15 @@ Google's current model documentation confirms that `gemini-3.1-flash-lite` accep
 
 1. Apply migrations to a test project and configure Cloud Tasks/Cloud Run plus the bounded
    preflight-retention scheduler through GCP CLI.
-2. Run provider, RLS, migration, task-idempotency, and cleanup integration suites.
-3. Test `0_min._.00` first and record every stage latency, provider source, returned/declared counts, fallback username set, Gemini calls/tokens/thinking, cost, and total wall time.
-4. Repeat Basic/Standard/Plus synthetic or consented fixtures under concurrent load. A single successful canary is not a launch gate.
-5. Only after E2E and cost reconciliation pass, implement payment checkout/webhook as the last phase.
+2. Provision the media-artifact bucket in the worker region with uniform bucket-level access,
+   enforced public-access prevention, soft delete and Object Versioning disabled, an unconditional
+   `Age=1` Delete lifecycle, and worker-only object create/get/delete IAM. Verify every property
+   before enabling V2 execution. Exact-generation terminal cleanup is primary; lifecycle is only
+   the asynchronous backstop for an upload whose database registration remains ambiguous.
+3. Run provider, RLS, migration, task-idempotency, and cleanup integration suites.
+4. Test `0_min._.00` first and record every stage latency, provider source, returned/declared counts, fallback username set, Gemini calls/tokens/thinking, cost, and total wall time.
+5. Repeat Basic/Standard/Plus synthetic or consented fixtures under concurrent load. A single successful canary is not a launch gate.
+6. Only after E2E and cost reconciliation pass, implement payment checkout/webhook as the last phase.
 
 ## 10. Frontend Parallel Work
 

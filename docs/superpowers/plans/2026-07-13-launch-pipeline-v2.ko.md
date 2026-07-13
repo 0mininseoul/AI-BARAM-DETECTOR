@@ -293,7 +293,7 @@ migration/RLS/만료/멱등성, 비동기 preflight API, 자체 Cloud Run 작업
 1. Gemini wrapper에 호출별 모델, thinking, 해상도, 출력 한도, JSON schema, stage metadata, 프로세스 공유 동시성 상한 10을 추가한다. 단계별 상한이 더 낮으면 그 값을 우선한다.
 2. 1차 선별: `gemini-3.1-flash-lite`, `MINIMAL`, 프로필+대표 피드 4장, 작은 성별/소유자 schema. 고신뢰 남성만 제외한다.
 3. 2차 특성: 초기에는 `gemini-3.1-flash-lite`, 여성/unknown/borderline 계정, 프로필+선정 피드 10장, `MEDIUM`. 최종 성별, 외모, 노출, 비즈니스, 기혼/파트너 근거, 한 줄 개요, 근거 ID를 반환한다. 정확도 향상이 지연·비용을 정당화할 때만 라벨 A/B로 Gemini 3 Flash 승격을 검토한다.
-4. 고위험 총평: 대표 고위험만 최대 3건 병렬, Gemini 3 Flash `HIGH`, 프로필·피드·bio·캡션·검증 상호작용·실제 정리된 댓글을 사용한다. 2차에서 정규화한 이미지를 재사용한다.
+4. 고위험 총평: 대표 고위험만 최대 3건 병렬, Gemini 3 Flash `HIGH`, 프로필·피드·bio·캡션·검증 상호작용·실제 정리된 댓글을 사용한다. 2차는 검증된 여성마다 이미지별 객체를 여러 개 만들지 않고 비공개 content-addressed 정규화 미디어 bundle 하나를 저장한다. 총평은 이 bundle을 재사용해 Instagram 이미지를 다시 다운로드·디코딩하지 않으며, 종료 정리는 정확한 객체 generation을 삭제한다.
 5. triage/features cache를 모델·prompt/schema 버전·미디어 hash별로 분리한다. V1 결합 cache는 V2 miss다.
 6. 사람이 라벨링한 독립 A/B로 평가한다. 1차에서 false-female 품질 게이트가 통과할 때만 `MINIMAL`을 유지한다.
 
@@ -313,7 +313,7 @@ migration/RLS/만료/멱등성, 비동기 preflight API, 자체 Cloud Run 작업
 
 ### Phase I: 실측과 E2E
 
-테스트 프로젝트에 migration을 적용하고 GCP CLI로 Cloud Tasks/Run과 제한된 preflight retention scheduler를 설정한다. provider·RLS·migration·멱등성·정리 통합 테스트를 실행한다. 첫 계정은 `0_min._.00`으로 하고 단계별 지연, provider, 선언/반환 수, fallback username 집합, Gemini 호출/토큰/thinking, 비용, 전체 wall time을 기록한다. Basic/Standard/Plus fixture를 동시 부하로 반복한다. E2E와 비용 대사가 끝난 뒤 결제 checkout/webhook을 마지막 단계로 붙인다.
+테스트 프로젝트에 migration을 적용하고 GCP CLI로 Cloud Tasks/Run과 제한된 preflight retention scheduler를 설정한다. 미디어 artifact bucket은 worker와 같은 리전에 두고 uniform bucket-level access, public access prevention 강제, 기본 7일 soft delete와 Object Versioning 비활성화, 무조건 `Age=1` Delete lifecycle, worker의 object create/get/delete만 허용하는 IAM을 설정한 뒤 모든 조건을 실제로 검증한다. 정확한 generation을 지우는 종료 정리가 1차 수단이고 lifecycle은 DB 등록 성공 여부가 모호한 upload을 위한 비동기 fallback이다. 이 검증 전에는 V2 실행을 열지 않는다. provider·RLS·migration·멱등성·정리 통합 테스트를 실행한다. 첫 계정은 `0_min._.00`으로 하고 단계별 지연, provider, 선언/반환 수, fallback username 집합, Gemini 호출/토큰/thinking, 비용, 전체 wall time을 기록한다. Basic/Standard/Plus fixture를 동시 부하로 반복한다. E2E와 비용 대사가 끝난 뒤 결제 checkout/webhook을 마지막 단계로 붙인다.
 
 ## 10. 프론트엔드 병렬 작업
 
