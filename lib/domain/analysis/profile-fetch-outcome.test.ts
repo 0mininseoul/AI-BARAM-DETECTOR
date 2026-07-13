@@ -83,4 +83,20 @@ describe('profile fetch outcome contract', () => {
             httpStatus: null,
         })).toThrow();
     });
+
+    it('preserves incomplete provider coverage as a bounded failed outcome', () => {
+        expect(profileFetchOutcomeSchema.parse({
+            requestedUsername: 'alice',
+            source: 'selfhosted',
+            requestCount: 1,
+            latencyMs: 100,
+            capturedAt,
+            status: 'failed',
+            failureCategory: 'incomplete',
+            httpStatus: null,
+        })).toMatchObject({
+            status: 'failed',
+            failureCategory: 'incomplete',
+        });
+    });
 });

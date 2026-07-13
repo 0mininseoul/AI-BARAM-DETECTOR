@@ -1,4 +1,8 @@
-import type { InstagramProfile, InstagramPost } from '@/lib/types/instagram';
+import type {
+    InstagramPostMediaItem,
+    InstagramProfile,
+    InstagramPost,
+} from '@/lib/types/instagram';
 import { isInstagramUsername } from '../../username';
 import { normalizeInstagramTimestamp } from '../../timestamp';
 
@@ -32,14 +36,138 @@ function requiredCount(node: Record<string, unknown>, key: string): number {
     return value as number;
 }
 
+const MAX_CAROUSEL_CHILDREN = 20;
+const RAW_VIDEO_EXTENSION = /\.(?:m4v|mkv|mov|mp4|mpeg|mpg|ogv|webm)$/i;
+
+function nonEmptyString(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined;
+    const trimmed = value.trim();
+    return trimmed || undefined;
+}
+
+function mediaPath(value: string): string {
+    try {
+        return decodeURIComponent(new URL(value).pathname);
+    } catch {
+        return value.split(/[?#]/, 1)[0];
+    }
+}
+
+function displayImageUrl(...values: unknown[]): string | undefined {
+    for (const value of values) {
+        const candidate = nonEmptyString(value);
+        if (candidate && !RAW_VIDEO_EXTENSION.test(mediaPath(candidate))) return candidate;
+    }
+    return undefined;
+}
+
+function postMediaType(node: Record<string, unknown>): InstagramPost['type'] {
+    const typename = nonEmptyString(node.__typename);
+    const isVideo = node.is_video;
+    const productType = nonEmptyString(node.product_type)?.toLowerCase();
+    const isExplicitReel = productType === 'clips' || productType === 'reel' || productType === 'reels';
+
+    if (typename === 'GraphVideo' && isVideo === false) {
+        throw new Error('SCRAPING_SCHEMA_ERROR: GraphVideo의 is_video 필드가 서로 모순됩니다.');
+    }
+    if (typename === 'GraphImage' && isVideo === true) {
+        throw new Error('SCRAPING_SCHEMA_ERROR: GraphImage의 is_video 필드가 서로 모순됩니다.');
+    }
+    if (typename === 'GraphSidecar') {
+        if (isVideo === true || isExplicitReel) {
+            throw new Error('SCRAPING_SCHEMA_ERROR: GraphSidecar의 비디오 필드가 서로 모순됩니다.');
+        }
+        return 'carousel';
+    }
+
+    if (typename === 'GraphVideo' || isVideo === true) {
+        return isExplicitReel ? 'reel' : 'video';
+    }
+
+    if (typename === 'GraphImage' || isVideo === false) {
+        if (isExplicitReel) {
+            throw new Error('SCRAPING_SCHEMA_ERROR: 이미지 게시물의 product_type이 서로 모순됩니다.');
+        }
+        return 'image';
+    }
+
+    throw new Error('SCRAPING_SCHEMA_ERROR: selfhosted 게시물 미디어 타입을 판별할 수 없습니다.');
+}
+
+function mapChildMedia(node: unknown): InstagramPostMediaItem | null {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) return null;
+    const value = node as Record<string, unknown>;
+
+    let type: InstagramPostMediaItem['type'];
+    try {
+        const mapped = postMediaType(value);
+        if (mapped === 'carousel') return null;
+        type = mapped;
+    } catch {
+        return null;
+    }
+
+    const id = nonEmptyString(value.id);
+    const videoUrl = nonEmptyString(value.video_url);
+    const candidateThumbnail = displayImageUrl(value.display_url, value.thumbnail_src);
+    const thumbnailUrl = candidateThumbnail === videoUrl ? undefined : candidateThumbnail;
+    if (!thumbnailUrl || (type === 'image' && videoUrl)) return null;
+    return type === 'image'
+        ? {
+            ...(id ? { id } : {}),
+            type,
+            imageUrl: thumbnailUrl,
+        }
+        : {
+            ...(id ? { id } : {}),
+            type,
+            thumbnailUrl,
+            ...(videoUrl ? { videoUrl } : {}),
+        };
+}
+
+function mapSidecarChildren(node: Record<string, unknown>): Pick<
+    InstagramPost,
+    'mediaItems' | 'declaredMediaCount' | 'childrenComplete'
+> {
+    const connection = node.edge_sidecar_to_children;
+    if (!connection || typeof connection !== 'object' || Array.isArray(connection)) {
+        return { mediaItems: [], childrenComplete: false };
+    }
+
+    const value = connection as Record<string, unknown>;
+    const edges = Array.isArray(value.edges) ? value.edges : [];
+    const mediaItems = edges
+        .slice(0, MAX_CAROUSEL_CHILDREN)
+        .map((edge) => {
+            if (!edge || typeof edge !== 'object' || Array.isArray(edge)) return null;
+            return mapChildMedia((edge as Record<string, unknown>).node);
+        })
+        .filter((item): item is InstagramPostMediaItem => item !== null);
+    const count = value.count;
+    const declaredMediaCount = Number.isSafeInteger(count)
+        && (count as number) >= 1
+        && (count as number) <= MAX_CAROUSEL_CHILDREN
+        ? count as number
+        : undefined;
+    const childrenComplete = declaredMediaCount !== undefined
+        && edges.length === declaredMediaCount
+        && mediaItems.length === declaredMediaCount;
+
+    return {
+        mediaItems,
+        ...(declaredMediaCount === undefined ? {} : { declaredMediaCount }),
+        childrenComplete,
+    };
+}
+
 function mapPost(node: Record<string, unknown>): InstagramPost {
-    const typename = node.__typename as string | undefined;
-    const type: InstagramPost['type'] =
-        typename === 'GraphVideo' || node.is_video === true
-            ? 'video'
-            : typename === 'GraphSidecar'
-              ? 'carousel'
-              : 'image';
+    const type = postMediaType(node);
+    const id = nonEmptyString(node.id);
+    const shortCode = nonEmptyString(node.shortcode);
+    if (!id || !shortCode) {
+        throw new Error('SCRAPING_SCHEMA_ERROR: selfhosted 게시물 id 또는 shortcode가 없습니다.');
+    }
 
     const captionEdges = (node.edge_media_to_caption as { edges?: Array<{ node?: { text?: unknown } }> })?.edges;
     const caption =
@@ -57,15 +185,26 @@ function mapPost(node: Record<string, unknown>): InstagramPost {
     }
 
     const likes = count(node, 'edge_media_preview_like') || count(node, 'edge_liked_by');
+    const videoUrl = nonEmptyString(node.video_url);
+    const candidateThumbnail = displayImageUrl(node.display_url, node.thumbnail_src);
+    const thumbnailUrl = candidateThumbnail === videoUrl ? undefined : candidateThumbnail;
+    if ((type === 'image' || type === 'carousel') && videoUrl) {
+        throw new Error('SCRAPING_SCHEMA_ERROR: selfhosted 게시물 type과 video_url이 서로 모순됩니다.');
+    }
+    if (!thumbnailUrl) {
+        throw new Error('SCRAPING_INCOMPLETE_ERROR: selfhosted 게시물에 사용 가능한 이미지가 없습니다.');
+    }
 
     return {
-        id: (node.id as string) || '',
-        shortCode: (node.shortcode as string) || '',
+        id,
+        shortCode,
         caption,
         hashtags: extractHashtags(caption),
-        imageUrl: node.display_url as string | undefined,
-        videoUrl: node.video_url as string | undefined,
+        imageUrl: thumbnailUrl,
+        ...(type === 'video' || type === 'reel' ? { thumbnailUrl } : {}),
+        ...(videoUrl ? { videoUrl } : {}),
         type,
+        ...(type === 'carousel' ? mapSidecarChildren(node) : {}),
         likesCount: likes,
         commentsCount: count(node, 'edge_media_to_comment'),
         timestamp: normalizeInstagramTimestamp(node.taken_at_timestamp),
@@ -81,13 +220,37 @@ export function mapUserToProfile(user: Record<string, unknown>): InstagramProfil
     ) {
         throw new Error('SCRAPING_SCHEMA_ERROR: selfhosted profile username이 올바르지 않습니다.');
     }
+    const postsCount = requiredCount(user, 'edge_owner_to_timeline_media');
+    const isPrivate = user.is_private;
+    if (typeof isPrivate !== 'boolean') {
+        throw new Error('SCRAPING_SCHEMA_ERROR: selfhosted profile is_private가 boolean이 아닙니다.');
+    }
     const mediaEdges = (user.edge_owner_to_timeline_media as { edges?: Array<{ node?: Record<string, unknown> }> })?.edges;
     const latestPosts: InstagramPost[] = Array.isArray(mediaEdges)
         ? mediaEdges
               .slice(0, 10)
-              .map((e) => (e?.node ? mapPost(e.node) : null))
-              .filter((p): p is InstagramPost => p !== null)
+              .map((edge) => {
+                  if (!edge?.node) {
+                      throw new Error(
+                          'SCRAPING_SCHEMA_ERROR: selfhosted timeline edge에 게시물 node가 없습니다.'
+                      );
+                  }
+                  return mapPost(edge.node);
+              })
         : [];
+    if (!isPrivate && postsCount > 0 && latestPosts.length === 0) {
+        throw new Error(
+            'SCRAPING_INCOMPLETE_ERROR: selfhosted public profile has posts but no usable timeline media.'
+        );
+    }
+    if (
+        !isPrivate
+        && latestPosts.some(post => post.type === 'carousel' && post.childrenComplete !== true)
+    ) {
+        throw new Error(
+            'SCRAPING_INCOMPLETE_ERROR: selfhosted public profile carousel children are incomplete.'
+        );
+    }
 
     return {
         username: user.username as string,
@@ -97,8 +260,8 @@ export function mapUserToProfile(user: Record<string, unknown>): InstagramProfil
         profilePicUrl: (user.profile_pic_url_hd || user.profile_pic_url) as string | undefined,
         followersCount: requiredCount(user, 'edge_followed_by'),
         followingCount: requiredCount(user, 'edge_follow'),
-        postsCount: count(user, 'edge_owner_to_timeline_media'),
-        isPrivate: (user.is_private as boolean) ?? false,
+        postsCount,
+        isPrivate,
         isVerified: (user.is_verified as boolean) ?? false,
         latestPosts,
     };

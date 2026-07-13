@@ -44,6 +44,51 @@ describe('selfHostedProvider', () => {
             .resolves.toHaveLength(1);
     });
 
+    it('getProfilesBatchOutcomes keeps one terminal result for every requested username', async () => {
+        const fetchUser = vi.fn(async (username: string) => {
+            if (username === 'sample_user') return user;
+            if (username === 'empty') return null;
+            if (username === 'broken') throw new Error('SCRAPING_SCHEMA_ERROR: invalid shape');
+            throw new Error('network exploded');
+        });
+        const provider = makeSelfHostedProvider({ fetchUser, concurrency: 1, retries: 0 });
+
+        const results = await provider.getProfilesBatchOutcomes!([
+            'sample_user',
+            'empty',
+            'broken',
+            'failed',
+        ]);
+
+        expect(results.map(result => [
+            result.outcome.requestedUsername,
+            result.outcome.status,
+            result.outcome.failureCategory,
+        ])).toEqual([
+            ['sample_user', 'success', null],
+            ['empty', 'unavailable', 'empty_user'],
+            ['broken', 'failed', 'schema'],
+            ['failed', 'failed', 'transport'],
+        ]);
+        expect(results.every(result =>
+            result.outcome.requestCount === 1
+            && result.outcome.latencyMs >= 0
+            && result.outcome.latencyMs <= 300_000
+        )).toBe(true);
+    });
+
+    it('treats crawler configuration failures as a job-level error', async () => {
+        const fetchUser = vi.fn().mockRejectedValue(
+            new Error('SCRAPING_CONFIG_ERROR: selfhosted transport is not configured.')
+        );
+        const provider = makeSelfHostedProvider({ fetchUser, concurrency: 1, retries: 0 });
+
+        await expect(provider.getProfilesBatchOutcomes!(['sample_user']))
+            .rejects.toThrow('SCRAPING_CONFIG_ERROR');
+        await expect(provider.getProfilesBatch!(['sample_user']))
+            .rejects.toThrow('SCRAPING_CONFIG_ERROR');
+    });
+
     it('공개 프로필 기능만 노출한다', () => {
         const provider = makeSelfHostedProvider({ fetchUser: vi.fn() });
         expect(provider.getFollowers).toBeUndefined();

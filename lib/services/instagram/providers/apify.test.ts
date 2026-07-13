@@ -11,6 +11,7 @@ import {
     selectApifyCredentialSlot,
     startOrResumeApifyActor,
 } from './apify-relationship';
+import { selectAnalysisMedia } from '@/lib/domain/analysis/media-policy';
 
 function relationshipItem(username: string, overrides: Record<string, unknown> = {}) {
     return {
@@ -537,6 +538,61 @@ describe('apifyProvider', () => {
         await expect(provider.getProfilesBatch!(['alice', 'bob'], 2)).rejects.toThrow('INCOMPLETE');
     });
 
+    it('outcome batch records a settled Actor subset as explicit unavailable results', async () => {
+        const { client, call } = mockClient([profileItem('alice')]);
+        const provider = makeApifyProvider({
+            client,
+            env: { APIFY_DATASET_RETRY_BASE_DELAY_MS: '0' },
+        });
+
+        const results = await provider.getProfilesBatchOutcomes!(['alice', 'bob'], 2);
+
+        expect(results.map(result => [
+            result.outcome.requestedUsername,
+            result.outcome.status,
+            result.outcome.failureCategory,
+        ])).toEqual([
+            ['alice', 'success', null],
+            ['bob', 'unavailable', 'not_found'],
+        ]);
+        expect(call).toHaveBeenCalledOnce();
+    });
+
+    it('preserves valid profile outcomes when one attributed dataset row is malformed', async () => {
+        const { client } = mockClient([
+            profileItem('alice'),
+            { ...profileItem('bob'), private: 'false' },
+        ]);
+        const provider = makeApifyProvider({ client, env: {} });
+
+        const results = await provider.getProfilesBatchOutcomes!(['alice', 'bob'], 2);
+
+        expect(results.map(result => [
+            result.outcome.requestedUsername,
+            result.outcome.status,
+            result.outcome.failureCategory,
+        ])).toEqual([
+            ['alice', 'success', null],
+            ['bob', 'failed', 'schema'],
+        ]);
+    });
+
+    it('classifies mass profile omissions as incomplete instead of account-not-found', async () => {
+        const usernames = Array.from({ length: 30 }, (_, index) => `user${index}`);
+        const { client } = mockClient([profileItem('user0')]);
+        const provider = makeApifyProvider({ client, env: {} });
+
+        const results = await provider.getProfilesBatchOutcomes!(usernames, 30);
+
+        expect(results[0]).toMatchObject({
+            outcome: { requestedUsername: 'user0', status: 'success' },
+        });
+        expect(results.slice(1).every(result => (
+            result.outcome.status === 'failed'
+            && result.outcome.failureCategory === 'incomplete'
+        ))).toBe(true);
+    });
+
     it('allows an unavailable account in a durable one-account profile tail', async () => {
         const { client } = mockClient([]);
         const provider = makeApifyProvider({
@@ -872,12 +928,87 @@ describe('apifyProvider', () => {
         );
     });
 
+    it('retries a running profile Actor by the same checkpointed run id without another start', async () => {
+        const { client, call, waitForFinish } = mockClient([profileItem('target')]);
+        waitForFinish
+            .mockReset()
+            .mockResolvedValueOnce({
+                status: 'RUNNING',
+                defaultDatasetId: 'dataset',
+            })
+            .mockResolvedValueOnce({
+                status: 'SUCCEEDED',
+                defaultDatasetId: 'dataset',
+            });
+        const provider = makeApifyProvider({ client, env: {} });
+        const onRunStarted = vi.fn().mockResolvedValue(undefined);
+
+        await expect(provider.getProfilesBatchOutcomes!(['target'], 1, {
+            onBeforeRunStart: vi.fn().mockResolvedValue(undefined),
+            onRunStarted,
+            recordUsage: vi.fn(),
+        })).rejects.toThrow('SCRAPING_RUN_PENDING_ERROR');
+        expect(onRunStarted).toHaveBeenCalledWith('RunAbcd1234567890');
+
+        await expect(provider.getProfilesBatchOutcomes!(['target'], 1, {
+            resumeRunId: 'RunAbcd1234567890',
+            logicalProvider: 'apify',
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.0026,
+            recordUsage: vi.fn(),
+        })).resolves.toMatchObject([{
+            outcome: { requestedUsername: 'target', status: 'success' },
+        }]);
+
+        expect(call).toHaveBeenCalledOnce();
+        expect(client.run).toHaveBeenLastCalledWith('RunAbcd1234567890');
+    });
+
+    it('retries a profile dataset read through the same run instead of starting again', async () => {
+        const { client, call, listItems } = mockClient([profileItem('target')]);
+        listItems
+            .mockReset()
+            .mockRejectedValueOnce(new Error('dataset transport failed'))
+            .mockResolvedValueOnce({
+                items: [profileItem('target')],
+                total: 1,
+                offset: 0,
+                count: 1,
+                limit: 2,
+            });
+        const provider = makeApifyProvider({
+            client,
+            env: {
+                APIFY_DATASET_READ_RETRIES: '0',
+                APIFY_DATASET_RETRY_BASE_DELAY_MS: '0',
+            },
+        });
+
+        await expect(provider.getProfilesBatchOutcomes!(['target'], 1, {
+            onBeforeRunStart: vi.fn().mockResolvedValue(undefined),
+            onRunStarted: vi.fn().mockResolvedValue(undefined),
+            recordUsage: vi.fn(),
+        })).rejects.toThrow('SCRAPING_RUN_PENDING_ERROR');
+
+        await expect(provider.getProfilesBatchOutcomes!(['target'], 1, {
+            resumeRunId: 'RunAbcd1234567890',
+            logicalProvider: 'apify',
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.0026,
+            recordUsage: vi.fn(),
+        })).resolves.toHaveLength(1);
+
+        expect(call).toHaveBeenCalledOnce();
+        expect(listItems).toHaveBeenCalledTimes(2);
+    });
+
     it('keeps latest posts on the single-profile fallback path', async () => {
         const { client } = mockClient([{
             ...profileItem('target'),
             latestPosts: [{
                 id: '1',
                 shortCode: 'abcde',
+                type: 'Image',
                 displayUrl: 'https://example.com/post.jpg',
                 timestamp: 1_767_225_600,
             }],
@@ -890,6 +1021,206 @@ describe('apifyProvider', () => {
                     timestamp: '2026-01-01T00:00:00.000Z',
                 }],
             });
+    });
+
+    it('proves documented Apify carousel completeness and exposes safety contact frames', async () => {
+        const { client } = mockClient([{
+            ...profileItem('target'),
+            latestPosts: [{
+                id: 'sidecar-1',
+                shortCode: 'sidecar',
+                type: 'Sidecar',
+                displayUrl: 'https://example.com/sidecar-cover.jpg',
+                timestamp: '2026-01-01T00:00:00.000Z',
+                images: [
+                    'https://example.com/child-1.jpg',
+                    'https://example.com/child-2.jpg',
+                    'https://example.com/child-3.jpg',
+                    'https://example.com/child-4.jpg',
+                ],
+                childPosts: [
+                    {
+                        id: 'child-1',
+                        type: 'Image',
+                        displayUrl: 'https://example.com/child-1.jpg',
+                    },
+                    {
+                        id: 'child-2',
+                        type: 'Video',
+                        displayUrl: 'https://example.com/child-2.jpg',
+                        videoUrl: 'https://example.com/child-2.mp4',
+                    },
+                    {
+                        id: 'child-3',
+                        type: 'Image',
+                        displayUrl: 'https://example.com/child-3.jpg',
+                    },
+                    {
+                        id: 'child-4',
+                        type: 'Image',
+                        displayUrl: 'https://example.com/child-4.jpg',
+                    },
+                ],
+            }],
+        }]);
+
+        const profile = await makeApifyProvider({ client, env: {} }).getProfile!('target');
+        if (!profile) throw new Error('expected Apify profile fixture');
+        const [post] = profile.latestPosts!;
+
+        expect(post).toMatchObject({
+            type: 'carousel',
+            imageUrl: 'https://example.com/sidecar-cover.jpg',
+            declaredMediaCount: 4,
+            childrenComplete: true,
+        });
+        expect(post.mediaItems).toEqual([
+            {
+                id: 'child-1',
+                type: 'image',
+                imageUrl: 'https://example.com/child-1.jpg',
+            },
+            {
+                id: 'child-2',
+                type: 'video',
+                thumbnailUrl: 'https://example.com/child-2.jpg',
+                videoUrl: 'https://example.com/child-2.mp4',
+            },
+            {
+                id: 'child-3',
+                type: 'image',
+                imageUrl: 'https://example.com/child-3.jpg',
+            },
+            {
+                id: 'child-4',
+                type: 'image',
+                imageUrl: 'https://example.com/child-4.jpg',
+            },
+        ]);
+        const selected = selectAnalysisMedia({
+            posts: profile.latestPosts!.map(post => ({
+                ...post,
+                timestamp: post.timestamp ?? 0,
+            })),
+        });
+        expect(selected.feed.media.map(media => media.mediaIndex)).toEqual([0, 2, 3]);
+        expect(selected.partnerSafetyContactSheetCandidates.media).toMatchObject([
+            { mediaIndex: 1, role: 'partner_safety_contact' },
+        ]);
+    });
+
+    it('maps documented clips as reels and keeps their display thumbnail separate from video', async () => {
+        const { client } = mockClient([{
+            ...profileItem('target'),
+            latestPosts: [{
+                id: 'reel-1',
+                shortCode: 'reel',
+                type: 'Video',
+                productType: 'clips',
+                displayUrl: 'https://example.com/reel-thumb.jpg',
+                videoUrl: 'https://example.com/reel.mp4',
+            }],
+        }]);
+
+        await expect(makeApifyProvider({ client, env: {} }).getProfile!('target'))
+            .resolves.toMatchObject({
+                latestPosts: [{
+                    type: 'reel',
+                    imageUrl: 'https://example.com/reel-thumb.jpg',
+                    thumbnailUrl: 'https://example.com/reel-thumb.jpg',
+                    videoUrl: 'https://example.com/reel.mp4',
+                }],
+            });
+    });
+
+    it.each([
+        {
+            label: 'carousel without childPosts',
+            post: {
+                id: '1',
+                shortCode: 'abc',
+                type: 'Sidecar',
+                displayUrl: 'https://example.com/p.jpg',
+            },
+        },
+        {
+            label: 'childPosts on a non-carousel post',
+            post: {
+                id: '1',
+                shortCode: 'abc',
+                type: 'Image',
+                displayUrl: 'https://example.com/p.jpg',
+                childPosts: [
+                    { id: '1', type: 'Image', displayUrl: 'https://example.com/one.jpg' },
+                ],
+            },
+        },
+        {
+            label: 'raw video as display image',
+            post: {
+                id: '1',
+                shortCode: 'abc',
+                type: 'Video',
+                displayUrl: 'https://example.com/raw.mp4?token=test',
+                videoUrl: 'https://example.com/raw.mp4?token=test',
+            },
+        },
+        {
+            label: 'image with video URL',
+            post: {
+                id: '1',
+                shortCode: 'abc',
+                type: 'Image',
+                displayUrl: 'https://example.com/p.jpg',
+                videoUrl: 'https://example.com/raw.mp4',
+            },
+        },
+        {
+            label: 'unknown post type',
+            post: {
+                id: '1',
+                shortCode: 'abc',
+                type: 'Unknown',
+                displayUrl: 'https://example.com/p.jpg',
+            },
+        },
+        {
+            label: 'carousel image order mismatch',
+            post: {
+                id: '1',
+                shortCode: 'abc',
+                type: 'Sidecar',
+                displayUrl: 'https://example.com/p.jpg',
+                images: ['https://example.com/two.jpg'],
+                childPosts: [
+                    { id: '1', type: 'Image', displayUrl: 'https://example.com/one.jpg' },
+                ],
+            },
+        },
+        {
+            label: 'opaque raw child video as display image',
+            post: {
+                id: '1',
+                shortCode: 'abc',
+                type: 'Sidecar',
+                displayUrl: 'https://example.com/p.jpg',
+                images: ['https://example.com/opaque-video'],
+                childPosts: [{
+                    id: '1',
+                    type: 'Video',
+                    displayUrl: 'https://example.com/opaque-video',
+                    videoUrl: 'https://example.com/opaque-video',
+                }],
+            },
+        },
+    ])('fails closed for malformed or contradictory Apify media: $label', async ({ post }) => {
+        const { client } = mockClient([{
+            ...profileItem('target'),
+            latestPosts: [post],
+        }]);
+
+        await expect(makeApifyProvider({ client, env: {} }).getProfile!('target'))
+            .rejects.toThrow('SCRAPING_SCHEMA_ERROR');
     });
 
     it('rejects profile calls before startup when their platform charge cap would be exceeded', async () => {
@@ -926,6 +1257,7 @@ describe('apifyProvider', () => {
             latestPosts: [{
                 id: '1',
                 shortCode: 'abc',
+                type: 'Image',
                 displayUrl: 'https://example.com/p.jpg',
                 likesCount: -1,
                 commentsCount: -1,

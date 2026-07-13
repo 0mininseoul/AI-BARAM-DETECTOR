@@ -1,4 +1,8 @@
 import type { InstagramProfile, InstagramFollower } from '@/lib/types/instagram';
+import type {
+    ProfileFetchOutcome,
+    ProfileFetchSource,
+} from '@/lib/domain/analysis/profile-fetch-outcome';
 
 export type Capability = 'profile' | 'profilesBatch' | 'followers' | 'following';
 
@@ -125,6 +129,23 @@ export interface ProviderCallContext extends ProviderCostRunCallbacks {
     recordUsage(delta: ProviderUsageDelta): void;
 }
 
+export type ProfileAttemptProvider = Extract<ProfileFetchSource, 'selfhosted' | 'apify'>;
+export type ProfileAttemptSuccessOutcome = Extract<ProfileFetchOutcome, { status: 'success' }>;
+export type ProfileAttemptUnavailableOutcome = Extract<
+    ProfileFetchOutcome,
+    { status: 'unavailable' }
+>;
+export type ProfileAttemptFailedOutcome = Extract<ProfileFetchOutcome, { status: 'failed' }>;
+
+/**
+ * One terminal result for one requested username in one provider attempt. Profiles are
+ * carried only on success; the persistence layer can store telemetry and profile data atomically.
+ */
+export type ProfileAttemptResult =
+    | { outcome: ProfileAttemptSuccessOutcome; profile: InstagramProfile }
+    | { outcome: ProfileAttemptUnavailableOutcome }
+    | { outcome: ProfileAttemptFailedOutcome };
+
 /**
  * 스크래핑 프로바이더. 각 프로바이더는 지원하는 기능만 구현한다.
  * (예: rapidapi는 getFollowing만, selfhosted는 getProfile/getProfilesBatch만)
@@ -148,4 +169,9 @@ export interface ScraperProvider {
         batchSize?: number,
         context?: ProviderCallContext
     ): Promise<InstagramProfile[]>;
+    getProfilesBatchOutcomes?(
+        usernames: string[],
+        batchSize?: number,
+        context?: ProviderCallContext
+    ): Promise<ProfileAttemptResult[]>;
 }

@@ -1,14 +1,30 @@
 import type { InstagramProfile } from '@/lib/types/instagram';
-import type { ProviderCallContext, ScraperProvider } from '../types';
+import type {
+    ProfileAttemptResult,
+    ProviderCallContext,
+    ProviderUsageDelta,
+    ScraperProvider,
+} from '../types';
+import {
+    failedProfileAttempt,
+    profileAttemptLatency,
+    successfulProfileAttempt,
+    unavailableProfileAttempt,
+} from '../profile-attempt';
 import { mapUserToProfile } from './mappers';
 import { pLimit, withRetry } from './rate-limit';
 import { fetchWebProfileUser } from './web-client';
+import { isInstagramUsername } from '../../username';
 
 interface SelfHostedDeps {
     fetchUser?: (username: string) => Promise<Record<string, unknown> | null>;
     concurrency?: number;
     retries?: number;
     env?: Record<string, string | undefined>;
+}
+
+function isConfigurationError(error: unknown): error is Error {
+    return error instanceof Error && error.message.startsWith('SCRAPING_CONFIG_ERROR:');
 }
 
 export function getSelfHostedProfileConcurrency(
@@ -75,6 +91,7 @@ export function makeSelfHostedProvider(deps: SelfHostedDeps = {}): ScraperProvid
         );
         const resultMap = new Map<string, InstagramProfile>();
         for (const s of settled) {
+            if (s.status === 'rejected' && isConfigurationError(s.reason)) throw s.reason;
             if (s.status !== 'fulfilled' || !s.value) continue;
             const key = s.value.profile.username.toLowerCase();
             if (key !== s.value.requestedUsername.toLowerCase() || !requested.has(key)) {
@@ -87,11 +104,78 @@ export function makeSelfHostedProvider(deps: SelfHostedDeps = {}): ScraperProvid
         return results;
     }
 
+    async function getProfilesBatchOutcomes(
+        usernames: string[],
+        _batchSize?: number,
+        context?: ProviderCallContext
+    ): Promise<ProfileAttemptResult[]> {
+        const normalized = usernames.map(username => username.trim().toLowerCase());
+        if (
+            normalized.some(username => !isInstagramUsername(username))
+            || new Set(normalized).size !== normalized.length
+        ) {
+            throw new Error(
+                'SCRAPING_CONFIG_ERROR: selfhosted outcome usernames are invalid or duplicated.'
+            );
+        }
+
+        const limit = pLimit(concurrency);
+        const results = await Promise.all(
+            normalized.map(username => limit(async () => {
+                const startedAt = Date.now();
+                let requestCount = 0;
+                const itemContext: ProviderCallContext = {
+                    ...context,
+                    recordUsage(delta: ProviderUsageDelta): void {
+                        requestCount += delta.request_count ?? 0;
+                        context?.recordUsage(delta);
+                    },
+                };
+
+                try {
+                    const rawUser = await fetchUser(username, itemContext);
+                    const latencyMs = profileAttemptLatency(startedAt);
+                    if (rawUser === null) {
+                        return unavailableProfileAttempt({
+                            requestedUsername: username,
+                            source: 'selfhosted',
+                            reason: 'empty_user',
+                            requestCount,
+                            latencyMs,
+                        });
+                    }
+                    const profile = mapUserToProfile(rawUser);
+                    return successfulProfileAttempt({
+                        requestedUsername: username,
+                        source: 'selfhosted',
+                        profile,
+                        requestCount,
+                        latencyMs,
+                    });
+                } catch (error) {
+                    if (isConfigurationError(error)) throw error;
+                    return failedProfileAttempt({
+                        requestedUsername: username,
+                        source: 'selfhosted',
+                        error,
+                        requestCount,
+                        latencyMs: profileAttemptLatency(startedAt),
+                    });
+                }
+            }))
+        );
+        context?.recordUsage({
+            result_count: results.filter(result => result.outcome.status === 'success').length,
+        });
+        return results;
+    }
+
     return {
         name: 'selfhosted',
         paid: false,
         getProfile,
         getProfilesBatch,
+        getProfilesBatchOutcomes,
     };
 }
 

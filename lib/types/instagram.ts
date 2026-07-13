@@ -14,14 +14,28 @@ export interface InstagramProfile {
     latestPosts?: InstagramPost[]; // profile scraper에서 함께 반환
 }
 
+export type InstagramPostMediaType = 'image' | 'video' | 'reel';
+
+export interface InstagramPostMediaItem {
+    id?: string;
+    type: InstagramPostMediaType;
+    imageUrl?: string;
+    thumbnailUrl?: string;
+    videoUrl?: string;
+}
+
 export interface InstagramPost {
     id: string;
     shortCode: string;
     caption?: string;
     hashtags?: string[]; // 스크래퍼에서 제공하는 해시태그 배열
     imageUrl?: string;
+    thumbnailUrl?: string;
     videoUrl?: string;
     type: 'image' | 'video' | 'carousel' | 'reel';
+    mediaItems?: InstagramPostMediaItem[];
+    declaredMediaCount?: number;
+    childrenComplete?: boolean;
     likesCount: number;
     commentsCount: number;
     timestamp: string;
