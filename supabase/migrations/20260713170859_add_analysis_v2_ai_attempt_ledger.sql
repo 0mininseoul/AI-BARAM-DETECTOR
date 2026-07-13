@@ -812,7 +812,7 @@ BEGIN
             ERRCODE = 'P0001';
     END IF;
 
-    SELECT pg_catalog.coalesce(
+    SELECT COALESCE(
         pg_catalog.jsonb_agg(
             public.analysis_v2_ai_attempt_json(ai_attempt)
             ORDER BY ai_attempt.attempt

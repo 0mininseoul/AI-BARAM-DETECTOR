@@ -678,7 +678,7 @@ BEGIN
             ERRCODE = 'P0001';
     END IF;
 
-    SELECT pg_catalog.coalesce(
+    SELECT COALESCE(
         pg_catalog.jsonb_agg(
             pg_catalog.jsonb_build_object(
                 'requestId', candidate.request_id,
