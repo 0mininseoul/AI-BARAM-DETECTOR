@@ -17,6 +17,7 @@ export interface V2FemaleCandidateEvidence {
     appearanceGrade: AppearanceGrade;
     exposureScore: number;
     isBusinessAccount: boolean;
+    hasWeakPartnerEvidence: boolean;
     hasStrongPartnerEvidence: boolean;
     uniqueTargetPostsLikedByCandidate: number;
     boundedCandidateCommentsOnTarget: number;
@@ -100,6 +101,7 @@ export function calculateV2PreliminaryScores(input: {
             appearanceGrade: candidate.appearanceGrade,
             exposureScore: candidate.exposureScore,
             isBusinessAccount: candidate.isBusinessAccount,
+            hasWeakPartnerEvidence: candidate.hasWeakPartnerEvidence,
             hasStrongPartnerEvidence: candidate.hasStrongPartnerEvidence,
         });
         return {
@@ -164,6 +166,7 @@ export function calculateV2FinalScores(input: {
             appearanceGrade: candidate.appearanceGrade,
             exposureScore: candidate.exposureScore,
             isBusinessAccount: candidate.isBusinessAccount,
+            hasWeakPartnerEvidence: candidate.hasWeakPartnerEvidence,
             hasStrongPartnerEvidence: candidate.hasStrongPartnerEvidence,
         });
         return { ...candidate, reverseLikeStatus, risk };

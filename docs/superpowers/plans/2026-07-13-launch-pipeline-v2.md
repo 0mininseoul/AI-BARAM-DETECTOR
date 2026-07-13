@@ -77,7 +77,7 @@ total                          100
 - Recent verified mutual women ranks 1..10: `17,16,15,14,13,12,10,8,6,4`.
 - Recent mutual badges are assigned after girlfriend exclusion and final female verification. The newest five women receive ranks 1..5, independent of non-female accounts in the relationship order.
 - A confirmed business context applies `0.5` only to `recent mutual + appearance/exposure`. Observed likes, comments, tags, and mentions are not reduced.
-- Partner evidence is separate from the 100-point evidence sum. One two-person photo with a plausible peer-age man is weak negative evidence unless the model identifies a celebrity/public figure or clear older-relative context. Strong repeated partner evidence caps the public score at `3.4` and therefore keeps the account in the normal band while retaining observed interaction facts internally. The exact weak-evidence adjustment is calibrated on labeled fixtures before the score policy is frozen.
+- Partner evidence is separate from the 100-point positive-evidence sum. One two-person photo with a plausible peer-age man applies a provisional `-5` raw-score adjustment unless the model identifies a celebrity/public figure or clear older-relative context. Strong repeated partner evidence caps the public score at `3.4` and therefore keeps the account in the normal band while retaining observed interaction facts internally. A labeled evaluation may replace `-5` only through a new versioned score policy.
 - The raw formula is `direct + businessAdjustedSoftContext + weakPartnerAdjustment`, clamped to `0..100`, where `direct=20+26+3+14` components and `softContext=recentMutual+appearanceExposure`. Strong partner evidence applies the normal-band cap after this calculation.
 - `displayScore = round(1 + 9 * rawScore / 100, 1)`. Classification uses unrounded raw values.
 - Normal: `< 4.2`; caution: `>= 4.2 and < 6.8`; high risk: `>= 6.8`.
@@ -564,12 +564,12 @@ Required frontend fixtures before live integration:
 - **Engineering:** add V2 beside V1, move from request-wide state to job rows, and freeze contracts before parallel implementation.
 - **Data quality:** relationship completeness and analysis depth are first-class result fields; partial work is never described as complete.
 - **User-direction challenge:** forcing at least one high-risk and caution account conflicts with absolute thresholds. V2 keeps absolute bands and uses a separately labeled relative-watch section instead.
-- **Taste decision retained for calibration:** the exact weak male-companion adjustment and strong-partner confidence threshold are selected against labeled fixtures before Phase F scoring is frozen; the strong-evidence outcome itself is fixed as a normal-band cap.
+- **Partner calibration:** V2.2 uses a provisional `-5` weak male-companion adjustment. The strong-partner confidence threshold and any later adjustment change require labeled fixtures and a new policy version; the strong-evidence outcome itself remains fixed as a normal-band cap.
 
 ### Deferred decisions that do not block Phase A
 
 - Final Basic/Standard/Plus KRW prices and payment provider.
-- Weak male-companion adjustment and strong-partner confidence threshold from the labeled evaluation.
+- Strong-partner confidence threshold and validation of the provisional `-5` adjustment from the labeled evaluation.
 - Whether Stage 2 remains Flash-Lite medium or moves to Gemini 3 Flash medium after the A/B.
 - Cloud Run region, CPU/memory, queue concurrency, and Gemini quota after GCP CLI inspection.
 - Whether Standard/Plus are launch-enabled; each must independently pass the five-minute and cost gates.

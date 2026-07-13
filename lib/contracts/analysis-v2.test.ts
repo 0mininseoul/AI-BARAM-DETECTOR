@@ -211,9 +211,12 @@ describe('analysis V2 public contracts', () => {
                 publicMutuals: 40,
                 privateMutuals: 10,
                 screenedMutuals: 40,
+                successfullyScreenedMutuals: 38,
+                fetchUnavailableMutuals: 1,
+                mediaUnavailableMutuals: 1,
                 notScreenedMutuals: 0,
                 exclusionApplied: true,
-                scorePolicyVersion: 'risk-policy-v2.1',
+                scorePolicyVersion: 'risk-policy-v2.2',
             },
             privateAccounts: [],
             femaleNextCursor: null,
@@ -240,6 +243,14 @@ describe('analysis V2 public contracts', () => {
             ...base,
             femaleAccounts: [row],
         }).success).toBe(true);
+        expect(analysisResultPageV1Schema.safeParse({
+            ...base,
+            summary: {
+                ...base.summary,
+                successfullyScreenedMutuals: 39,
+            },
+            femaleAccounts: [row],
+        }).success).toBe(false);
         expect(analysisResultPageV1Schema.safeParse({
             ...base,
             femaleAccounts: [{ ...row, riskBand: 'normal' }],
@@ -320,9 +331,12 @@ describe('analysis V2 public contracts', () => {
             publicMutuals: 390,
             privateMutuals: 10,
             screenedMutuals: 350,
+            successfullyScreenedMutuals: 350,
+            fetchUnavailableMutuals: 0,
+            mediaUnavailableMutuals: 0,
             notScreenedMutuals: 40,
             exclusionApplied: true,
-            scorePolicyVersion: 'risk-policy-v2.1',
+            scorePolicyVersion: 'risk-policy-v2.2',
         };
         const page = {
             schemaVersion: 1,
@@ -340,6 +354,7 @@ describe('analysis V2 public contracts', () => {
             summary: {
                 ...summary,
                 screenedMutuals: 300,
+                successfullyScreenedMutuals: 300,
                 notScreenedMutuals: 90,
                 following: {
                     declared: 400,

@@ -166,10 +166,9 @@ BEGIN
        AND p_result_hash ~ '^[0-9a-f]{64}$'
        AND p_result_hash = pg_catalog.encode(
             extensions.digest(
-                pg_catalog.convert_to(
-                    'analysis-v2-ai-result-content:v1' || pg_catalog.chr(0) || p_canonical,
-                    'UTF8'
-                ),
+                pg_catalog.convert_to('analysis-v2-ai-result-content:v1', 'UTF8')
+                    || pg_catalog.decode('00', 'hex')
+                    || pg_catalog.convert_to(p_canonical, 'UTF8'),
                 'sha256'
             ),
             'hex'

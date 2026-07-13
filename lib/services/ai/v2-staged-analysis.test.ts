@@ -127,7 +127,7 @@ function featureResponse(overrides: Record<string, unknown> = {}) {
         partnerEvidence: 'none',
         partnerExclusionContext: 'none',
         evidenceSelectionIds: {
-            gender: ['profile:candidate'],
+            gender: ['profile:candidate', 'post:1:thumbnail'],
             appearance: ['post:1:thumbnail'],
             exposure: ['post:1:thumbnail'],
             business: ['profile:candidate'],
@@ -210,6 +210,13 @@ describe('V2 staged AI services', () => {
         vi.clearAllMocks();
     });
 
+    it('keeps derived gender and feature results inside the current request', () => {
+        expect(createGenderTriageResultIdentity({ media: media() }).cacheScope)
+            .toBe('request');
+        expect(createFeatureAnalysisResultIdentity(featureInput()).cacheScope)
+            .toBe('request');
+    });
+
     it('accepts only bounded normalized JPEG artifacts with stable IDs', () => {
         expect(normalizedAiMediaSelectionSchema.parse(media()[0])).toEqual(media()[0]);
         expect(() => normalizedAiMediaSelectionSchema.parse({
@@ -265,7 +272,7 @@ describe('V2 staged AI services', () => {
                 inferredGender: 'female',
                 confidence: 'high',
                 ownerConsistency: 'same_person',
-                evidenceSelectionIds: ['profile:candidate'],
+                evidenceSelectionIds: ['profile:candidate', 'post:1:thumbnail'],
             },
             {
                 inferredGender: 'unknown',
@@ -305,7 +312,7 @@ describe('V2 staged AI services', () => {
             inferredGender: 'female' as const,
             confidence: 'high' as const,
             ownerConsistency: 'same_person' as const,
-            evidenceSelectionIds: ['profile:candidate'],
+            evidenceSelectionIds: ['profile:candidate', 'post:1:thumbnail'],
         };
         hooks.prepare = vi.fn().mockResolvedValue({
             result: cachedAssessment,
@@ -342,6 +349,23 @@ describe('V2 staged AI services', () => {
             ...audit(),
             operationKey: 'candidate.user',
         })).rejects.toThrow('operationKey');
+    });
+
+    it('rejects high-confidence gender based on only one visual item', async () => {
+        mocks.analyzeWithGemini.mockImplementation(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse({
+            inferredGender: 'male',
+            confidence: 'high',
+            ownerConsistency: 'same_person',
+            evidenceSelectionIds: ['profile:candidate'],
+        }));
+
+        await expect(genderTriage({ media: media() }, audit())).rejects.toThrow(
+            'at least two distinct visual evidence items'
+        );
     });
 
     it('runs feature analysis with medium-stage policy inputs and verifies an unconflicted woman', async () => {
@@ -388,12 +412,31 @@ describe('V2 staged AI services', () => {
         expect(result.finalGenderDecision).toBe('verified_female');
     });
 
+    it('rejects partner or marriage evidence that also claims an excluded companion context', () => {
+        expect(() => featureAnalysisModelResponseSchema.parse(featureResponse({
+            marriageEvidence: 'possible',
+            partnerExclusionContext: 'older_relative',
+            evidenceSelectionIds: {
+                ...featureResponse().evidenceSelectionIds,
+                marriagePartner: ['post:1:thumbnail'],
+            },
+        }))).toThrow('excluded context');
+        expect(() => featureAnalysisModelResponseSchema.parse(featureResponse({
+            partnerEvidence: 'weak',
+            partnerExclusionContext: 'celebrity_or_public_figure',
+            evidenceSelectionIds: {
+                ...featureResponse().evidenceSelectionIds,
+                marriagePartner: ['post:1:thumbnail'],
+            },
+        }))).toThrow('excluded context');
+    });
+
     it('keeps genuinely conflicting high-confidence same-owner stages unresolved', async () => {
         const triage = routedTriage({
             inferredGender: 'female',
             confidence: 'high',
             ownerConsistency: 'same_person',
-            evidenceSelectionIds: ['profile:candidate'],
+            evidenceSelectionIds: ['profile:candidate', 'post:1:thumbnail'],
         });
         mocks.analyzeWithGemini.mockImplementation(async (
             _prompt: string,
@@ -525,7 +568,7 @@ describe('V2 staged AI services', () => {
             source: 'gemini',
             hasWeakNonExcludedMalePairEvidence: true,
             hasStrongPartnerEvidence: false,
-            weakAdjustmentStatus: 'pending_labeled_calibration',
+            weakAdjustmentStatus: 'applied_policy_v2_2',
             analyzedContactSheetSelectionId: contactSheet().selectionId,
         });
         const [prompt, images, options] = mocks.analyzeWithGemini.mock.calls[0];

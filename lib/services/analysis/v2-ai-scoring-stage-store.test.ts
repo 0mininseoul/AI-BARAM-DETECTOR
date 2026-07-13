@@ -1,0 +1,193 @@
+import { createHash } from 'node:crypto';
+import { describe, expect, it, vi } from 'vitest';
+import { calculateV2PreliminaryScores } from './v2-candidate-scoring';
+
+vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
+
+import {
+    ANALYSIS_V2_AI_SCORING_STAGE_DATABASE_NAMES,
+    AnalysisV2AiScoringStageConflictError,
+    AnalysisV2AiScoringStageFenceError,
+    createSupabaseAnalysisV2AiScoringStageStore,
+    type AnalysisV2AiScoringStageSupabaseClient,
+} from './v2-ai-scoring-stage-store';
+
+// gitleaks:allow -- UUID fixture
+const requestId = '7df77338-2672-4ef2-93fe-13a0683ec9b4';
+// gitleaks:allow -- UUID fixture
+const claimToken = '51b42f42-204d-4dfb-86f8-9658d21c78f1';
+const inputHash = 'a'.repeat(64);
+
+function digest(value: string): string {
+    return createHash('sha256').update(value).digest('hex');
+}
+
+function claim(jobKey = 'coordinator:candidate-screening') {
+    return { requestId, jobKey, claimToken, jobInputHash: inputHash };
+}
+
+function clientWith(...responses: Array<{
+    data: unknown;
+    error: null | { code?: string; message?: string };
+}>) {
+    const rpc = vi.fn(async () => responses.shift() ?? { data: null, error: null });
+    return {
+        rpc,
+        client: { rpc } as AnalysisV2AiScoringStageSupabaseClient,
+    };
+}
+
+function preliminary() {
+    return calculateV2PreliminaryScores({
+        candidates: [{
+            candidateId: 'candidate:one',
+            username: 'woman.one',
+            appearanceGrade: 4,
+            exposureScore: 2,
+            isBusinessAccount: false,
+            hasWeakPartnerEvidence: false,
+            hasStrongPartnerEvidence: false,
+            uniqueTargetPostsLikedByCandidate: 1,
+            boundedCandidateCommentsOnTarget: 2,
+            hasTagOrCaptionMention: false,
+        }],
+        orderedMutualUsernames: ['woman.one'],
+        excludedUsername: null,
+    });
+}
+
+describe('analysis V2 AI/scoring stage store', () => {
+    it('validates and checkpoints a fully typed screening payload behind the live claim', async () => {
+        const candidates = preliminary();
+        const shortlistHash = digest('shortlist');
+        const resultHash = digest('screening');
+        const fake = clientWith({
+            data: {
+                stageKind: 'screening',
+                batch: null,
+                revision: 1,
+                resultHash,
+                itemCount: 1,
+                payload: { shortlistHash, candidates },
+            },
+            error: null,
+        });
+        const store = createSupabaseAnalysisV2AiScoringStageStore(fake.client);
+
+        const stored = await store.checkpointScreening({
+            ...claim(),
+            shortlistHash,
+            candidates,
+        });
+
+        expect(stored).toEqual({ revision: 1, resultHash, shortlistHash, candidates });
+        expect(fake.rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_AI_SCORING_STAGE_DATABASE_NAMES.checkpointRpc,
+            expect.objectContaining({
+                p_request_id: requestId,
+                p_job_key: 'coordinator:candidate-screening',
+                p_stage_kind: 'screening',
+                p_batch: null,
+                p_item_count: 1,
+                p_payload: { shortlistHash, candidates },
+            })
+        );
+    });
+
+    it('loads profile batches in batch order and retains media failure coverage', async () => {
+        const unavailable = (candidateId: string, instagramId: string) => ({
+            candidateId,
+            instagramId,
+            status: 'fetch_unavailable' as const,
+            profile: null,
+            triage: null,
+            feature: null,
+            normalizedSelectionIds: [],
+            mediaCoverage: { selectedCount: 0, normalizedCount: 0, failures: [] },
+            captions: [],
+            genderOperationKey: null,
+            genderResultHash: null,
+            featureOperationKey: null,
+            featureResultHash: null,
+            mediaBundlePersisted: false,
+        });
+        const batch0 = {
+            ...unavailable('candidate:zero', 'zero'),
+            status: 'media_unavailable' as const,
+            profile: {
+                username: 'zero',
+                followersCount: 0,
+                followingCount: 0,
+                postsCount: 0,
+                isPrivate: false,
+                isVerified: false,
+            },
+        };
+        const batch1 = unavailable('candidate:one', 'one');
+        const fake = clientWith({
+            data: [
+                {
+                    stageKind: 'profile_ai_batch', batch: 1, revision: 1,
+                    resultHash: digest('one'), itemCount: 1,
+                    payload: { outcomes: [batch1] },
+                },
+                {
+                    stageKind: 'profile_ai_batch', batch: 0, revision: 1,
+                    resultHash: digest('zero'), itemCount: 1,
+                    payload: { outcomes: [batch0] },
+                },
+            ],
+            error: null,
+        });
+        const store = createSupabaseAnalysisV2AiScoringStageStore(fake.client);
+
+        const loaded = await store.loadProfileAiOutcomes(claim());
+
+        expect(loaded.map(row => row.instagramId)).toEqual(['zero', 'one']);
+        expect(loaded.map(row => row.status)).toEqual([
+            'media_unavailable',
+            'fetch_unavailable',
+        ]);
+        expect(loaded.every(row => row.mediaCoverage.selectedCount === 0)).toBe(true);
+    });
+
+    it('maps immutable replay and lease failures to distinct typed errors', async () => {
+        const conflict = createSupabaseAnalysisV2AiScoringStageStore(clientWith({
+            data: null,
+            error: { code: 'P0001', message: 'ANALYSIS_V2_AI_SCORING_STAGE_CONFLICT' },
+        }).client);
+        await expect(conflict.checkpointScreening({
+            ...claim(),
+            shortlistHash: digest('shortlist'),
+            candidates: preliminary(),
+        })).rejects.toBeInstanceOf(AnalysisV2AiScoringStageConflictError);
+
+        const fenced = createSupabaseAnalysisV2AiScoringStageStore(clientWith({
+            data: null,
+            error: { code: 'P0001', message: 'ANALYSIS_V2_JOB_LEASE_FENCE_MISMATCH' },
+        }).client);
+        await expect(fenced.loadScreening(claim('track:reverse-likes:collect')))
+            .rejects.toBeInstanceOf(AnalysisV2AiScoringStageFenceError);
+    });
+
+    it('rejects malformed checkpoint payloads and validates terminal purge counts', async () => {
+        const malformed = createSupabaseAnalysisV2AiScoringStageStore(clientWith({
+            data: {
+                stageKind: 'screening', batch: null, revision: 1,
+                resultHash: digest('bad'), itemCount: 1,
+                payload: { shortlistHash: digest('shortlist'), candidates: [{}] },
+            },
+            error: null,
+        }).client);
+        await expect(malformed.loadScreening(claim('track:reverse-likes:collect')))
+            .rejects.toThrow('invalid payload');
+
+        const fake = clientWith({ data: 7, error: null });
+        const store = createSupabaseAnalysisV2AiScoringStageStore(fake.client);
+        await expect(store.purgeTerminal(claim('coordinator:finalize'))).resolves.toBe(7);
+        expect(fake.rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_AI_SCORING_STAGE_DATABASE_NAMES.purgeRpc,
+            expect.objectContaining({ p_job_key: 'coordinator:finalize' })
+        );
+    });
+});

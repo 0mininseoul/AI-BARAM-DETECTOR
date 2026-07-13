@@ -118,6 +118,8 @@ describe('analysis V2 AI result checkpoint migration contract', () => {
         const envelopeValidator = functionDefinition('analysis_v2_valid_ai_result_envelope');
         expect(envelopeValidator).toContain('p_canonical::JSONB = p_result');
         expect(envelopeValidator).toContain('analysis-v2-ai-result-content:v1');
+        expect(envelopeValidator).toContain("pg_catalog.decode('00', 'hex')");
+        expect(envelopeValidator).not.toContain('pg_catalog.chr(0)');
         expect(envelopeValidator).toContain('p_result_hash = pg_catalog.encode');
     });
 

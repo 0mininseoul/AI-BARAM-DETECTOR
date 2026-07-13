@@ -216,7 +216,12 @@ export const featureAnalysisModelResponseSchema = z.object({
     oneLineOverview: safeOverviewSchema,
 }).strict().superRefine((value, context) => {
     if (
-        (value.partnerEvidence === 'weak' || value.partnerEvidence === 'strong')
+        (
+            value.partnerEvidence === 'weak'
+            || value.partnerEvidence === 'strong'
+            || value.marriageEvidence === 'possible'
+            || value.marriageEvidence === 'strong'
+        )
         && value.partnerExclusionContext !== 'none'
     ) {
         context.addIssue({
@@ -389,7 +394,7 @@ export const partnerSafetyResultSchema = z.object({
     hasWeakNonExcludedMalePairEvidence: z.boolean(),
     hasStrongPartnerEvidence: z.boolean(),
     strongEvidenceBasis: z.enum(['none', 'feature', 'contact_sheet', 'both']),
-    weakAdjustmentStatus: z.enum(['not_applicable', 'pending_labeled_calibration']),
+    weakAdjustmentStatus: z.enum(['not_applicable', 'applied_policy_v2_2']),
     source: z.enum(['feature_only', 'gemini', 'safe_fallback']),
     analyzedContactSheetSelectionId: z.string()
         .regex(/^contact-sheet:[0-9a-f]{64}$/)
@@ -651,12 +656,12 @@ function genderResponseSchemaFor(media: readonly NormalizedAiMediaSelection[]) {
         if (
             value.inferredGender !== 'unknown'
             && value.confidence === 'high'
-            && value.evidenceSelectionIds.length === 0
+            && new Set(value.evidenceSelectionIds).size < 2
         ) {
             context.addIssue({
                 code: 'custom',
                 path: ['evidenceSelectionIds'],
-                message: 'High confidence requires attached visual evidence.',
+                message: 'High-confidence gender requires at least two distinct visual evidence items.',
             });
         }
     });
@@ -671,12 +676,12 @@ function featureResponseSchemaFor(media: readonly NormalizedAiMediaSelection[]) 
         if (
             value.gender !== 'unknown'
             && value.genderConfidence === 'high'
-            && value.evidenceSelectionIds.gender.length === 0
+            && new Set(value.evidenceSelectionIds.gender).size < 2
         ) {
             context.addIssue({
                 code: 'custom',
                 path: ['evidenceSelectionIds', 'gender'],
-                message: 'High confidence requires attached visual evidence.',
+                message: 'High-confidence gender requires at least two distinct visual evidence items.',
             });
         }
         if (
@@ -832,7 +837,7 @@ export function createGenderTriageResultIdentity(
         'genderTriage',
         genderTriagePrompt(media),
         media,
-        'global_ttl'
+        'request'
     );
 }
 
@@ -845,7 +850,7 @@ export function createFeatureAnalysisResultIdentity(
         'featureAnalysis',
         featureAnalysisPrompt(input, media),
         media,
-        'global_ttl'
+        'request'
     );
 }
 
@@ -856,7 +861,7 @@ export async function genderTriage(
     const input = genderTriageInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_TRIAGE_FEED_MEDIA);
     const prompt = genderTriagePrompt(media);
-    const identity = stagedResultIdentity('genderTriage', prompt, media, 'global_ttl');
+    const identity = stagedResultIdentity('genderTriage', prompt, media, 'request');
     const audit = parseAuditContext(rawAuditContext, identity);
     const responseSchema = genderResponseSchemaFor(media);
     const prepared = await prepareStagedResult(audit, responseSchema);
@@ -891,7 +896,7 @@ export async function featureAnalysis(
     const input = featureAnalysisInputSchema.parse(rawInput);
     const media = selectedMedia(input.media, MAX_FEATURE_FEED_MEDIA);
     const prompt = featureAnalysisPrompt(input, media);
-    const identity = stagedResultIdentity('featureAnalysis', prompt, media, 'global_ttl');
+    const identity = stagedResultIdentity('featureAnalysis', prompt, media, 'request');
     const audit = parseAuditContext(rawAuditContext, identity);
     const responseSchema = featureResponseSchemaFor(media);
     const prepared = await prepareStagedResult(audit, responseSchema);
@@ -949,13 +954,19 @@ cellManifest(JSON): ${JSON.stringify(cellManifest)}
 }
 
 function strongPartnerEvidenceFromFeature(feature: FeatureAnalysisResult): boolean {
-    return feature.features.marriageEvidence === 'strong'
-        || feature.features.partnerEvidence === 'strong';
+    return feature.features.partnerExclusionContext === 'none'
+        && (
+            feature.features.marriageEvidence === 'strong'
+            || feature.features.partnerEvidence === 'strong'
+        );
 }
 
 function weakPartnerEvidenceFromFeature(feature: FeatureAnalysisResult): boolean {
-    return feature.features.marriageEvidence === 'possible'
-        || feature.features.partnerEvidence === 'weak';
+    return feature.features.partnerExclusionContext === 'none'
+        && (
+            feature.features.marriageEvidence === 'possible'
+            || feature.features.partnerEvidence === 'weak'
+        );
 }
 
 function buildPartnerSafetyResult(input: {
@@ -986,7 +997,7 @@ function buildPartnerSafetyResult(input: {
         hasStrongPartnerEvidence: featureStrong || contactStrong,
         strongEvidenceBasis,
         weakAdjustmentStatus: weakNonExcluded && !featureStrong && !contactStrong
-            ? 'pending_labeled_calibration'
+            ? 'applied_policy_v2_2'
             : 'not_applicable',
         source: input.source,
         analyzedContactSheetSelectionId: input.contactSheetSelectionId,
@@ -1006,8 +1017,8 @@ export function createPartnerSafetyResultIdentity(
 }
 
 /**
- * Checks shortlist-only carousel frames without inventing a weak-evidence score before the
- * labeled calibration gate. Strong evidence remains a deterministic public-score cap signal.
+ * Checks shortlist-only carousel frames for the bounded V2.2 weak adjustment. Strong evidence
+ * remains a deterministic public-score cap signal.
  */
 export async function partnerSafetyAnalysis(
     rawInput: PartnerSafetyInput,

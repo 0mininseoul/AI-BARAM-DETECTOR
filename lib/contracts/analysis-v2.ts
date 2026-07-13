@@ -490,6 +490,9 @@ export const analysisResultSummaryV1Schema = z.object({
     publicMutuals: z.number().int().nonnegative(),
     privateMutuals: z.number().int().nonnegative(),
     screenedMutuals: z.number().int().nonnegative(),
+    successfullyScreenedMutuals: z.number().int().nonnegative(),
+    fetchUnavailableMutuals: z.number().int().nonnegative(),
+    mediaUnavailableMutuals: z.number().int().nonnegative(),
     notScreenedMutuals: z.number().int().nonnegative(),
     exclusionApplied: z.boolean(),
     scorePolicyVersion: z.literal(RISK_POLICY_VERSION),
@@ -553,6 +556,18 @@ export const analysisResultSummaryV1Schema = z.object({
             code: 'custom',
             message: 'Screening scope must equal the public mutual count.',
             path: ['screenedMutuals'],
+        });
+    }
+    if (
+        value.successfullyScreenedMutuals
+            + value.fetchUnavailableMutuals
+            + value.mediaUnavailableMutuals
+        !== value.screenedMutuals
+    ) {
+        context.addIssue({
+            code: 'custom',
+            message: 'Successful and unavailable screening counts must equal the selected scope.',
+            path: ['successfullyScreenedMutuals'],
         });
     }
 });

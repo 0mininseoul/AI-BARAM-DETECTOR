@@ -4,7 +4,11 @@ import {
     INSTAGRAM_MEDIA_HOST_SUFFIXES,
     TRUSTED_IMAGE_PROXY_HOST_SUFFIXES,
 } from '@/lib/services/media/secure-image-fetch';
-import { verifyImageProxyToken } from '@/lib/services/media/image-proxy-token';
+import {
+    verifyAnalysisV2ResultImageProxyToken,
+    verifyImageProxyToken,
+} from '@/lib/services/media/image-proxy-token';
+import { resolveAnalysisV2ResultImageLocator } from '@/lib/services/media/result-image-resolver';
 
 const IMAGE_PROXY_MAX_BYTES = 3 * 1024 * 1024;
 const IMAGE_PROXY_TOTAL_TIMEOUT_MS = 6_000;
@@ -79,30 +83,41 @@ function errorResponse(error: string, status: number) {
  */
 export async function GET(request: NextRequest) {
     const searchParams = request.nextUrl.searchParams;
-    const allowedParameters = ['url', 'expires', 'signature'] as const;
+    const genericParameters = ['token', 'expires'] as const;
+    const resultParameters = ['result', 'expires'] as const;
     const parameterNames = Array.from(searchParams.keys());
-    if (
-        parameterNames.length !== allowedParameters.length
-        || allowedParameters.some((name) => searchParams.getAll(name).length !== 1)
-        || parameterNames.some((name) => !allowedParameters.includes(
-            name as typeof allowedParameters[number]
-        ))
-    ) {
+    const isGeneric = parameterNames.length === genericParameters.length
+        && genericParameters.every(name => searchParams.getAll(name).length === 1)
+        && parameterNames.every(name => genericParameters.includes(
+            name as typeof genericParameters[number]
+        ));
+    const isResult = parameterNames.length === resultParameters.length
+        && resultParameters.every(name => searchParams.getAll(name).length === 1)
+        && parameterNames.every(name => resultParameters.includes(
+            name as typeof resultParameters[number]
+        ));
+    if (!isGeneric && !isResult) {
         return errorResponse('Invalid image proxy token', 400);
     }
 
-    const url = searchParams.get('url');
     const expires = searchParams.get('expires');
-    const signature = searchParams.get('signature');
-    if (!url || !expires || !signature) {
+    const token = isGeneric ? searchParams.get('token') : searchParams.get('result');
+    if (!token || !expires) {
         return errorResponse('Invalid image proxy token', 400);
     }
-    const canonicalQuery = new URLSearchParams({ url, expires, signature }).toString();
+    const canonicalQuery = new URLSearchParams(
+        isGeneric ? { token, expires } : { result: token, expires }
+    ).toString();
     if (new URL(request.url).search.slice(1) !== canonicalQuery) {
         return errorResponse('Invalid image proxy token', 400);
     }
 
-    const authorizedUrl = verifyImageProxyToken(url, expires, signature);
+    const authorizedUrl = isGeneric
+        ? verifyImageProxyToken(token, expires)
+        : await (async () => {
+            const locator = verifyAnalysisV2ResultImageProxyToken(token, expires);
+            return locator ? resolveAnalysisV2ResultImageLocator(locator) : null;
+        })();
     if (!authorizedUrl) {
         return errorResponse('Image proxy token rejected', 403);
     }

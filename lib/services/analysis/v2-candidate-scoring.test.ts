@@ -14,6 +14,7 @@ V2FemaleCandidateEvidence {
         appearanceGrade: 3,
         exposureScore: 1,
         isBusinessAccount: false,
+        hasWeakPartnerEvidence: false,
         hasStrongPartnerEvidence: false,
         uniqueTargetPostsLikedByCandidate: 0,
         boundedCandidateCommentsOnTarget: 0,

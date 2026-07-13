@@ -8,6 +8,7 @@ import {
 import {
     downloadSecureImage,
     INSTAGRAM_MEDIA_HOST_SUFFIXES,
+    SecureImageFetchError,
     TRUSTED_IMAGE_PROXY_HOST_SUFFIXES,
     validateAllowedRemoteImageUrl,
     type ResolveHostname,
@@ -23,6 +24,86 @@ export const MAX_IMAGE_DOWNLOAD_BYTES = 8 * 1024 * 1024;
 export const IMAGE_DOWNLOAD_TIMEOUT_MS = 5_000;
 
 export const MAX_DECODED_IMAGE_PIXELS = 16_000_000;
+
+export const ANALYSIS_IMAGE_PREPARATION_FAILURE_REASONS = [
+    'invalid_source',
+    'blocked_source',
+    'source_missing',
+    'source_rejected',
+    'rate_limited',
+    'upstream_unavailable',
+    'network_failure',
+    'timeout',
+    'response_too_large',
+    'unsupported_content',
+    'invalid_response',
+    'decode_failed',
+    'empty_output',
+] as const;
+
+export type AnalysisImagePreparationFailureReason =
+    typeof ANALYSIS_IMAGE_PREPARATION_FAILURE_REASONS[number];
+export type AnalysisImagePreparationFailureDisposition = 'transient' | 'permanent';
+
+/** PII-free image preparation failure passed to durable V2 coverage checkpoints. */
+export class AnalysisImagePreparationError extends Error {
+    constructor(
+        readonly reason: AnalysisImagePreparationFailureReason,
+        readonly disposition: AnalysisImagePreparationFailureDisposition
+    ) {
+        super(`ANALYSIS_IMAGE_PREPARATION_${reason.toUpperCase()}`);
+        this.name = 'AnalysisImagePreparationError';
+    }
+}
+
+const TRANSIENT_DOWNLOAD_PATTERNS = [
+    /\b(?:econnreset|etimedout|eai_again|enotfound)\b/i,
+    /\b(?:network|socket|fetch failed|timed?\s*out|timeout|abort(?:ed|error)?)\b/i,
+];
+
+function secureFailureReason(
+    error: SecureImageFetchError
+): AnalysisImagePreparationFailureReason {
+    switch (error.reason) {
+        case 'invalid_configuration':
+        case 'invalid_url': return 'invalid_source';
+        case 'blocked_source': return 'blocked_source';
+        case 'invalid_redirect': return 'source_rejected';
+        case 'source_missing': return 'source_missing';
+        case 'source_rejected': return 'source_rejected';
+        case 'rate_limited': return 'rate_limited';
+        case 'upstream_unavailable': return 'upstream_unavailable';
+        case 'network_failure': return 'network_failure';
+        case 'timeout': return 'timeout';
+        case 'response_too_large': return 'response_too_large';
+        case 'unsupported_content': return 'unsupported_content';
+        case 'invalid_response': return 'invalid_response';
+    }
+}
+
+export function classifyAnalysisImagePreparationError(
+    error: unknown,
+    phase: 'download' | 'decode'
+): AnalysisImagePreparationError {
+    if (error instanceof AnalysisImagePreparationError) return error;
+    if (error instanceof SecureImageFetchError) {
+        return new AnalysisImagePreparationError(
+            secureFailureReason(error),
+            error.disposition
+        );
+    }
+    if (
+        phase === 'download'
+        && error instanceof Error
+        && TRANSIENT_DOWNLOAD_PATTERNS.some(pattern => pattern.test(error.message))
+    ) {
+        return new AnalysisImagePreparationError('network_failure', 'transient');
+    }
+    return new AnalysisImagePreparationError(
+        phase === 'download' ? 'source_rejected' : 'decode_failed',
+        'permanent'
+    );
+}
 
 export interface AnalysisImagePolicy {
     maxImages: number;
@@ -167,15 +248,19 @@ export async function downloadImageBytes(
         maxBytes = MAX_IMAGE_DOWNLOAD_BYTES,
         timeoutMs = IMAGE_DOWNLOAD_TIMEOUT_MS,
     } = options;
-    const downloaded = await downloadSecureImage(url, {
-        allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
-        fetchImpl,
-        ...(resolveHostname ? { resolveHostname } : {}),
-        maxBytes,
-        timeoutMs,
-        headers: { Accept: 'image/jpeg,image/png,image/webp,image/avif,image/*;q=0.8' },
-    });
-    return downloaded.bytes;
+    try {
+        const downloaded = await downloadSecureImage(url, {
+            allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
+            fetchImpl,
+            ...(resolveHostname ? { resolveHostname } : {}),
+            maxBytes,
+            timeoutMs,
+            headers: { Accept: 'image/jpeg,image/png,image/webp,image/avif,image/*;q=0.8' },
+        });
+        return downloaded.bytes;
+    } catch (error) {
+        throw classifyAnalysisImagePreparationError(error, 'download');
+    }
 }
 
 /** Strip metadata, orient, resize, and encode every input identically as JPEG. */
@@ -183,28 +268,32 @@ export async function normalizeImageToJpeg(
     imageBytes: Buffer,
     policy: AnalysisImagePolicy = getAnalysisImagePolicy()
 ): Promise<Buffer> {
-    return runWithImageDecodeSlot(() =>
-        sharp(imageBytes, {
-            failOn: 'error',
-            limitInputPixels: MAX_DECODED_IMAGE_PIXELS,
-            pages: 1,
-            sequentialRead: true,
-        })
-            .rotate()
-            .flatten({ background: '#ffffff' })
-            .resize({
-                width: policy.maxDimension,
-                height: policy.maxDimension,
-                fit: 'inside',
-                withoutEnlargement: true,
+    try {
+        return await runWithImageDecodeSlot(() =>
+            sharp(imageBytes, {
+                failOn: 'error',
+                limitInputPixels: MAX_DECODED_IMAGE_PIXELS,
+                pages: 1,
+                sequentialRead: true,
             })
-            .jpeg({
-                quality: policy.jpegQuality,
-                chromaSubsampling: '4:2:0',
-                progressive: false,
-            })
-            .toBuffer()
-    );
+                .rotate()
+                .flatten({ background: '#ffffff' })
+                .resize({
+                    width: policy.maxDimension,
+                    height: policy.maxDimension,
+                    fit: 'inside',
+                    withoutEnlargement: true,
+                })
+                .jpeg({
+                    quality: policy.jpegQuality,
+                    chromaSubsampling: '4:2:0',
+                    progressive: false,
+                })
+                .toBuffer()
+        );
+    } catch (error) {
+        throw classifyAnalysisImagePreparationError(error, 'decode');
+    }
 }
 
 async function downloadAndNormalizeImage(url: string, policy: AnalysisImagePolicy): Promise<string> {
@@ -237,9 +326,9 @@ export async function imageUrlToNormalizedBase64(
             const jpeg = await normalizeImageToJpeg(downloaded.bytes, policy);
             return jpeg.toString('base64');
         } catch (proxyError) {
-            throw new Error('Failed to prepare remote image', {
-                cause: proxyError instanceof Error ? proxyError : directError,
-            });
+            const classified = classifyAnalysisImagePreparationError(proxyError, 'download');
+            if (classified.disposition === 'transient') throw classified;
+            throw classifyAnalysisImagePreparationError(directError, 'download');
         }
     }
 }

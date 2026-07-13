@@ -11,6 +11,7 @@ import {
     RISK_POLICY_VERSION,
     STRONG_PARTNER_PUBLIC_SCORE_CAP,
     VERIFICATION_SHORTLIST_LIMIT,
+    WEAK_PARTNER_RAW_ADJUSTMENT,
     assignFeaturedRiskRanks,
     assignVerificationShortlist,
     calculateRiskPolicy,
@@ -30,12 +31,13 @@ const maximumInput = {
     appearanceGrade: 5 as const,
     exposureScore: 5,
     isBusinessAccount: false,
+    hasWeakPartnerEvidence: false,
     hasStrongPartnerEvidence: false,
 };
 
 describe('risk policy components', () => {
     it('keeps the final component weights at exactly 100 points', () => {
-        expect(RISK_POLICY_VERSION).toBe('risk-policy-v2.1');
+        expect(RISK_POLICY_VERSION).toBe('risk-policy-v2.2');
         expect(RISK_BANDS).toEqual(['normal', 'caution', 'high_risk']);
         expect(RISK_COMPONENT_WEIGHTS).toEqual({
             candidateToTargetLikes: 20,
@@ -102,6 +104,27 @@ describe('risk policy components', () => {
         expect(observed.possibleUpperBound).toBe(RAW_SCORE_MAX);
         expect(notObserved.rawScore).toBe(PRE_SCORE_MAX);
         expect(notObserved.possibleUpperBound).toBe(PRE_SCORE_MAX);
+    });
+
+    it('applies one bounded weak-partner adjustment without mixing it into evidence components', () => {
+        const baseline = calculateRiskPolicy({
+            ...maximumInput,
+            uniqueTargetPostsLikedByCandidate: 0,
+        });
+        const weak = calculateRiskPolicy({
+            ...maximumInput,
+            uniqueTargetPostsLikedByCandidate: 0,
+            hasWeakPartnerEvidence: true,
+        });
+
+        expect(weak.weakPartnerAdjustment).toBe(WEAK_PARTNER_RAW_ADJUSTMENT);
+        expect(weak.preScore).toBe(baseline.preScore + WEAK_PARTNER_RAW_ADJUSTMENT);
+        expect(weak.components).toEqual(baseline.components);
+        expect(() => calculateRiskPolicy({
+            ...maximumInput,
+            hasWeakPartnerEvidence: true,
+            hasStrongPartnerEvidence: true,
+        })).toThrow('mutually exclusive');
     });
 
     it('rejects malformed component inputs instead of silently changing evidence', () => {

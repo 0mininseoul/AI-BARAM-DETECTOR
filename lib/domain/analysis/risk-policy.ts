@@ -1,4 +1,4 @@
-export const RISK_POLICY_VERSION = 'risk-policy-v2.1' as const;
+export const RISK_POLICY_VERSION = 'risk-policy-v2.2' as const;
 
 export const RISK_BANDS = ['normal', 'caution', 'high_risk'] as const;
 
@@ -43,6 +43,7 @@ export const FEATURED_RISK_LIMITS = Object.freeze({
 } as const);
 
 export const STRONG_PARTNER_PUBLIC_SCORE_CAP = 3.4;
+export const WEAK_PARTNER_RAW_ADJUSTMENT = -5;
 export const BUSINESS_SOFT_CONTEXT_MULTIPLIER = 0.5;
 export const APPEARANCE_EXPOSURE_NORMALIZER = 20 / 18;
 export const PRE_SCORE_MAX = 97;
@@ -65,6 +66,7 @@ export interface RiskPolicyInput {
     appearanceGrade: AppearanceGrade;
     exposureScore: number;
     isBusinessAccount: boolean;
+    hasWeakPartnerEvidence: boolean;
     hasStrongPartnerEvidence: boolean;
 }
 
@@ -85,6 +87,7 @@ export interface RiskPolicyResult {
         appearanceExposure: number;
     }>;
     businessSoftContextMultiplier: number;
+    weakPartnerAdjustment: 0 | typeof WEAK_PARTNER_RAW_ADJUSTMENT;
     preScore: number;
     rawScore: number;
     possibleUpperBound: number;
@@ -240,6 +243,9 @@ export function isRiskBandCompatibleWithDisplayScore(
 }
 
 export function calculateRiskPolicy(input: RiskPolicyInput): RiskPolicyResult {
+    if (input.hasWeakPartnerEvidence && input.hasStrongPartnerEvidence) {
+        throw new Error('RISK_POLICY_ERROR: weak and strong partner evidence are mutually exclusive.');
+    }
     const candidateToTargetLikes = scoreCandidateToTargetLikes(
         input.uniqueTargetPostsLikedByCandidate
     );
@@ -259,12 +265,16 @@ export function calculateRiskPolicy(input: RiskPolicyInput): RiskPolicyResult {
     const recentMutual = recentMutualBeforeBusiness * businessSoftContextMultiplier;
     const appearanceExposure = appearanceExposureBeforeBusiness * businessSoftContextMultiplier;
 
+    const weakPartnerAdjustment = input.hasWeakPartnerEvidence
+        ? WEAK_PARTNER_RAW_ADJUSTMENT
+        : 0;
     const preScore = clamp(
         candidateToTargetLikes
             + candidateToTargetComments
             + tagOrCaptionMention
             + recentMutual
-            + appearanceExposure,
+            + appearanceExposure
+            + weakPartnerAdjustment,
         0,
         PRE_SCORE_MAX
     );
@@ -293,6 +303,7 @@ export function calculateRiskPolicy(input: RiskPolicyInput): RiskPolicyResult {
             appearanceExposure: appearanceExposureBeforeBusiness,
         }),
         businessSoftContextMultiplier,
+        weakPartnerAdjustment,
         preScore,
         rawScore,
         possibleUpperBound,

@@ -18,8 +18,11 @@ import type {
     AnalysisV2JobStore,
     ClaimedAnalysisV2Job,
 } from './v2-job-store';
+import { AnalysisV2JobFenceError } from './v2-job-store';
 import {
+    ANALYSIS_V2_JOB_MAX_ATTEMPTS,
     AnalysisV2JobExecutionError,
+    classifyAnalysisV2JobFailure,
     executeAnalysisV2FoundationJob,
     processAnalysisV2TaskDelivery,
     type AnalysisV2StageExecutorRegistry,
@@ -235,6 +238,8 @@ describe('analysis V2 durable DAG worker', () => {
         const initial = baseState();
         const relationshipClaim = claimFor(initial, ANALYSIS_V2_RELATIONSHIPS_JOB_KEY);
         const jobStore = store(relationshipClaim);
+        const terminalFailureFinalizer = vi.fn(async () => undefined);
+        const terminalMediaCleanup = vi.fn(async () => undefined);
 
         await expect(processAnalysisV2TaskDelivery({
             ...delivery,
@@ -242,14 +247,18 @@ describe('analysis V2 durable DAG worker', () => {
         }, {
             store: jobStore,
             stateStore: stateStore(null),
+            terminalFailureFinalizer,
+            terminalMediaCleanup,
         })).resolves.toEqual({
             status: 'failed',
             errorCode: 'ANALYSIS_V2_DAG_SCOPE_MISSING',
         });
-        expect(jobStore.releaseClaim).toHaveBeenCalledWith(
+        expect(terminalFailureFinalizer).toHaveBeenCalledWith(
             relationshipClaim,
-            expect.objectContaining({ retryable: false })
+            'ANALYSIS_V2_DAG_SCOPE_MISSING'
         );
+        expect(terminalMediaCleanup).toHaveBeenCalledOnce();
+        expect(jobStore.releaseClaim).not.toHaveBeenCalled();
     });
 
     it('retries a known dynamic job whose producer checkpoint is not ready', async () => {
@@ -284,6 +293,7 @@ describe('analysis V2 durable DAG worker', () => {
         const canonical = claimFor(initial, ANALYSIS_V2_RELATIONSHIPS_JOB_KEY);
         const executor = vi.fn();
         const executors = { relationships: executor } as AnalysisV2StageExecutorRegistry;
+        const terminalFailureFinalizer = vi.fn(async () => undefined);
 
         for (const drifted of [
             { ...canonical, inputHash: digest('drifted-input') },
@@ -297,9 +307,11 @@ describe('analysis V2 durable DAG worker', () => {
                 store: jobStore,
                 stateStore: stateStore(initial),
                 executors,
+                terminalFailureFinalizer,
             })).resolves.toMatchObject({ status: 'failed' });
         }
         expect(executor).not.toHaveBeenCalled();
+        expect(terminalFailureFinalizer).toHaveBeenCalledTimes(2);
     });
 
     it('persists a stage checkpoint, reloads state, and derives dynamic batch fanout', async () => {
@@ -406,6 +418,8 @@ describe('analysis V2 durable DAG worker', () => {
         const initial = baseState();
         const relationshipClaim = claimFor(initial, ANALYSIS_V2_RELATIONSHIPS_JOB_KEY);
         const jobStore = store(relationshipClaim);
+        const terminalFailureFinalizer = vi.fn(async () => undefined);
+        const terminalMediaCleanup = vi.fn(async () => undefined);
 
         await expect(processAnalysisV2TaskDelivery({
             ...delivery,
@@ -413,11 +427,139 @@ describe('analysis V2 durable DAG worker', () => {
         }, {
             store: jobStore,
             stateStore: stateStore(initial),
+            terminalFailureFinalizer,
+            terminalMediaCleanup,
         })).resolves.toEqual({
-            status: 'retry',
+            status: 'failed',
             errorCode: 'ANALYSIS_V2_JOB_HANDLER_UNAVAILABLE',
         });
+        expect(terminalFailureFinalizer).toHaveBeenCalledOnce();
+        expect(jobStore.releaseClaim).not.toHaveBeenCalled();
         expect(jobStore.completeAndFanout).not.toHaveBeenCalled();
+    });
+
+    it('classifies deterministic, transient, and fence executor failures explicitly', () => {
+        for (const message of [
+            'ANALYSIS_V2_STAGE_INVALID_JSON',
+            'ANALYSIS_V2_REVERSE_LIKE_BUDGET_EXCEEDED',
+            'ANALYSIS_V2_PROFILE_AI_BATCH_DRIFT',
+            'ANALYSIS_V2_AI_SCORING_STAGE_CONFLICT',
+            'ANALYSIS_V2_RESULT_VALIDATION_ERROR: invalid result.',
+            'ANALYSIS_V2_AI_RESULT_PERSISTENCE_ERROR: invalid cache response.',
+            'ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR: invalid load response.',
+            'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: metadata mismatch.',
+            'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: object read failed (403).',
+        ]) {
+            expect(classifyAnalysisV2JobFailure(new Error(message))).toMatchObject({
+                disposition: 'permanent',
+                retryable: false,
+            });
+        }
+        for (const message of [
+            'ANALYSIS_V2_PROFILE_CONSUMER_NOT_READY',
+            'ANALYSIS_V2_AI_SCORING_STAGE_PERSISTENCE_ERROR: rpc failed (08006).',
+            'ANALYSIS_V2_MEDIA_PREPARATION_TRANSIENT',
+            'AI_RATE_LIMIT_ERROR: provider rejected before generation.',
+            'fetch failed: ECONNRESET',
+            'ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR: primary checkpoint failed (08006).',
+            'ANALYSIS_V2_PROFILE_CHECKPOINT_ERROR: fallback checkpoint failed (PGRST000).',
+            'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: object write failed (429).',
+            'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: object read failed (503).',
+            'ANALYSIS_V2_MEDIA_ARTIFACT_OBJECT_ERROR: object read failed (unknown).',
+        ]) {
+            expect(classifyAnalysisV2JobFailure(new Error(message))).toMatchObject({
+                disposition: 'transient',
+                retryable: true,
+            });
+        }
+        expect(classifyAnalysisV2JobFailure(
+            new Error('ANALYSIS_V2_AI_SCORING_STAGE_FENCE_MISMATCH')
+        )).toMatchObject({ disposition: 'fence', retryable: false });
+        expect(classifyAnalysisV2JobFailure(
+            new Error('schema rejected https://private.example/user.name')
+        )).toMatchObject({
+            code: 'ANALYSIS_V2_JOB_HANDLER_FAILED',
+            disposition: 'permanent',
+        });
+        expect(classifyAnalysisV2JobFailure(
+            new Error(`${'A'.repeat(65)}: oversized provider prefix`)
+        )).toMatchObject({
+            code: 'ANALYSIS_V2_JOB_HANDLER_FAILED',
+            disposition: 'permanent',
+            retryable: false,
+        });
+        expect(new AnalysisV2JobExecutionError('A'.repeat(65), true)).toMatchObject({
+            code: 'ANALYSIS_V2_JOB_HANDLER_FAILED',
+            disposition: 'permanent',
+            retryable: false,
+        });
+    });
+
+    it('terminalizes a deterministic executor error after one call', async () => {
+        const handler = vi.fn(async () => {
+            throw new Error('ANALYSIS_V2_RUNTIME_DEPENDENCY_VALIDATION_ERROR: invalid input.');
+        });
+        const jobStore = store(bootstrapClaim);
+        const terminalFailureFinalizer = vi.fn(async () => undefined);
+
+        await expect(processAnalysisV2TaskDelivery(delivery, {
+            store: jobStore,
+            handler,
+            terminalFailureFinalizer,
+            terminalMediaCleanup: vi.fn(async () => undefined),
+        })).resolves.toEqual({
+            status: 'failed',
+            errorCode: 'ANALYSIS_V2_RUNTIME_DEPENDENCY_VALIDATION_ERROR',
+        });
+        expect(handler).toHaveBeenCalledOnce();
+        expect(terminalFailureFinalizer).toHaveBeenCalledOnce();
+        expect(jobStore.releaseClaim).not.toHaveBeenCalled();
+    });
+
+    it('acknowledges a lost stage fence without terminalizing through a stale claim', async () => {
+        const jobStore = store(bootstrapClaim);
+        const terminalFailureFinalizer = vi.fn(async () => undefined);
+        const terminalMediaCleanup = vi.fn(async () => undefined);
+
+        await expect(processAnalysisV2TaskDelivery(delivery, {
+            store: jobStore,
+            handler: async () => {
+                throw new Error('ANALYSIS_V2_AI_SCORING_STAGE_FENCE_MISMATCH');
+            },
+            terminalFailureFinalizer,
+            terminalMediaCleanup,
+        })).rejects.toBeInstanceOf(AnalysisV2JobFenceError);
+        expect(terminalFailureFinalizer).not.toHaveBeenCalled();
+        expect(terminalMediaCleanup).not.toHaveBeenCalled();
+        expect(jobStore.releaseClaim).not.toHaveBeenCalled();
+    });
+
+    it('retries only transient failures and terminalizes the seventh call', async () => {
+        const handler = vi.fn(async () => {
+            throw new Error('ANALYSIS_V2_MEDIA_PREPARATION_TRANSIENT');
+        });
+        const terminalFailureFinalizer = vi.fn(async () => undefined);
+        const outcomes: Awaited<ReturnType<typeof processAnalysisV2TaskDelivery>>[] = [];
+        for (let attemptCount = 1; attemptCount <= ANALYSIS_V2_JOB_MAX_ATTEMPTS; attemptCount++) {
+            const claimed = { ...bootstrapClaim, attemptCount };
+            outcomes.push(await processAnalysisV2TaskDelivery(delivery, {
+                store: store(claimed),
+                handler,
+                terminalFailureFinalizer,
+                terminalMediaCleanup: vi.fn(async () => undefined),
+            }));
+        }
+
+        expect(handler).toHaveBeenCalledTimes(ANALYSIS_V2_JOB_MAX_ATTEMPTS);
+        expect(outcomes.slice(0, -1)).toEqual(Array.from(
+            { length: ANALYSIS_V2_JOB_MAX_ATTEMPTS - 1 },
+            () => ({ status: 'retry', errorCode: 'ANALYSIS_V2_MEDIA_PREPARATION_TRANSIENT' })
+        ));
+        expect(outcomes.at(-1)).toEqual({
+            status: 'failed',
+            errorCode: 'JOB_ATTEMPTS_EXHAUSTED',
+        });
+        expect(terminalFailureFinalizer).toHaveBeenCalledOnce();
     });
 
     it('classifies transient checkpoint persistence and explicit provider failures as retryable', async () => {
@@ -464,8 +606,45 @@ describe('analysis V2 durable DAG worker', () => {
         });
         expect(providerJobStore.releaseClaim).toHaveBeenCalledWith(
             relationshipClaim,
-            { errorCode: 'PROVIDER_RATE_LIMITED', retryable: true }
+            {
+                errorCode: 'PROVIDER_RATE_LIMITED',
+                retryable: true,
+                maxAttempts: ANALYSIS_V2_JOB_MAX_ATTEMPTS,
+            }
         );
+    });
+
+    it('atomically terminalizes a retryable failure on the final attempt', async () => {
+        const initial = baseState();
+        const relationshipClaim = claimFor(initial, ANALYSIS_V2_RELATIONSHIPS_JOB_KEY, {
+            attemptCount: ANALYSIS_V2_JOB_MAX_ATTEMPTS,
+        });
+        const jobStore = store(relationshipClaim);
+        const terminalFailureFinalizer = vi.fn(async () => undefined);
+        const terminalMediaCleanup = vi.fn(async () => {
+            throw new Error('temporary cleanup failure');
+        });
+
+        await expect(processAnalysisV2TaskDelivery({
+            ...delivery,
+            jobKey: relationshipClaim.jobKey,
+        }, {
+            store: jobStore,
+            handler: async () => {
+                throw new AnalysisV2JobExecutionError('PROVIDER_RATE_LIMITED', true);
+            },
+            terminalFailureFinalizer,
+            terminalMediaCleanup,
+        })).resolves.toEqual({
+            status: 'failed',
+            errorCode: 'JOB_ATTEMPTS_EXHAUSTED',
+        });
+        expect(terminalFailureFinalizer).toHaveBeenCalledWith(
+            relationshipClaim,
+            'JOB_ATTEMPTS_EXHAUSTED'
+        );
+        expect(terminalMediaCleanup).toHaveBeenCalledOnce();
+        expect(jobStore.releaseClaim).not.toHaveBeenCalled();
     });
 
     it('completes an idempotent finalizer with no DAG checkpoint or successor', async () => {
@@ -544,17 +723,25 @@ describe('analysis V2 durable DAG worker', () => {
         expect(jobStore.completeAndFanout).toHaveBeenCalledWith(finalizerClaim, []);
     });
 
-    it('keeps legacy injected handler failures behind the same release semantics', async () => {
+    it('fails closed on an opaque legacy handler error without retrying private details', async () => {
         const jobStore = store(bootstrapClaim);
+        const terminalFailureFinalizer = vi.fn(async () => undefined);
         await expect(processAnalysisV2TaskDelivery(delivery, {
             store: jobStore,
             handler: async () => {
                 throw new Error('provider detail');
             },
+            terminalFailureFinalizer,
+            terminalMediaCleanup: vi.fn(async () => undefined),
         })).resolves.toEqual({
-            status: 'retry',
+            status: 'failed',
             errorCode: 'ANALYSIS_V2_JOB_HANDLER_FAILED',
         });
+        expect(terminalFailureFinalizer).toHaveBeenCalledWith(
+            bootstrapClaim,
+            'ANALYSIS_V2_JOB_HANDLER_FAILED'
+        );
+        expect(jobStore.releaseClaim).not.toHaveBeenCalled();
         expect(jobStore.completeAndFanout).not.toHaveBeenCalled();
     });
 });

@@ -3,6 +3,7 @@ import {
     downloadSecureImage,
     INSTAGRAM_MEDIA_HOST_SUFFIXES,
     isPublicNetworkAddress,
+    SecureImageFetchError,
     validateAllowedRemoteImageUrl,
     type ResolveHostname,
 } from './secure-image-fetch';
@@ -162,5 +163,25 @@ describe('secure image downloads', () => {
             maxBytes: 100,
             timeoutMs: 10,
         })).rejects.toThrow('timed out');
+    });
+
+    it('returns a bounded retry disposition without exposing the requested URL', async () => {
+        const signedUrl = 'https://cdninstagram.com/private.jpg?signature=secret';
+        const fetchImpl = vi.fn<typeof fetch>(async () => new Response(null, { status: 503 }));
+        const failure = await downloadSecureImage(signedUrl, {
+            allowedHostSuffixes: INSTAGRAM_MEDIA_HOST_SUFFIXES,
+            fetchImpl,
+            resolveHostname: publicResolver,
+            maxBytes: 100,
+            timeoutMs: 1_000,
+        }).catch(error => error);
+
+        expect(failure).toBeInstanceOf(SecureImageFetchError);
+        expect(failure).toMatchObject({
+            reason: 'upstream_unavailable',
+            disposition: 'transient',
+        });
+        expect(failure.message).not.toContain('private.jpg');
+        expect(failure.message).not.toContain('signature');
     });
 });
