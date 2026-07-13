@@ -31,7 +31,7 @@ import {
 } from '../lib/services/instagram/completeness';
 
 const MAX_CANARY_LIMIT = 100;
-const MAX_FULL_CANARY_LIMIT = 1_000;
+const MAX_FULL_CANARY_LIMIT = 1_200;
 const CONFIRMATION_FLAG = '--confirm-paid-api-call';
 const FULL_CONFIRMATION_FLAG = '--confirm-full-paid-api-call';
 type CanaryProvider = Extract<ProviderName, 'flashapi' | 'apify' | 'coderx'>;

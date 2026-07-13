@@ -497,20 +497,21 @@ describe('apifyProvider', () => {
             .rejects.toThrow('SCRAPING_SCHEMA_ERROR');
     });
 
-    it('reads the 1,000-result boundary completely', async () => {
-        const items = Array.from({ length: 1_000 }, (_, index) => relationshipItem(`u${index}`));
+    it('reads the Plus 1,200-result boundary completely across dataset pages', async () => {
+        const items = Array.from({ length: 1_200 }, (_, index) => relationshipItem(`u${index}`));
         const { client, listItems } = mockClient(items);
         const provider = makeApifyProvider({ client, env: {} });
 
-        await expect(provider.getFollowers!('target', 1_000)).resolves.toHaveLength(1_000);
-        expect(listItems).toHaveBeenCalledTimes(1);
-        expect(listItems).toHaveBeenCalledWith({ offset: 0, limit: 1_000 });
+        await expect(provider.getFollowers!('target', 1_200)).resolves.toHaveLength(1_200);
+        expect(listItems).toHaveBeenCalledTimes(2);
+        expect(listItems).toHaveBeenNthCalledWith(1, { offset: 0, limit: 1_000 });
+        expect(listItems).toHaveBeenNthCalledWith(2, { offset: 1_000, limit: 201 });
     });
 
     it('rejects result and estimated-cost ceilings before starting the actor', async () => {
         const overLimit = mockClient([]);
         await expect(makeApifyProvider({ client: overLimit.client, env: {} })
-            .getFollowers!('target', 1_001)).rejects.toThrow('limit');
+            .getFollowers!('target', 1_201)).rejects.toThrow('limit');
         expect(overLimit.call).not.toHaveBeenCalled();
 
         const overCost = mockClient([]);

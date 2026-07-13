@@ -408,7 +408,7 @@ function relationshipDefinition(
         maximumLimit: integerSetting(
             env,
             'APIFY_RELATIONSHIP_MAX_RESULTS_PER_OPERATION',
-            1_000,
+            1_200,
             1,
             500_000
         ),
@@ -416,7 +416,7 @@ function relationshipDefinition(
         maximumEstimatedCostUsd: numberSetting(
             env,
             'APIFY_RELATIONSHIP_MAX_ESTIMATED_COST_USD_PER_OPERATION',
-            1,
+            1.1,
             0.00000001,
             100_000
         ),
