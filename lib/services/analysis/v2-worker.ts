@@ -34,6 +34,14 @@ import {
     type AnalysisV2TaskDelivery,
     type ClaimedAnalysisV2Job,
 } from './v2-job-store';
+import {
+    AnalysisV2ProgressConflictError,
+    AnalysisV2ProgressFenceError,
+} from './v2-progress-store';
+import {
+    createAnalysisV2ProgressReporter,
+    type AnalysisV2ProgressReporter,
+} from './v2-progress-reporter';
 import { dispatchAnalysisV2Job } from './v2-tasks';
 
 const PROFILE_FETCH_JOB_PATTERN = /^track:profiles:batch:\d+$/;
@@ -126,6 +134,9 @@ export class AnalysisV2JobExecutionError extends Error {
 }
 
 const defaultDagStateStore = createSupabaseAnalysisV2DagStateStore();
+const defaultProgressReporter = createAnalysisV2ProgressReporter({
+    reloadState: requestId => defaultDagStateStore.load(requestId),
+});
 const EMPTY_EXECUTOR_REGISTRY: AnalysisV2StageExecutorRegistry = Object.freeze({});
 
 function executionError(code: string, retryable: boolean): never {
@@ -343,10 +354,16 @@ export async function executeAnalysisV2DagJob(
     dependencies: {
         stateStore?: AnalysisV2DagStateStore;
         executors?: AnalysisV2StageExecutorRegistry;
+        progressReporter?: AnalysisV2ProgressReporter | null;
     } = {}
 ): Promise<readonly AnalysisV2JobSuccessor[]> {
     const stateStore = dependencies.stateStore ?? defaultDagStateStore;
     const executors = dependencies.executors ?? EMPTY_EXECUTOR_REGISTRY;
+    const progressReporter = dependencies.progressReporter !== undefined
+        ? dependencies.progressReporter
+        : dependencies.stateStore || dependencies.executors
+            ? null
+            : defaultProgressReporter;
 
     if (claim.jobKey === ANALYSIS_V2_BOOTSTRAP_JOB_KEY) {
         assertBootstrapClaim(claim);
@@ -371,12 +388,19 @@ export async function executeAnalysisV2DagJob(
             if (error instanceof AnalysisV2JobExecutionError) throw error;
             return executionError('ANALYSIS_V2_DAG_PLAN_INVALID', false);
         }
+        await progressReporter?.initialize({ claim, state });
         return successorsForAnalysisV2Job(plan, claim);
     }
 
     const state = await loadDagState(claim, stateStore);
     const current = canonicalPlan(claim, state);
     if (hasPersistedCheckpoint(current.stage, current.job, state)) {
+        await progressReporter?.report({
+            claim,
+            state,
+            stage: current.stage,
+            includeStageEvent: false,
+        });
         return successorsForAnalysisV2Job(current.plan, claim);
     }
 
@@ -396,6 +420,13 @@ export async function executeAnalysisV2DagJob(
     ) {
         executionError('ANALYSIS_V2_STAGE_CHECKPOINT_NOT_VISIBLE', true);
     }
+    if (current.stage !== 'finalize') {
+        await progressReporter?.report({
+            claim,
+            state: persistedState,
+            stage: current.stage,
+        });
+    }
     return successorsForAnalysisV2Job(persisted.plan, claim);
 }
 
@@ -405,6 +436,7 @@ export async function executeAnalysisV2FoundationJob(
     dependencies: {
         stateStore?: AnalysisV2DagStateStore;
         executors?: AnalysisV2StageExecutorRegistry;
+        progressReporter?: AnalysisV2ProgressReporter | null;
     } = {}
 ): Promise<readonly AnalysisV2JobSuccessor[]> {
     return executeAnalysisV2DagJob(job, dependencies);
@@ -424,9 +456,21 @@ function executionFailure(error: unknown): AnalysisV2JobExecutionError {
             false
         );
     }
+    if (error instanceof AnalysisV2ProgressFenceError) {
+        return new AnalysisV2JobExecutionError(
+            'ANALYSIS_V2_PROGRESS_FENCE_MISMATCH',
+            false
+        );
+    }
+    if (error instanceof AnalysisV2ProgressConflictError) {
+        return new AnalysisV2JobExecutionError('ANALYSIS_V2_PROGRESS_CONFLICT', true);
+    }
     if (
         error instanceof Error
-        && error.message.startsWith('ANALYSIS_V2_DAG_STATE_PERSISTENCE_ERROR:')
+        && (
+            error.message.startsWith('ANALYSIS_V2_DAG_STATE_PERSISTENCE_ERROR:')
+            || error.message.startsWith('ANALYSIS_V2_PROGRESS_PERSISTENCE_ERROR:')
+        )
     ) {
         return new AnalysisV2JobExecutionError(
             'ANALYSIS_V2_DAG_STATE_PERSISTENCE_ERROR',
@@ -442,6 +486,7 @@ export async function processAnalysisV2TaskDelivery(
         store?: AnalysisV2JobStore;
         stateStore?: AnalysisV2DagStateStore;
         executors?: AnalysisV2StageExecutorRegistry;
+        progressReporter?: AnalysisV2ProgressReporter | null;
         handler?: AnalysisV2JobHandler;
         dispatch?: AnalysisV2JobDispatcher;
     } = {}
@@ -450,6 +495,7 @@ export async function processAnalysisV2TaskDelivery(
     const handler = dependencies.handler ?? (claim => executeAnalysisV2DagJob(claim, {
         stateStore: dependencies.stateStore,
         executors: dependencies.executors,
+        progressReporter: dependencies.progressReporter,
     }));
     const dispatch = dependencies.dispatch ?? dispatchAnalysisV2Job;
     const claim = await store.claim(delivery);

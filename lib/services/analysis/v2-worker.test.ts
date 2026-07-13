@@ -13,6 +13,7 @@ import {
     type AnalysisV2DagState,
 } from './v2-dag-planner';
 import type { AnalysisV2DagStateStore } from './v2-dag-state-store';
+import type { AnalysisV2ProgressReporter } from './v2-progress-reporter';
 import type {
     AnalysisV2JobStore,
     ClaimedAnalysisV2Job,
@@ -143,9 +144,25 @@ function stateStore(
     };
 }
 
+function progressReporter(): AnalysisV2ProgressReporter {
+    return {
+        initialize: vi.fn(async () => ({
+            snapshot: {} as never,
+            event: null,
+            advanced: true,
+        })),
+        report: vi.fn(async () => ({
+            snapshot: {} as never,
+            event: null,
+            advanced: true,
+        })),
+    };
+}
+
 describe('analysis V2 durable DAG worker', () => {
     it('initializes bootstrap under its live claim and fans out canonical root jobs', async () => {
         const dagStore = stateStore();
+        const progress = progressReporter();
         const jobStore = store(bootstrapClaim, {
             completeAndFanout: vi.fn(async () => [
                 { requestId, jobKey: ANALYSIS_V2_RELATIONSHIPS_JOB_KEY },
@@ -159,6 +176,7 @@ describe('analysis V2 durable DAG worker', () => {
         await expect(processAnalysisV2TaskDelivery(delivery, {
             store: jobStore,
             stateStore: dagStore,
+            progressReporter: progress,
             dispatch,
         })).resolves.toEqual({
             status: 'completed',
@@ -170,6 +188,10 @@ describe('analysis V2 durable DAG worker', () => {
             jobKey: ANALYSIS_V2_BOOTSTRAP_JOB_KEY,
             inputHash: bootstrapClaim.inputHash,
             claimToken,
+        });
+        expect(progress.initialize).toHaveBeenCalledWith({
+            claim: bootstrapClaim,
+            state: baseState(),
         });
         expect(jobStore.completeAndFanout).toHaveBeenCalledWith(
             bootstrapClaim,
@@ -296,6 +318,7 @@ describe('analysis V2 durable DAG worker', () => {
         const executor = vi.fn(async () => ({
             checkpoint: { kind: 'relationships' as const, manifest },
         }));
+        const progress = progressReporter();
         const jobStore = store(relationshipClaim);
 
         await expect(processAnalysisV2TaskDelivery({
@@ -305,6 +328,7 @@ describe('analysis V2 durable DAG worker', () => {
             store: jobStore,
             stateStore: dagStore,
             executors: { relationships: executor },
+            progressReporter: progress,
         })).resolves.toEqual({
             status: 'completed',
             successorCount: 0,
@@ -320,6 +344,11 @@ describe('analysis V2 durable DAG worker', () => {
             { kind: 'relationships', manifest }
         );
         expect(dagStore.load).toHaveBeenCalledTimes(2);
+        expect(progress.report).toHaveBeenCalledWith({
+            claim: relationshipClaim,
+            state: completed,
+            stage: 'relationships',
+        });
         const fanout = vi.mocked(jobStore.completeAndFanout).mock.calls[0][1];
         expect(fanout.map(job => job.jobKey)).toEqual([
             'track:profiles:batch:0',
