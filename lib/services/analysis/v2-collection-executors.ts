@@ -11,7 +11,7 @@ import {
 } from '@/lib/services/instagram/providers/apify-interactions';
 import {
     numberSetting,
-    selectApifyCredentialSlot,
+    selectAnalysisV2ApifyCredentialSlot,
 } from '@/lib/services/instagram/providers/apify-relationship';
 import { APIFY_RELATIONSHIP_ACTOR_ID } from '@/lib/services/instagram/providers/apify';
 import {
@@ -279,7 +279,7 @@ async function bindApifyRun(input: {
         inputHash: input.inputHash,
         logicalProvider: 'apify',
         actorId: input.actorId,
-        credentialSlot: selectApifyCredentialSlot(input.dependencies.env),
+        credentialSlot: selectAnalysisV2ApifyCredentialSlot(input.dependencies.env),
         maxChargeUsd: input.maxChargeUsd,
     });
 }

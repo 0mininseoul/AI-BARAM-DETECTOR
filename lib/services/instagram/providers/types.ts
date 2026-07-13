@@ -8,7 +8,19 @@ export type Capability = 'profile' | 'profilesBatch' | 'followers' | 'following'
 
 export type ProviderName = 'apify' | 'coderx' | 'flashapi' | 'rapidapi' | 'selfhosted';
 export type InteractionProviderName = 'apify' | 'disabled';
-export type ApifyCredentialSlot = 'primary' | 'secondary';
+export const APIFY_CREDENTIAL_SLOTS = [
+    'primary',
+    'secondary',
+    'tertiary',
+    'quaternary',
+    'quinary',
+] as const;
+export type ApifyCredentialSlot = typeof APIFY_CREDENTIAL_SLOTS[number];
+
+export function isApifyCredentialSlot(value: unknown): value is ApifyCredentialSlot {
+    return typeof value === 'string'
+        && APIFY_CREDENTIAL_SLOTS.includes(value as ApifyCredentialSlot);
+}
 export type ProviderCostTerminalStatus = 'succeeded' | 'failed' | 'aborted' | 'timed_out';
 
 export interface ProviderCostRunStarted {

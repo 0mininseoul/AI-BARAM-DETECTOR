@@ -2,6 +2,10 @@ import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import {
+    APIFY_CREDENTIAL_SLOTS,
+    type ApifyCredentialSlot,
+} from '@/lib/services/instagram/providers/types';
+import {
     ANALYSIS_V2_RELATIONSHIPS_JOB_KEY,
     ANALYSIS_V2_TARGET_EVIDENCE_JOB_KEY,
 } from './v2-coordinator';
@@ -119,14 +123,14 @@ export interface AnalysisV2RelationshipStagingSnapshot {
         provider: 'apify' | null;
         providerRunId: string | null;
         providerOperationKey: string | null;
-        providerCredentialSlot: 'primary' | 'secondary' | null;
+        providerCredentialSlot: ApifyCredentialSlot | null;
         rows: AnalysisV2CanonicalRelationshipRow[];
     };
     following: AnalysisV2RelationshipSideManifest & {
         provider: 'apify' | null;
         providerRunId: string | null;
         providerOperationKey: string | null;
-        providerCredentialSlot: 'primary' | 'secondary' | null;
+        providerCredentialSlot: ApifyCredentialSlot | null;
         rows: AnalysisV2CanonicalRelationshipRow[];
     };
     mutualRows: AnalysisV2MutualStagingRow[];
@@ -167,7 +171,7 @@ export type AnalysisV2TargetEvidenceSourceInput =
         provider: AnalysisV2RelationshipProvider;
         providerRunId: string;
         providerOperationKey: string;
-        providerCredentialSlot: 'primary' | 'secondary';
+        providerCredentialSlot: ApifyCredentialSlot;
         coverage: readonly AnalysisV2TargetEvidenceCoverageInput[];
     }
     | {
@@ -181,7 +185,7 @@ export interface AnalysisV2CanonicalTargetEvidenceSource {
     provider: AnalysisV2RelationshipProvider | null;
     providerRunId: string | null;
     providerOperationKey: string | null;
-    providerCredentialSlot: 'primary' | 'secondary' | null;
+    providerCredentialSlot: ApifyCredentialSlot | null;
     coverage: AnalysisV2TargetEvidenceCoverageInput[];
 }
 
@@ -381,7 +385,7 @@ const relationshipStagingSideSchema = relationshipSideManifestSchema.extend({
     provider: z.literal('apify').nullable(),
     providerRunId: z.string().regex(PROVIDER_RUN_ID_PATTERN).nullable(),
     providerOperationKey: z.string().max(128).nullable(),
-    providerCredentialSlot: z.enum(['primary', 'secondary']).nullable(),
+    providerCredentialSlot: z.enum(APIFY_CREDENTIAL_SLOTS).nullable(),
     rows: z.array(canonicalRelationshipRowSchema).max(ANALYSIS_V2_RELATIONSHIP_SIDE_LIMIT),
 }).strict();
 
@@ -450,7 +454,7 @@ const canonicalTargetEvidenceSourceSchema = z.object({
     provider: z.enum(['apify', 'coderx']).nullable(),
     providerRunId: z.string().regex(PROVIDER_RUN_ID_PATTERN).nullable(),
     providerOperationKey: z.string().max(87).nullable(),
-    providerCredentialSlot: z.enum(['primary', 'secondary']).nullable(),
+    providerCredentialSlot: z.enum(APIFY_CREDENTIAL_SLOTS).nullable(),
     coverage: z.array(targetEvidenceCoverageSchema).max(6),
 }).strict();
 
@@ -746,7 +750,7 @@ const collectedTargetEvidenceSourceInputSchema = z.object({
     provider: z.enum(['apify', 'coderx']),
     providerRunId: z.string().regex(PROVIDER_RUN_ID_PATTERN),
     providerOperationKey: z.string().max(87),
-    providerCredentialSlot: z.enum(['primary', 'secondary']),
+    providerCredentialSlot: z.enum(APIFY_CREDENTIAL_SLOTS),
     coverage: z.array(targetEvidenceCoverageSchema).max(6),
 }).strict();
 

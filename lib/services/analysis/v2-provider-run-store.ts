@@ -7,6 +7,7 @@ import type {
     ProviderCostTerminalStatus,
     ProviderRunCheckpoint,
 } from '@/lib/services/instagram/providers/types';
+import { isApifyCredentialSlot } from '@/lib/services/instagram/providers/types';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
@@ -334,7 +335,7 @@ function parseStoredRun(data: unknown, operation: string): StoredAnalysisV2Provi
     if (logicalProvider !== 'apify' && logicalProvider !== 'coderx') {
         throw new Error('ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR: invalid provider.');
     }
-    if (credentialSlot !== 'primary' && credentialSlot !== 'secondary') {
+    if (!isApifyCredentialSlot(credentialSlot)) {
         throw new Error('ANALYSIS_V2_PROVIDER_RUN_PERSISTENCE_ERROR: invalid credential slot.');
     }
     return {
@@ -424,7 +425,7 @@ function canonicalProviderIdentity(
     if (!ACTOR_ID_PATTERN.test(input.actorId)) {
         throw new Error('ANALYSIS_V2_PROVIDER_RUN_VALIDATION_ERROR: invalid actor id.');
     }
-    if (input.credentialSlot !== 'primary' && input.credentialSlot !== 'secondary') {
+    if (!isApifyCredentialSlot(input.credentialSlot)) {
         throw new Error('ANALYSIS_V2_PROVIDER_RUN_VALIDATION_ERROR: invalid credential slot.');
     }
     return {

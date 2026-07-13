@@ -6,6 +6,7 @@ import type {
     ProviderCostRunStarted,
     ProviderCostTerminalStatus,
 } from './types';
+import { isApifyCredentialSlot } from './types';
 import { isInstagramUsername } from '../username';
 
 export type ApifyClientLike = Pick<ApifyClient, 'actor' | 'dataset' | 'run'>;
@@ -104,7 +105,7 @@ function assertLimit(limit: number, maximum: number): void {
 
 export function selectApifyCredentialSlot(
     env: Record<string, string | undefined> = process.env
-): ApifyCredentialSlot {
+): Extract<ApifyCredentialSlot, 'primary' | 'secondary'> {
     const slot = env.APIFY_API_TOKEN_SLOT?.trim().toLowerCase() || 'primary';
     if (slot !== 'primary' && slot !== 'secondary') {
         throw new Error(
@@ -114,16 +115,38 @@ export function selectApifyCredentialSlot(
     return slot;
 }
 
+/** Explicit V2 canary selection. A request never rotates or fails over between token slots. */
+export function selectAnalysisV2ApifyCredentialSlot(
+    env: Record<string, string | undefined> = process.env
+): ApifyCredentialSlot {
+    const configured = env.ANALYSIS_V2_APIFY_API_TOKEN_SLOT?.trim().toLowerCase();
+    if (!configured) return selectApifyCredentialSlot(env);
+    if (!isApifyCredentialSlot(configured)) {
+        throw new Error(
+            'SCRAPING_CONFIG_ERROR: ANALYSIS_V2_APIFY_API_TOKEN_SLOT이 올바르지 않습니다.'
+        );
+    }
+    return configured;
+}
+
 export function selectApifyApiToken(
     env: Record<string, string | undefined> = process.env,
     requestedSlot?: ApifyCredentialSlot
 ): string {
     const slot = requestedSlot ?? selectApifyCredentialSlot(env);
-    if (slot !== 'primary' && slot !== 'secondary') {
+    if (!isApifyCredentialSlot(slot)) {
         throw new Error('SCRAPING_CONFIG_ERROR: invalid Apify credential slot.');
     }
-    const key = slot === 'secondary' ? 'APIFY_SECONDARY_API_TOKEN' : 'APIFY_API_TOKEN';
-    const token = env[key]?.trim();
+    const key = {
+        primary: 'APIFY_PRIMARY_API_TOKEN',
+        secondary: 'APIFY_SECONDARY_API_TOKEN',
+        tertiary: 'APIFY_TERTIARY_API_TOKEN',
+        quaternary: 'APIFY_QUATERNARY_API_TOKEN',
+        quinary: 'APIFY_QUINARY_API_TOKEN',
+    }[slot];
+    const token = slot === 'primary'
+        ? env[key]?.trim() || env.APIFY_API_TOKEN?.trim()
+        : env[key]?.trim();
     if (!token) throw new Error(`SCRAPING_CONFIG_ERROR: ${key}이 설정되지 않았습니다.`);
     return token;
 }
@@ -163,7 +186,7 @@ export async function startOrResumeApifyActor(
     ) {
         throw new Error('SCRAPING_RUN_CHECKPOINT_ERROR: stored Actor billing identity is missing.');
     }
-    if (options.credentialSlot !== 'primary' && options.credentialSlot !== 'secondary') {
+    if (!isApifyCredentialSlot(options.credentialSlot)) {
         throw new Error('SCRAPING_CONFIG_ERROR: invalid Apify credential slot.');
     }
     if (
@@ -175,7 +198,7 @@ export async function startOrResumeApifyActor(
     }
     const credentialSlot = context?.credentialSlot ?? options.credentialSlot;
     const maxTotalChargeUsd = context?.maxChargeUsd ?? options.maxTotalChargeUsd;
-    if (credentialSlot !== 'primary' && credentialSlot !== 'secondary') {
+    if (!isApifyCredentialSlot(credentialSlot)) {
         throw new Error('SCRAPING_RUN_CHECKPOINT_ERROR: stored credential slot is invalid.');
     }
     if (

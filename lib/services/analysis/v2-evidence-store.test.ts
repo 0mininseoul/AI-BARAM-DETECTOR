@@ -143,6 +143,23 @@ function canonicalTargetSources(rows: readonly AnalysisV2TargetEvidenceRowInput[
 }
 
 describe('analysis V2 evidence store', () => {
+    it('preserves an extended V2 credential slot in target evidence', () => {
+        expect(canonicalizeAnalysisV2TargetEvidenceSource('target_post_like', {
+            status: 'collected',
+            inputHash,
+            provider: 'apify',
+            providerRunId: 'LikerRun1234',
+            providerOperationKey: `target-likers:${'6'.repeat(64)}`,
+            providerCredentialSlot: 'quaternary',
+            coverage: [{
+                postId: 'post-1',
+                declaredCount: 1,
+                returnedCount: 1,
+                requestedLimit: 150,
+            }],
+        })).toMatchObject({ providerCredentialSlot: 'quaternary' });
+    });
+
     it('preserves all 1200 mutuals while limiting only detailed public screening to 900', () => {
         const followers = relationshipRows(1_200);
         const following = [...followers].reverse();

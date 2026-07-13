@@ -12,6 +12,7 @@ import {
     recordAnalysisProviderRunFinished,
     recordAnalysisProviderRunStarted,
     type ProviderCostAnalysisStep,
+    type ProviderCostCredentialSlot,
 } from './provider-cost-ledger';
 
 const OPERATION_KEY_PATTERN = /^(?:profile:target|profiles:(?:0|[1-9][0-9]{0,6})|relationship:(?:followers|following)|interaction:(?:target_likers|target_comments|candidate_likers):(?:0|[1-9][0-9]{0,6}))$/;
@@ -32,11 +33,15 @@ interface ProviderRunInput {
     operationKey: string;
 }
 
-interface ProviderRunIdentity {
+interface UncheckedProviderRunIdentity {
     logicalProvider: LogicalApifyProvider;
     actorId: string;
     credentialSlot: ApifyCredentialSlot;
     maxChargeUsd: number;
+}
+
+interface ProviderRunIdentity extends Omit<UncheckedProviderRunIdentity, 'credentialSlot'> {
+    credentialSlot: ProviderCostCredentialSlot;
 }
 
 export interface StoredAnalysisProviderRun extends ProviderRunIdentity {
@@ -50,7 +55,9 @@ function assertOperationKey(operationKey: string): void {
     }
 }
 
-function assertProviderRunIdentity(identity: ProviderRunIdentity): void {
+function assertProviderRunIdentity(
+    identity: UncheckedProviderRunIdentity
+): asserts identity is ProviderRunIdentity {
     if (!['apify', 'coderx'].includes(identity.logicalProvider)) {
         throw new Error('ANALYSIS_PROVIDER_RUN_ERROR: invalid logical provider.');
     }

@@ -9,7 +9,7 @@ import {
     startOrResumeApifyActor,
     type ApifyClientLike,
 } from './apify-relationship';
-import type { ProviderCallContext } from './types';
+import type { ApifyCredentialSlot, ProviderCallContext } from './types';
 
 export const APIFY_LIKERS_ACTOR_ID = 'datadoping/instagram-likes-scraper';
 export const APIFY_COMMENTS_ACTOR_ID = 'apify/instagram-comment-scraper';
@@ -68,7 +68,7 @@ interface ActorDefinition {
     actorId: string;
     actorBuild: string;
     actorConcurrency: number;
-    credentialSlot: 'primary' | 'secondary';
+    credentialSlot: ApifyCredentialSlot;
     datasetReadRetries: number;
     datasetRetryBaseDelayMs: number;
     estimatedCostPerResultUsd: number;

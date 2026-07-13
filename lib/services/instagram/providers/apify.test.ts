@@ -7,6 +7,7 @@ import {
 } from './apify';
 import type { ApifyClientLike } from './apify-relationship';
 import {
+    selectAnalysisV2ApifyCredentialSlot,
     selectApifyApiToken,
     selectApifyCredentialSlot,
     startOrResumeApifyActor,
@@ -71,8 +72,11 @@ function mockClient(
 describe('apifyProvider', () => {
     it('selects one explicit credential slot without automatic account pooling', () => {
         const env = {
-            APIFY_API_TOKEN: 'primary-token',
+            APIFY_PRIMARY_API_TOKEN: 'primary-token',
             APIFY_SECONDARY_API_TOKEN: 'secondary-token',
+            APIFY_TERTIARY_API_TOKEN: 'tertiary-token',
+            APIFY_QUATERNARY_API_TOKEN: 'quaternary-token',
+            APIFY_QUINARY_API_TOKEN: 'quinary-token',
         };
         expect(selectApifyApiToken(env)).toBe('primary-token');
         expect(selectApifyCredentialSlot(env)).toBe('primary');
@@ -86,6 +90,17 @@ describe('apifyProvider', () => {
         )).toBe('secondary-token');
         expect(() => selectApifyApiToken({ ...env, APIFY_API_TOKEN_SLOT: 'pool' }))
             .toThrow('APIFY_API_TOKEN_SLOT');
+        for (const slot of ['tertiary', 'quaternary', 'quinary'] as const) {
+            const selected = { ...env, ANALYSIS_V2_APIFY_API_TOKEN_SLOT: slot };
+            expect(selectAnalysisV2ApifyCredentialSlot(selected)).toBe(slot);
+            expect(selectApifyApiToken(selected, slot)).toBe(`${slot}-token`);
+        }
+        expect(() => selectAnalysisV2ApifyCredentialSlot({
+            ...env,
+            ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'pool',
+        })).toThrow('ANALYSIS_V2_APIFY_API_TOKEN_SLOT');
+        expect(selectApifyApiToken({ APIFY_API_TOKEN: 'legacy-primary-token' }))
+            .toBe('legacy-primary-token');
     });
 
     it('checkpoints a new Actor run before waiting for its result', async () => {

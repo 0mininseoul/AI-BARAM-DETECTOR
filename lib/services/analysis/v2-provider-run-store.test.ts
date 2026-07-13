@@ -76,7 +76,10 @@ function createdReservationFromParams(params: Record<string, unknown>) {
     return Promise.resolve({
         data: reservationResponse(
             true,
-            storedRow('starting', { reservationToken: params.p_reservation_token })
+            storedRow('starting', {
+                reservationToken: params.p_reservation_token,
+                credentialSlot: params.p_credential_slot,
+            })
         ),
         error: null,
     });
@@ -143,6 +146,23 @@ describe('analysis V2 provider run store', () => {
                     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
                 ),
             })
+        );
+    });
+
+    it('preserves an explicitly selected extended V2 credential slot', async () => {
+        const { rpc, client } = clientWithRpc();
+        rpc.mockImplementationOnce((_name, params) => createdReservationFromParams(params));
+        const store = createAnalysisV2ProviderRunStore(client);
+
+        await expect(store.reserve({
+            ...identity,
+            credentialSlot: 'quinary',
+        })).resolves.toMatchObject({
+            run: { credentialSlot: 'quinary' },
+        });
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES.reserveRpc,
+            expect.objectContaining({ p_credential_slot: 'quinary' })
         );
     });
 

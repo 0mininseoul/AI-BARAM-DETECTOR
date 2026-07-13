@@ -369,7 +369,10 @@ describe('analysis V2 concrete collection executors', () => {
             providerRunStore: providers.value,
             getFollowers: getFollowersMock,
             getFollowing: getFollowingMock,
-            env: { APIFY_API_TOKEN_SLOT: 'primary' },
+            env: {
+                APIFY_API_TOKEN_SLOT: 'primary',
+                ANALYSIS_V2_APIFY_API_TOKEN_SLOT: 'tertiary',
+            },
         });
 
         const result = await executor(stageContext('relationships', state()));
@@ -386,6 +389,9 @@ describe('analysis V2 concrete collection executors', () => {
             expectedResultCount: 2,
         }));
         expect(checkpointRelationshipSide).toHaveBeenCalledTimes(2);
+        expect(providers.bindAdapterCheckpoint).toHaveBeenCalledWith(
+            expect.objectContaining({ credentialSlot: 'tertiary' })
+        );
         expect(result.checkpoint.manifest.profileBatches).toHaveLength(1);
         expect(result.checkpoint.manifest.privateNameBatches).toHaveLength(1);
         expect(JSON.stringify(getFollowersMock.mock.calls)).not.toContain('cookie');
