@@ -28,7 +28,6 @@ import {
 } from '@/lib/services/analysis/fresh-plan-admission';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { createClient } from '@/lib/supabase/server';
-import { isAnalysisV2AdmissionAvailable } from '@/lib/services/analysis/v2-execution-gate';
 import {
     enqueueFreshAdmissionTask,
     getPreflightTasksConfig,
@@ -222,19 +221,6 @@ export async function POST(
             body.data.planId,
             { deferPlanSelectionToFreshAdmission: true }
         );
-
-        if (
-            validatedPreflight.state === 'ready'
-            && !isAnalysisV2AdmissionAvailable()
-        ) {
-            return NextResponse.json(
-                {
-                    error: '새 분석 접수가 일시적으로 중단되었습니다.',
-                    code: 'V2_PIPELINE_UNAVAILABLE',
-                },
-                { status: 503 }
-            );
-        }
 
         let analysisTasksConfig;
         let preflightTasksConfig;

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
     after: vi.fn(),
@@ -55,6 +55,7 @@ import {
     InvalidPreflightExclusionError,
     PreflightRateLimitedError,
 } from './preflight';
+import { createAnalysisTestAdmission } from './test-entitlement';
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
@@ -70,14 +71,17 @@ const taskConfig = {
 
 function postRequest(
     body: unknown = { targetInstagramId: 'Target.Name' },
-    idempotencyKey = 'preflight-key-000000000000'
+    idempotencyKey = 'preflight-key-000000000000',
+    testAdmission?: string
 ) {
+    const headers = new Headers({
+        'Content-Type': 'application/json',
+        'Idempotency-Key': idempotencyKey,
+    });
+    if (testAdmission) headers.set('x-analysis-test-admission', testAdmission);
     return new Request('https://example.com/api/analysis/preflight', {
         method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Idempotency-Key': idempotencyKey,
-        },
+        headers,
         body: JSON.stringify(body),
     });
 }
@@ -129,6 +133,10 @@ describe('preflight owner routes', () => {
         mocks.process.mockResolvedValue('ready');
     });
 
+    afterEach(() => {
+        vi.unstubAllEnvs();
+    });
+
     it('requires a verified Supabase user before creating or reading a preflight', async () => {
         mocks.getUser.mockResolvedValue({ data: { user: null }, error: null });
         expect((await createPreflight(postRequest())).status).toBe(401);
@@ -154,6 +162,47 @@ describe('preflight owner routes', () => {
         await expect(response.json()).resolves.toMatchObject({
             code: 'V2_PIPELINE_UNAVAILABLE',
         });
+        expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
+    });
+
+    it('admits only a user, target, and idempotency-bound signed canary', async () => {
+        const secret = Buffer.alloc(32, 13).toString('base64url');
+        vi.stubEnv('ANALYSIS_TEST_ENTITLEMENTS_ENABLED', 'true');
+        vi.stubEnv('ANALYSIS_TEST_ENTITLEMENT_SECRET', secret);
+        mocks.admissionAvailable.mockReturnValue(false);
+        const token = createAnalysisTestAdmission({
+            userId,
+            targetInstagramId: 'target.name',
+            idempotencyKey: 'preflight-key-000000000000',
+            nonce: 'preflight_admission_nonce_01',
+        }, { secret });
+
+        const accepted = await createPreflight(postRequest(
+            { targetInstagramId: 'Target.Name' },
+            'preflight-key-000000000000',
+            token
+        ));
+        expect(accepted.status).toBe(202);
+        expect(mocks.store.createOrReplay).toHaveBeenCalledOnce();
+
+        vi.clearAllMocks();
+        mocks.createClient.mockResolvedValue({ auth: { getUser: mocks.getUser } });
+        mocks.getUser.mockResolvedValue({
+            data: {
+                user: {
+                    id: userId,
+                    email: 'owner@example.com',
+                    app_metadata: { provider: 'google' },
+                },
+            },
+            error: null,
+        });
+        const rejected = await createPreflight(postRequest(
+            { targetInstagramId: 'other.target' },
+            'preflight-key-000000000000',
+            token
+        ));
+        expect(rejected.status).toBe(503);
         expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
     });
 

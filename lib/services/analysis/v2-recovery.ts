@@ -51,15 +51,28 @@ function assertRecoverableDelivery(job: AnalysisV2DispatchableJob): {
     jobKey: string;
     generation: number;
     reservationToken: string;
+    status: 'pending' | 'processing';
+    leaseExpiresAt: string | null;
 } {
     if (job.generation < 1 || !job.reservationToken) {
         throw new Error('ANALYSIS_V2_RECOVERY_ERROR: incomplete delivery fence.');
+    }
+    if (job.status !== 'pending' && job.status !== 'processing') {
+        throw new Error('ANALYSIS_V2_RECOVERY_ERROR: invalid recoverable state.');
+    }
+    if (
+        (job.status === 'pending' && job.leaseExpiresAt !== null)
+        || (job.status === 'processing' && job.leaseExpiresAt === null)
+    ) {
+        throw new Error('ANALYSIS_V2_RECOVERY_ERROR: invalid recoverable state.');
     }
     return {
         requestId: job.requestId,
         jobKey: job.jobKey,
         generation: job.generation,
         reservationToken: job.reservationToken,
+        status: job.status,
+        leaseExpiresAt: job.leaseExpiresAt,
     };
 }
 
@@ -80,7 +93,17 @@ async function recoverOne(
         jobKey: delivery.jobKey,
         generation: delivery.generation,
     });
-    if (task === 'exists') return 'taskPresent';
+    if (task === 'exists') {
+        const deferred = await store.deferRecovery({
+            requestId: delivery.requestId,
+            jobKey: delivery.jobKey,
+            expectedGeneration: delivery.generation,
+            expectedReservationToken: delivery.reservationToken,
+            expectedStatus: delivery.status,
+            expectedLeaseExpiresAt: delivery.leaseExpiresAt,
+        });
+        return deferred ? 'taskPresent' : 'lostRace';
+    }
 
     try {
         await store.rearmDispatch({

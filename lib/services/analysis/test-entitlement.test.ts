@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import {
     analysisTestEntitlementsEnabled,
     assertAnalysisTestEntitlementConfiguration,
+    createAnalysisTestAdmission,
     createAnalysisTestEntitlement,
+    verifyAnalysisTestAdmission,
     verifyAnalysisTestEntitlement,
 } from './test-entitlement';
 
@@ -63,6 +65,50 @@ describe('analysis test entitlement', () => {
             ...input,
             preflightId: '123e4567-e89b-42d3-a456-426614174099',
         }, { nowMs: NOW_MS, secret: SECRET })).toBeNull();
+    });
+
+    it('domain-separates canary admission and binds its complete intake identity', () => {
+        const admission = {
+            userId: input.userId,
+            targetInstagramId: 'Target.Account',
+            idempotencyKey: 'preflight-canary-key-0001',
+            nonce: 'admission_nonce_0001',
+        };
+        const token = createAnalysisTestAdmission(admission, {
+            nowMs: NOW_MS,
+            secret: SECRET,
+        });
+        const expected = {
+            userId: admission.userId,
+            targetInstagramId: 'target.account',
+            idempotencyKey: admission.idempotencyKey,
+        };
+
+        expect(verifyAnalysisTestAdmission(token, expected, {
+            nowMs: NOW_MS + 9 * 60_000,
+            secret: SECRET,
+        })).toMatchObject(expected);
+        expect(verifyAnalysisTestAdmission(token, {
+            ...expected,
+            targetInstagramId: 'other.account',
+        }, { nowMs: NOW_MS, secret: SECRET })).toBeNull();
+        expect(verifyAnalysisTestAdmission(token, {
+            ...expected,
+            idempotencyKey: 'preflight-canary-key-0002',
+        }, { nowMs: NOW_MS, secret: SECRET })).toBeNull();
+        expect(verifyAnalysisTestEntitlement(token, input, {
+            nowMs: NOW_MS,
+            secret: SECRET,
+        })).toBeNull();
+
+        const entitlement = createAnalysisTestEntitlement(input, {
+            nowMs: NOW_MS,
+            secret: SECRET,
+        });
+        expect(verifyAnalysisTestAdmission(entitlement, expected, {
+            nowMs: NOW_MS,
+            secret: SECRET,
+        })).toBeNull();
     });
 
     it('rejects tampering, expiry, noncanonical payloads, and excessive lifetime', () => {

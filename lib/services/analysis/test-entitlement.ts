@@ -2,12 +2,15 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { PLAN_IDS, type PlanId } from '@/lib/domain/analysis/plan-catalog';
 
 const TOKEN_PREFIX = 'analysis-test-entitlement-v1';
+const ADMISSION_TOKEN_PREFIX = 'analysis-test-admission-v1';
 const DEFAULT_TTL_SECONDS = 10 * 60;
 const MAX_TTL_SECONDS = 15 * 60;
 const CLOCK_SKEW_SECONDS = 30;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const NONCE_PATTERN = /^[A-Za-z0-9_-]{16,64}$/;
 const TOKEN_PATTERN = /^v1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{43})$/;
+const USERNAME_PATTERN = /^[a-z0-9._]{1,30}$/;
+const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{16,128}$/;
 
 export interface AnalysisTestEntitlementPayload {
     version: 1;
@@ -35,6 +38,29 @@ export interface ExpectedAnalysisTestEntitlement {
     preflightId: string;
     userId: string;
     planId: PlanId;
+}
+
+export interface AnalysisTestAdmissionPayload {
+    version: 1;
+    userId: string;
+    targetInstagramId: string;
+    idempotencyKey: string;
+    expiresAt: number;
+    nonce: string;
+}
+
+export interface CreateAnalysisTestAdmissionInput {
+    userId: string;
+    targetInstagramId: string;
+    idempotencyKey: string;
+    nonce: string;
+    ttlSeconds?: number;
+}
+
+export interface ExpectedAnalysisTestAdmission {
+    userId: string;
+    targetInstagramId: string;
+    idempotencyKey: string;
 }
 
 export function analysisTestEntitlementsEnabled(
@@ -91,6 +117,21 @@ function validatedPlanId(value: unknown): PlanId {
     return value as PlanId;
 }
 
+function normalizedUsername(value: string): string {
+    const normalized = value.trim().toLowerCase();
+    if (!USERNAME_PATTERN.test(normalized)) {
+        throw new Error('ANALYSIS_TEST_ADMISSION_ERROR: invalid targetInstagramId.');
+    }
+    return normalized;
+}
+
+function validatedIdempotencyKey(value: string): string {
+    if (!IDEMPOTENCY_KEY_PATTERN.test(value) || value.trim() !== value) {
+        throw new Error('ANALYSIS_TEST_ADMISSION_ERROR: invalid idempotencyKey.');
+    }
+    return value;
+}
+
 function canonicalPayload(payload: AnalysisTestEntitlementPayload): string {
     return JSON.stringify({
         v: payload.version,
@@ -102,9 +143,9 @@ function canonicalPayload(payload: AnalysisTestEntitlementPayload): string {
     });
 }
 
-function signature(payloadSegment: string, secret: string): string {
+function signature(prefix: string, payloadSegment: string, secret: string): string {
     return createHmac('sha256', secret)
-        .update(`${TOKEN_PREFIX}\n${payloadSegment}`)
+        .update(`${prefix}\n${payloadSegment}`)
         .digest('base64url');
 }
 
@@ -184,7 +225,11 @@ export function createAnalysisTestEntitlement(
         nonce: input.nonce,
     };
     const payloadSegment = Buffer.from(canonicalPayload(payload), 'utf8').toString('base64url');
-    return `v1.${payloadSegment}.${signature(payloadSegment, signingSecret(options.secret))}`;
+    return `v1.${payloadSegment}.${signature(
+        TOKEN_PREFIX,
+        payloadSegment,
+        signingSecret(options.secret)
+    )}`;
 }
 
 export function verifyAnalysisTestEntitlement(
@@ -202,7 +247,7 @@ export function verifyAnalysisTestEntitlement(
     } catch {
         return null;
     }
-    const expectedSignature = Buffer.from(signature(match[1], secret));
+    const expectedSignature = Buffer.from(signature(TOKEN_PREFIX, match[1], secret));
     const suppliedSignature = Buffer.from(match[2]);
     if (
         suppliedSignature.length !== expectedSignature.length
@@ -232,6 +277,166 @@ export function verifyAnalysisTestEntitlement(
     return payload.preflightId === expectedPreflightId
         && payload.userId === expectedUserId
         && payload.planId === expected.planId
+        ? payload
+        : null;
+}
+
+function canonicalAdmissionPayload(payload: AnalysisTestAdmissionPayload): string {
+    return JSON.stringify({
+        v: payload.version,
+        u: payload.userId,
+        target: payload.targetInstagramId,
+        key: payload.idempotencyKey,
+        exp: payload.expiresAt,
+        n: payload.nonce,
+    });
+}
+
+function parseAdmissionPayload(payloadSegment: string): AnalysisTestAdmissionPayload | null {
+    let value: unknown;
+    try {
+        value = JSON.parse(Buffer.from(payloadSegment, 'base64url').toString('utf8'));
+    } catch {
+        return null;
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+
+    const record = value as Record<string, unknown>;
+    if (
+        Object.keys(record).length !== 6
+        || !['v', 'u', 'target', 'key', 'exp', 'n'].every(key => (
+            Object.prototype.hasOwnProperty.call(record, key)
+        ))
+        || record.v !== 1
+        || typeof record.u !== 'string'
+        || typeof record.target !== 'string'
+        || typeof record.key !== 'string'
+        || typeof record.exp !== 'number'
+        || !Number.isSafeInteger(record.exp)
+        || typeof record.n !== 'string'
+    ) {
+        return null;
+    }
+
+    let userId: string;
+    let targetInstagramId: string;
+    let idempotencyKey: string;
+    try {
+        userId = normalizedUuid(record.u, 'userId');
+        targetInstagramId = normalizedUsername(record.target);
+        idempotencyKey = validatedIdempotencyKey(record.key);
+    } catch {
+        return null;
+    }
+    if (
+        userId !== record.u
+        || targetInstagramId !== record.target
+        || idempotencyKey !== record.key
+        || !NONCE_PATTERN.test(record.n)
+    ) {
+        return null;
+    }
+
+    const payload: AnalysisTestAdmissionPayload = {
+        version: 1,
+        userId,
+        targetInstagramId,
+        idempotencyKey,
+        expiresAt: record.exp,
+        nonce: record.n,
+    };
+    const canonicalSegment = Buffer.from(
+        canonicalAdmissionPayload(payload),
+        'utf8'
+    ).toString('base64url');
+    return canonicalSegment === payloadSegment ? payload : null;
+}
+
+export function createAnalysisTestAdmission(
+    input: CreateAnalysisTestAdmissionInput,
+    options: AnalysisTestEntitlementOptions = {}
+): string {
+    const ttlSeconds = input.ttlSeconds ?? DEFAULT_TTL_SECONDS;
+    if (!Number.isSafeInteger(ttlSeconds) || ttlSeconds < 1 || ttlSeconds > MAX_TTL_SECONDS) {
+        throw new RangeError(
+            `ANALYSIS_TEST_ADMISSION_ERROR: ttlSeconds must be between 1 and ${MAX_TTL_SECONDS}.`
+        );
+    }
+    if (!NONCE_PATTERN.test(input.nonce)) {
+        throw new Error('ANALYSIS_TEST_ADMISSION_ERROR: invalid nonce.');
+    }
+
+    const nowSeconds = Math.floor((options.nowMs ?? Date.now()) / 1_000);
+    const payload: AnalysisTestAdmissionPayload = {
+        version: 1,
+        userId: normalizedUuid(input.userId, 'userId'),
+        targetInstagramId: normalizedUsername(input.targetInstagramId),
+        idempotencyKey: validatedIdempotencyKey(input.idempotencyKey),
+        expiresAt: nowSeconds + ttlSeconds,
+        nonce: input.nonce,
+    };
+    const payloadSegment = Buffer.from(
+        canonicalAdmissionPayload(payload),
+        'utf8'
+    ).toString('base64url');
+    return `v1.${payloadSegment}.${signature(
+        ADMISSION_TOKEN_PREFIX,
+        payloadSegment,
+        signingSecret(options.secret)
+    )}`;
+}
+
+export function verifyAnalysisTestAdmission(
+    token: string | null | undefined,
+    expected: ExpectedAnalysisTestAdmission,
+    options: AnalysisTestEntitlementOptions = {}
+): AnalysisTestAdmissionPayload | null {
+    if (!token || token.length > 2_048 || token.trim() !== token) return null;
+    const match = TOKEN_PATTERN.exec(token);
+    if (!match) return null;
+
+    let secret: string;
+    try {
+        secret = signingSecret(options.secret);
+    } catch {
+        return null;
+    }
+    const expectedSignature = Buffer.from(signature(
+        ADMISSION_TOKEN_PREFIX,
+        match[1],
+        secret
+    ));
+    const suppliedSignature = Buffer.from(match[2]);
+    if (
+        suppliedSignature.length !== expectedSignature.length
+        || !timingSafeEqual(suppliedSignature, expectedSignature)
+    ) {
+        return null;
+    }
+
+    const payload = parseAdmissionPayload(match[1]);
+    if (!payload) return null;
+    const nowSeconds = Math.floor((options.nowMs ?? Date.now()) / 1_000);
+    if (
+        payload.expiresAt < nowSeconds - CLOCK_SKEW_SECONDS
+        || payload.expiresAt > nowSeconds + MAX_TTL_SECONDS + CLOCK_SKEW_SECONDS
+    ) {
+        return null;
+    }
+
+    let expectedUserId: string;
+    let expectedTarget: string;
+    let expectedKey: string;
+    try {
+        expectedUserId = normalizedUuid(expected.userId, 'userId');
+        expectedTarget = normalizedUsername(expected.targetInstagramId);
+        expectedKey = validatedIdempotencyKey(expected.idempotencyKey);
+    } catch {
+        return null;
+    }
+    return payload.userId === expectedUserId
+        && payload.targetInstagramId === expectedTarget
+        && payload.idempotencyKey === expectedKey
         ? payload
         : null;
 }

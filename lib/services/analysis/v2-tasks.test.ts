@@ -75,6 +75,7 @@ function mockStore(
     return {
         reserveDispatch: vi.fn().mockResolvedValue(reservation),
         rearmDispatch: vi.fn(),
+        deferRecovery: vi.fn(),
         markDispatched: vi.fn().mockResolvedValue(undefined),
         claim: vi.fn(),
         releaseClaim: vi.fn(),

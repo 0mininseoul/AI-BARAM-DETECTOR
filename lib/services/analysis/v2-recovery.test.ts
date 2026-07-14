@@ -47,6 +47,7 @@ function store(jobs: AnalysisV2DispatchableJob[]): AnalysisV2JobStore {
             dispatchState: 'reserved' as const,
             taskName: null,
         })),
+        deferRecovery: vi.fn(async () => true),
         markDispatched: vi.fn(),
         claim: vi.fn(),
         releaseClaim: vi.fn(),
@@ -101,8 +102,57 @@ describe('analysis V2 dispatch recovery', () => {
             providerUsageReconciled: 0,
         });
         expect(dispatch).toHaveBeenCalledTimes(2);
+        expect(jobStore.deferRecovery).toHaveBeenCalledWith({
+            requestId,
+            jobKey: 'coordinator:existing',
+            expectedGeneration: 1,
+            expectedReservationToken: reservationToken,
+            expectedStatus: 'pending',
+            expectedLeaseExpiresAt: null,
+        });
         expect(jobStore.rearmDispatch).not.toHaveBeenCalled();
         expect(cleanupTerminalMedia).toHaveBeenCalledOnce();
+    });
+
+    it('rotates task-present rows so the next bounded scan reaches later work', async () => {
+        const taskPresentJobs = Array.from({ length: 100 }, (_, index) => (
+            job(`track:profiles:batch:${index}`, 'enqueued')
+        ));
+        const actionable = job('coordinator:pending', 'pending');
+        const jobStore = store([...taskPresentJobs, actionable]);
+        const deferred = new Set<string>();
+        jobStore.listDispatchable = vi.fn(async ({ limit = 100 } = {}) => (
+            [...taskPresentJobs, actionable]
+                .filter(candidate => !deferred.has(candidate.jobKey))
+                .slice(0, limit)
+        ));
+        jobStore.deferRecovery = vi.fn(async input => {
+            deferred.add(input.jobKey);
+            return true;
+        });
+        const dispatch = vi.fn(async () => 'enqueued');
+
+        await expect(recoverAnalysisV2Jobs({
+            ...providerRecovery(),
+            store: jobStore,
+            lookup: async () => 'exists',
+            dispatch,
+        })).resolves.toMatchObject({
+            scanned: 100,
+            taskPresent: 100,
+            dispatched: 0,
+        });
+        await expect(recoverAnalysisV2Jobs({
+            ...providerRecovery(),
+            store: jobStore,
+            lookup: async () => 'exists',
+            dispatch,
+        })).resolves.toMatchObject({
+            scanned: 1,
+            taskPresent: 0,
+            dispatched: 1,
+        });
+        expect(dispatch).toHaveBeenCalledWith(requestId, actionable.jobKey);
     });
 
     it('rearms only after Cloud Tasks proves the exact generation is missing', async () => {
@@ -148,6 +198,15 @@ describe('analysis V2 dispatch recovery', () => {
             lookup: async () => 'not_found',
             dispatch: vi.fn(),
         })).resolves.toMatchObject({ lostRace: 1, failed: 0 });
+
+        const deferRaceStore = store([job('coordinator:defer-race', 'enqueued')]);
+        deferRaceStore.deferRecovery = vi.fn(async () => false);
+        await expect(recoverAnalysisV2Jobs({
+            ...providerRecovery(),
+            store: deferRaceStore,
+            lookup: async () => 'exists',
+            dispatch: vi.fn(),
+        })).resolves.toMatchObject({ lostRace: 1, taskPresent: 0, failed: 0 });
     });
 
     it('reports a terminal media cleanup failure for the scheduler to retry', async () => {

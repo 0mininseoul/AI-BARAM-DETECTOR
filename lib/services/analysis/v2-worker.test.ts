@@ -124,6 +124,7 @@ function store(
     return {
         reserveDispatch: vi.fn(),
         rearmDispatch: vi.fn(),
+        deferRecovery: vi.fn(),
         markDispatched: vi.fn(),
         claim: vi.fn(async () => claimed),
         releaseClaim: vi.fn(async (_claim, failure) => ({

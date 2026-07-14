@@ -17,6 +17,7 @@ export const ANALYSIS_V2_DATABASE_NAMES = Object.freeze({
     table: 'analysis_pipeline_jobs',
     reserveDispatchRpc: 'reserve_analysis_v2_job_dispatch',
     rearmDispatchRpc: 'rearm_analysis_v2_job_dispatch',
+    deferRecoveryRpc: 'defer_analysis_v2_job_recovery',
     markDispatchedRpc: 'mark_analysis_v2_job_dispatched',
     claimRpc: 'claim_analysis_v2_job',
     releaseClaimRpc: 'release_analysis_v2_job_claim',
@@ -112,6 +113,12 @@ export interface AnalysisV2JobStore {
         expectedGeneration: number;
         expectedReservationToken: string;
     }): Promise<AnalysisV2JobDispatchReservation>;
+    deferRecovery(input: AnalysisV2JobIdentity & {
+        expectedGeneration: number;
+        expectedReservationToken: string;
+        expectedStatus: 'pending' | 'processing';
+        expectedLeaseExpiresAt: string | null;
+    }): Promise<boolean>;
     markDispatched(reservation: AnalysisV2JobDispatchReservation & {
         reservationToken: string;
         taskName: string;
@@ -476,6 +483,55 @@ export function createSupabaseAnalysisV2JobStore(
                 throw new AnalysisV2JobFenceError();
             }
             return reservation;
+        },
+
+        async deferRecovery(input) {
+            const identity = assertAnalysisV2JobIdentity(input);
+            const expectedGeneration = requiredSafeInteger(
+                input.expectedGeneration,
+                'expected dispatch generation',
+                1,
+                1_000
+            );
+            const expectedReservationToken = requiredUuid(
+                input.expectedReservationToken,
+                'expected reservation token'
+            );
+            const expectedStatus = requiredStatus(input.expectedStatus);
+            if (!['pending', 'processing'].includes(expectedStatus)) {
+                throw new Error(
+                    'ANALYSIS_V2_JOB_VALIDATION_ERROR: invalid recovery status.'
+                );
+            }
+            const expectedLeaseExpiresAt = nullableTimestamp(
+                input.expectedLeaseExpiresAt
+            );
+            if (
+                (expectedStatus === 'pending' && expectedLeaseExpiresAt !== null)
+                || (expectedStatus === 'processing' && expectedLeaseExpiresAt === null)
+            ) {
+                throw new Error(
+                    'ANALYSIS_V2_JOB_VALIDATION_ERROR: invalid recovery lease.'
+                );
+            }
+            const { data, error } = await client.rpc(
+                ANALYSIS_V2_DATABASE_NAMES.deferRecoveryRpc,
+                {
+                    p_request_id: identity.requestId,
+                    p_job_key: identity.jobKey,
+                    p_dispatch_generation: expectedGeneration,
+                    p_dispatch_token: expectedReservationToken,
+                    p_expected_status: expectedStatus,
+                    p_expected_lease_expires_at: expectedLeaseExpiresAt,
+                }
+            );
+            if (error) throwRpcError(error, 'recovery defer');
+            if (typeof data !== 'boolean') {
+                throw new Error(
+                    'ANALYSIS_V2_JOB_PERSISTENCE_ERROR: invalid recovery defer result.'
+                );
+            }
+            return data;
         },
 
         async markDispatched(reservation) {

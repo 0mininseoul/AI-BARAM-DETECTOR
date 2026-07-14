@@ -148,6 +148,41 @@ describe('analysis V2 job store', () => {
         })).rejects.toBeInstanceOf(AnalysisV2JobFenceError);
     });
 
+    it('durably defers only the exact task-present recovery fence', async () => {
+        const dispatchFence = randomUUID();
+        const leaseExpiresAt = '2026-07-14T01:02:03Z';
+        const rpc = vi.fn().mockResolvedValue({ data: true, error: null });
+        const store = createSupabaseAnalysisV2JobStore(rpcClient(rpc));
+
+        await expect(store.deferRecovery({
+            requestId,
+            jobKey,
+            expectedGeneration: 2,
+            expectedReservationToken: dispatchFence,
+            expectedStatus: 'processing',
+            expectedLeaseExpiresAt: leaseExpiresAt,
+        })).resolves.toBe(true);
+        expect(rpc).toHaveBeenCalledWith(
+            ANALYSIS_V2_DATABASE_NAMES.deferRecoveryRpc,
+            {
+                p_request_id: requestId,
+                p_job_key: jobKey,
+                p_dispatch_generation: 2,
+                p_dispatch_token: dispatchFence,
+                p_expected_status: 'processing',
+                p_expected_lease_expires_at: leaseExpiresAt,
+            }
+        );
+        await expect(store.deferRecovery({
+            requestId,
+            jobKey,
+            expectedGeneration: 2,
+            expectedReservationToken: dispatchFence,
+            expectedStatus: 'pending',
+            expectedLeaseExpiresAt: leaseExpiresAt,
+        })).rejects.toThrow('invalid recovery lease');
+    });
+
     it('marks the exact task name only after queue acceptance', async () => {
         const rpc = vi.fn().mockResolvedValue({
             data: [{

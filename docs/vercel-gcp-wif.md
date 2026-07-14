@@ -88,6 +88,9 @@ Vercel Production에는 다음 값을 설정한다.
 
 ```dotenv
 ANALYSIS_V2_ADMISSION_ENABLED=false
+PREFLIGHT_ACCESS_MODE=test_entitlement
+ANALYSIS_TEST_ENTITLEMENTS_ENABLED=true
+ANALYSIS_TEST_ENTITLEMENT_SECRET=CANONICAL_BASE64URL_32_BYTE_SECRET
 ANALYSIS_V2_TASKS_ENABLED=true
 ANALYSIS_V2_TASKS_PROJECT=PROJECT_ID
 ANALYSIS_V2_TASKS_LOCATION=asia-northeast3
@@ -114,6 +117,12 @@ queue/project/location, worker 경로를 포함한 target URL, origin만 담은 
 WIF가 정상이어도 작업을 등록하지 않으므로 운영 Vercel에는 두 값을 `true`로 둔다.
 초기 구성 중에는 `ANALYSIS_V2_ADMISSION_ENABLED=false`를 유지해 신규 요청만 막는다.
 
+`ANALYSIS_TEST_ENTITLEMENT_SECRET`는 정확히 32 random byte의 canonical base64url
+인코딩이어야 하며 provider, Supabase, image proxy 또는 Cloud Tasks 비밀과
+재사용하지 않는다. 같은 키를 로컬 운영자 CLI와 Vercel Production의
+테스트 admission/entitlement 서명에만 사용한다. 키 자체는 브라우저로
+전송하지 않는다.
+
 Vercel 프로젝트 설정에서 OIDC 토큰 발급이 활성화되어 있어야 한다. `VERCEL_OIDC_TEAM_SLUG`, `VERCEL_OIDC_TEAM_ID`, `VERCEL_OIDC_PROJECT_ID`는 인프라 bootstrap 입력일 뿐 애플리케이션 런타임 비밀값이 아니다. `VERCEL_OIDC_TOKEN`, 서비스 계정 JSON, `GOOGLE_SERVICE_ACCOUNT_KEY_BASE64`를 V2 작업 등록용으로 추가하지 않는다.
 
 Cloud Run worker는 다음 값을 사용한다.
@@ -131,11 +140,47 @@ PREFLIGHT_TASKS_CALLER_AUTH_MODE=adc
 
 ## 출시 gate 전환 순서
 
-1. Vercel Production에 위 작업 등록 환경변수를 배포하되 `ANALYSIS_V2_ADMISSION_ENABLED=false`를 유지한다.
+1. Vercel Production에 위 작업 등록 및 test-entitlement 환경변수를 배포하되 `ANALYSIS_V2_ADMISSION_ENABLED=false`를 유지한다.
 2. Cloud Run을 `ANALYSIS_V2_WORKER_ENABLED=false`, `ANALYSIS_V2_RECOVERY_ENABLED=false`로 배포하고 모든 `--check`를 통과시킨다.
 3. Cloud Run에서 `ANALYSIS_V2_WORKER_ENABLED=true`를 먼저 적용해 인증된 작업 처리 경로를 확인한다.
 4. Cloud Run에서 `ANALYSIS_V2_RECOVERY_ENABLED=true`를 적용하고 Scheduler 복구 호출과 backlog가 정상인지 확인한다.
-5. 서명된 E2E entitlement로 canary를 완료한 뒤 마지막으로 Vercel Production의 `ANALYSIS_V2_ADMISSION_ENABLED=true`를 배포한다.
+5. 공개 admission을 열지 않고 아래의 2단계 서명 canary를 완료한다.
+6. 비용, 완전성, 5분 SLA와 rollback 점검을 모두 통과한 뒤에만 Vercel Production의 `ANALYSIS_V2_ADMISSION_ENABLED=true`를 배포한다.
+
+### 공개 admission 전 signed canary
+
+1. 운영자가 테스트할 로그인 사용자의 Supabase UUID, 대상 Instagram ID,
+   16~128자 idempotency key를 고정한다.
+2. 신뢰할 수 있는 운영자 터미널에서 다음 토큰을 발급한다.
+
+```bash
+npm run test-admission:issue -- \
+  --user USER_UUID \
+  --target TARGET_INSTAGRAM_ID \
+  --idempotency-key CANARY_IDEMPOTENCY_KEY
+```
+
+3. 같은 사용자의 로그인 세션으로 `POST /api/analysis/preflight`를 호출하며,
+   `Idempotency-Key` 헤더에 위 키를, `X-Analysis-Test-Admission` 헤더에
+   발급된 토큰을 넣는다. 토큰은 user, target, idempotency key와 10분
+   유효기간에 모두 바인딩되므로 다른 계정이나 대상으로 재사용할 수 없다.
+4. preflight가 `ready`가 되고 제외 결정이 저장되면 기존 방식으로 plan-bound
+   entitlement를 발급한다.
+
+```bash
+npm run test-entitlement:issue -- \
+  --preflight PREFLIGHT_UUID \
+  --user USER_UUID \
+  --plan basic
+```
+
+5. 같은 로그인 세션으로 `POST /api/analysis/preflight/PREFLIGHT_UUID/entitle`를
+   호출하고 `X-Analysis-Test-Entitlement`에 두 번째 토큰을 넣는다. 이 route는
+   유효한 user, preflight, plan 서명이 있을 때만 공개 admission gate를 바이패스한다.
+
+두 토큰은 서명 domain이 분리되어 서로 바꿔 사용할 수 없다. canary 중에도
+`ANALYSIS_V2_ADMISSION_ENABLED=false`이므로 서명 토큰이 없는 일반 로그인
+사용자의 preflight와 분석 시작은 계속 503으로 차단된다.
 
 중단 시에는 신규 유입을 먼저 막기 위해 Vercel admission을 `false`로 되돌린다. 이미 등록된 작업을 안전하게 drain/복구해야 하므로 worker와 recovery gate는 별도 장애 근거가 없는 한 즉시 끄지 않는다.
 

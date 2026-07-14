@@ -19,6 +19,11 @@ import {
     enqueuePreflightTask,
     resolvePreflightDispatchPolicy,
 } from '@/lib/services/analysis/preflight-tasks';
+import {
+    analysisTestEntitlementsEnabled,
+    assertAnalysisTestEntitlementConfiguration,
+    verifyAnalysisTestAdmission,
+} from '@/lib/services/analysis/test-entitlement';
 import { isAnalysisV2AdmissionAvailable } from '@/lib/services/analysis/v2-execution-gate';
 
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{16,128}$/;
@@ -35,6 +40,22 @@ function authProvider(value: unknown): PreflightAuthProvider | null {
     return value === 'google' || value === 'kakao' ? value : null;
 }
 
+function hasValidSignedTestAdmission(
+    request: Request,
+    input: { userId: string; targetInstagramId: string; idempotencyKey: string }
+): boolean {
+    try {
+        if (!analysisTestEntitlementsEnabled()) return false;
+        assertAnalysisTestEntitlementConfiguration();
+        return verifyAnalysisTestAdmission(
+            request.headers.get('x-analysis-test-admission'),
+            input
+        ) !== null;
+    } catch {
+        return false;
+    }
+}
+
 export async function POST(request: Request) {
     try {
         const supabase = await createClient();
@@ -42,14 +63,6 @@ export async function POST(request: Request) {
         if (error || !user) {
             return errorResponse(401, 'UNAUTHORIZED', '로그인이 필요합니다.');
         }
-        if (!isAnalysisV2AdmissionAvailable()) {
-            return errorResponse(
-                503,
-                'V2_PIPELINE_UNAVAILABLE',
-                '새 분석 접수가 일시적으로 중단되었습니다.'
-            );
-        }
-
         let body: unknown;
         try {
             body = await request.json();
@@ -69,6 +82,22 @@ export async function POST(request: Request) {
                 '올바른 Idempotency-Key가 필요합니다.'
             );
         }
+        const publicAdmission = isAnalysisV2AdmissionAvailable();
+        const signedTestAdmission = !publicAdmission && hasValidSignedTestAdmission(
+            request,
+            {
+                userId: user.id,
+                targetInstagramId: parsed.data.targetInstagramId,
+                idempotencyKey,
+            }
+        );
+        if (!publicAdmission && !signedTestAdmission) {
+            return errorResponse(
+                503,
+                'V2_PIPELINE_UNAVAILABLE',
+                '새 분석 접수가 일시적으로 중단되었습니다.'
+            );
+        }
         const email = user.email?.trim();
         const provider = authProvider(user.app_metadata?.provider);
         if (!email || email.length > 320 || !provider) {
@@ -85,6 +114,13 @@ export async function POST(request: Request) {
         }
         if (dispatchPolicy.mode === 'unavailable') {
             return errorResponse(503, 'QUEUE_UNAVAILABLE', '사전 점검 작업 큐를 사용할 수 없습니다.');
+        }
+        if (signedTestAdmission && accessMode !== 'test_entitlement') {
+            return errorResponse(
+                503,
+                'V2_PIPELINE_UNAVAILABLE',
+                '테스트 분석 접수 설정이 활성화되지 않았습니다.'
+            );
         }
 
         const created = await preflightStore.createOrReplay({

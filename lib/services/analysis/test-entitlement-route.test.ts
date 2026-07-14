@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
-    admissionAvailable: vi.fn(),
     createServerClient: vi.fn(),
     dispatchAdmission: vi.fn(),
     dispatchJob: vi.fn(),
@@ -16,9 +15,6 @@ vi.mock('@/lib/supabase/admin', () => ({
 }));
 vi.mock('@/lib/supabase/server', () => ({
     createClient: mocks.createServerClient,
-}));
-vi.mock('@/lib/services/analysis/v2-execution-gate', () => ({
-    isAnalysisV2AdmissionAvailable: mocks.admissionAvailable,
 }));
 vi.mock('@/lib/services/analysis/v2-tasks', () => ({
     dispatchAnalysisV2Job: mocks.dispatchJob,
@@ -180,7 +176,6 @@ describe('analysis V2 durable test-entitlement route', () => {
         vi.clearAllMocks();
         process.env.ANALYSIS_TEST_ENTITLEMENT_SECRET = ENTITLEMENT_SECRET;
         process.env.ANALYSIS_TEST_ENTITLEMENTS_ENABLED = 'true';
-        mocks.admissionAvailable.mockReturnValue(true);
         mocks.dispatchAdmission.mockResolvedValue('enqueued');
         mocks.dispatchJob.mockResolvedValue('enqueued');
         mocks.getPreflightTasksConfig.mockReturnValue(preflightTaskConfig);
@@ -220,6 +215,7 @@ describe('analysis V2 durable test-entitlement route', () => {
     afterEach(() => {
         delete process.env.ANALYSIS_TEST_ENTITLEMENT_SECRET;
         delete process.env.ANALYSIS_TEST_ENTITLEMENTS_ENABLED;
+        delete process.env.ANALYSIS_V2_ADMISSION_ENABLED;
         vi.restoreAllMocks();
     });
 
@@ -417,7 +413,6 @@ describe('analysis V2 durable test-entitlement route', () => {
     });
 
     it('redrives a consumed request while new admission is disabled', async () => {
-        mocks.admissionAvailable.mockReturnValue(false);
         mocks.getPreflightTasksConfig.mockReturnValue(null);
         installPreflightQuery(preflightRow({
             status: 'consumed',
@@ -440,7 +435,6 @@ describe('analysis V2 durable test-entitlement route', () => {
     });
 
     it('replays a terminal consumed request without requiring either queue configuration', async () => {
-        mocks.admissionAvailable.mockReturnValue(false);
         mocks.getTasksConfig.mockReturnValue(null);
         mocks.getPreflightTasksConfig.mockReturnValue(null);
         installPreflightQuery(preflightRow({
@@ -472,15 +466,12 @@ describe('analysis V2 durable test-entitlement route', () => {
         expect(mocks.dispatchJob).not.toHaveBeenCalled();
     });
 
-    it('blocks a new ready admission when its dedicated kill switch is off', async () => {
-        mocks.admissionAvailable.mockReturnValue(false);
+    it('allows a valid signed canary while public admission remains disabled', async () => {
+        process.env.ANALYSIS_V2_ADMISSION_ENABLED = 'false';
         const response = await POST(request(), context());
-        expect(response.status).toBe(503);
-        await expect(response.json()).resolves.toMatchObject({
-            code: 'V2_PIPELINE_UNAVAILABLE',
-        });
-        expect(mocks.rpc).not.toHaveBeenCalled();
-        expect(mocks.dispatchJob).not.toHaveBeenCalled();
+        expect(response.status).toBe(201);
+        expect(mocks.rpc).toHaveBeenCalledTimes(2);
+        expect(mocks.dispatchJob).toHaveBeenCalledOnce();
     });
 
     it('fails closed before reservation when either durable queue is unavailable', async () => {
