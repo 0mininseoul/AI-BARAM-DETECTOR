@@ -1,6 +1,21 @@
 import { z } from 'zod';
-import type { InstagramProfile, InstagramPost } from '@/lib/types/instagram';
-import type { ProviderCallContext, ScraperProvider } from './types';
+import type {
+    InstagramPostMediaItem,
+    InstagramProfile,
+    InstagramPost,
+} from '@/lib/types/instagram';
+import { MAX_RECENT_POSTS } from '@/lib/domain/analysis/media-policy';
+import type {
+    ProfileAttemptResult,
+    ProviderCallContext,
+    ScraperProvider,
+} from './types';
+import {
+    failedProfileAttempt,
+    profileAttemptLatency,
+    successfulProfileAttempt,
+    unavailableProfileAttempt,
+} from './profile-attempt';
 import { INSTAGRAM_USERNAME_PATTERN } from '../username';
 import { normalizeInstagramTimestamp } from '../timestamp';
 import {
@@ -21,10 +36,48 @@ export const APIFY_RELATIONSHIP_ACTOR_ID =
     'scraping_solutions/instagram-scraper-followers-following-no-cookies';
 const DEFAULT_APIFY_RELATIONSHIP_BUILD = '0.0.71';
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const RESUMABLE_APIFY_STATUSES = new Set(['READY', 'RUNNING', 'TIMING-OUT', 'ABORTING']);
 
 interface ApifyProviderDeps {
     client?: ApifyClientLike;
     env?: Record<string, string | undefined>;
+}
+
+function hasDurableProfileRunCheckpoint(context?: ProviderCallContext): boolean {
+    return Boolean(
+        context?.resumeRunId
+        || context?.startReserved
+        || context?.onRunStarted
+    );
+}
+
+function isTypedScrapingError(error: unknown, ...prefixes: string[]): error is Error {
+    return error instanceof Error
+        && prefixes.some(prefix => error.message.startsWith(prefix));
+}
+
+function isProgressPersistenceError(error: unknown): error is Error {
+    return isTypedScrapingError(
+        error,
+        'ANALYSIS_PERSISTENCE_ERROR:',
+        'ANALYSIS_V2_PROGRESS_'
+    );
+}
+
+async function reportProfileStart(
+    context: ProviderCallContext | undefined,
+    username: string
+): Promise<void> {
+    try {
+        await context?.onProfileStart?.(username);
+    } catch (error) {
+        if (isProgressPersistenceError(error)) throw error;
+        throw new Error('ANALYSIS_PERSISTENCE_ERROR: active profile heartbeat failed.');
+    }
+}
+
+function profileRunPending(message: string): Error {
+    return new Error(`SCRAPING_RUN_PENDING_ERROR: ${message}`);
 }
 
 function relationshipBuildSetting(env: Record<string, string | undefined>): string {
@@ -61,6 +114,7 @@ const relationshipItemSchema = z.object({
 }).passthrough();
 
 const optionalUrlSchema = z.union([z.string().url(), z.literal('')]).nullable().optional();
+const requiredUrlSchema = z.string().url();
 
 const profileSchema = z.object({
     username: z.string().trim().regex(INSTAGRAM_USERNAME_PATTERN),
@@ -76,15 +130,31 @@ const profileSchema = z.object({
     latestPosts: z.array(z.unknown()).optional(),
 }).passthrough();
 
+const profileUsernameEnvelopeSchema = z.object({
+    username: z.string().trim().regex(INSTAGRAM_USERNAME_PATTERN),
+}).passthrough();
+
+const profileNotFoundEnvelopeSchema = z.object({
+    username: z.string().trim().regex(INSTAGRAM_USERNAME_PATTERN),
+    statusCode: z.literal(404).optional(),
+    errorCode: z.enum(['NOT_FOUND', 'not_found']).optional(),
+    error: z.literal('not_found').optional(),
+}).passthrough().refine(value => (
+    value.statusCode === 404
+    || value.errorCode === 'NOT_FOUND'
+    || value.errorCode === 'not_found'
+    || value.error === 'not_found'
+), { message: 'explicit not-found evidence is required' });
+
 const latestPostSchema = z.object({
     id: z.union([z.string().min(1), z.number().int().nonnegative()]),
     shortCode: z.string().min(1),
     caption: z.string().nullable().optional(),
     hashtags: z.array(z.string()).optional(),
-    displayUrl: optionalUrlSchema,
+    displayUrl: requiredUrlSchema,
     videoUrl: optionalUrlSchema,
-    type: z.string().optional(),
-    is_video: z.boolean().optional(),
+    type: z.string().trim().min(1),
+    productType: z.string().nullable().optional(),
     likesCount: z.number().int().min(-1).optional(),
     commentsCount: z.number().int().min(-1).optional(),
     timestamp: z.union([z.string(), z.number()]).optional(),
@@ -92,7 +162,136 @@ const latestPostSchema = z.object({
     taggedUsers: z.array(z.object({
         username: z.string().regex(INSTAGRAM_USERNAME_PATTERN),
     }).passthrough()).optional(),
+    images: z.array(requiredUrlSchema).max(20).optional(),
+    childPosts: z.array(z.unknown()).max(20).optional(),
 }).passthrough();
+
+const latestPostChildSchema = z.object({
+    id: z.union([z.string().min(1), z.number().int().nonnegative()]),
+    type: z.string().trim().min(1),
+    displayUrl: requiredUrlSchema,
+    videoUrl: optionalUrlSchema,
+}).passthrough();
+
+const RAW_VIDEO_EXTENSION = /\.(?:m4v|mkv|mov|mp4|mpeg|mpg|ogv|webm)$/i;
+
+function isExplicitReel(productType: string | null | undefined): boolean {
+    const normalized = productType?.trim().toLowerCase();
+    return normalized === 'clips' || normalized === 'reel' || normalized === 'reels';
+}
+
+function mediaPath(value: string): string {
+    try {
+        return decodeURIComponent(new URL(value).pathname);
+    } catch {
+        return value.split(/[?#]/, 1)[0];
+    }
+}
+
+function displayThumbnail(
+    url: string,
+    context: string,
+    videoUrl?: string | null
+): string {
+    if (url === videoUrl || RAW_VIDEO_EXTENSION.test(mediaPath(url))) {
+        throw new Error(`SCRAPING_SCHEMA_ERROR: ${context}의 displayUrl이 원본 비디오 URL입니다.`);
+    }
+    return url;
+}
+
+function normalizeApifyPostType(
+    type: string,
+    productType: string | null | undefined,
+    context: string
+): InstagramPost['type'] {
+    const normalized = type.trim().toLowerCase();
+    const reel = isExplicitReel(productType);
+
+    if (normalized === 'video') return reel ? 'reel' : 'video';
+    if (normalized === 'image') {
+        if (reel) {
+            throw new Error(`SCRAPING_SCHEMA_ERROR: ${context}의 type과 productType이 서로 모순됩니다.`);
+        }
+        return 'image';
+    }
+    if (normalized === 'sidecar') {
+        if (reel) {
+            throw new Error(`SCRAPING_SCHEMA_ERROR: ${context}의 type과 productType이 서로 모순됩니다.`);
+        }
+        return 'carousel';
+    }
+    throw new Error(`SCRAPING_SCHEMA_ERROR: ${context}의 type을 판별할 수 없습니다.`);
+}
+
+function parseApifyChildPosts(
+    post: z.infer<typeof latestPostSchema>,
+    postIndex: number
+): {
+    mediaItems: InstagramPostMediaItem[];
+    declaredMediaCount: number;
+} {
+    const rawChildren = post.childPosts;
+    const images = post.images;
+    if (!Array.isArray(rawChildren) || rawChildren.length === 0) {
+        throw new Error(
+            `SCRAPING_SCHEMA_ERROR: Apify latestPosts ${postIndex}번 carousel에 childPosts가 없습니다.`
+        );
+    }
+    if (!Array.isArray(images) || images.length === 0) {
+        throw new Error(
+            `SCRAPING_SCHEMA_ERROR: Apify latestPosts ${postIndex}번 carousel에 images가 없습니다.`
+        );
+    }
+    if (images.length !== rawChildren.length) {
+        throw new Error(
+            `SCRAPING_SCHEMA_ERROR: Apify latestPosts ${postIndex}번 carousel의 images와 childPosts 개수가 다릅니다.`
+        );
+    }
+    const mediaItems = rawChildren.map((rawChild, childIndex) => {
+        const parsed = latestPostChildSchema.safeParse(rawChild);
+        if (!parsed.success) {
+            throw new Error(
+                `SCRAPING_SCHEMA_ERROR: Apify latestPosts ${postIndex}번 childPosts ${childIndex}번 행이 올바르지 않습니다. ${parsed.error.issues[0]?.message ?? ''}`
+            );
+        }
+        const child = parsed.data;
+        const type = normalizeApifyPostType(
+            child.type,
+            undefined,
+            `Apify latestPosts ${postIndex}번 childPosts ${childIndex}번`
+        );
+        if (type === 'carousel') {
+            throw new Error(
+                `SCRAPING_SCHEMA_ERROR: Apify latestPosts ${postIndex}번 childPosts에 중첩 carousel이 있습니다.`
+            );
+        }
+        const thumbnailUrl = displayThumbnail(
+            child.displayUrl,
+            `Apify latestPosts ${postIndex}번 childPosts ${childIndex}번`,
+            child.videoUrl
+        );
+        if (images[childIndex] !== child.displayUrl) {
+            throw new Error(
+                `SCRAPING_SCHEMA_ERROR: Apify latestPosts ${postIndex}번 carousel의 images와 childPosts 순서가 다릅니다.`
+            );
+        }
+        if (type === 'image' && child.videoUrl) {
+            throw new Error(
+                `SCRAPING_SCHEMA_ERROR: Apify latestPosts ${postIndex}번 childPosts ${childIndex}번의 type과 videoUrl이 서로 모순됩니다.`
+            );
+        }
+        const id = String(child.id);
+        return type === 'image'
+            ? { id, type, imageUrl: thumbnailUrl }
+            : {
+                id,
+                type,
+                thumbnailUrl,
+                ...(child.videoUrl ? { videoUrl: child.videoUrl } : {}),
+            };
+    });
+    return { mediaItems, declaredMediaCount: mediaItems.length };
+}
 
 /** latestPosts를 InstagramPost[] 형식으로 변환 */
 function parseLatestPosts(rawPosts: unknown): InstagramPost[] {
@@ -109,22 +308,52 @@ function parseLatestPosts(rawPosts: unknown): InstagramPost[] {
             );
         }
         const post = parsed.data;
-        const type = post.type?.toLowerCase() || 'image';
+        const type = normalizeApifyPostType(
+            post.type,
+            post.productType,
+            `Apify latestPosts ${index}번`
+        );
         const mentionedUsers = post.mentions ?? [];
         const taggedUsers = (post.taggedUsers ?? []).map((user) => user.username);
+        const thumbnailUrl = displayThumbnail(
+            post.displayUrl,
+            `Apify latestPosts ${index}번`,
+            post.videoUrl
+        );
+        if (
+            type !== 'carousel'
+            && ((post.childPosts?.length ?? 0) > 0 || (post.images?.length ?? 0) > 0)
+        ) {
+            throw new Error(
+                `SCRAPING_SCHEMA_ERROR: Apify latestPosts ${index}번의 type과 carousel 필드가 서로 모순됩니다.`
+            );
+        }
+        if ((type === 'image' || type === 'carousel') && post.videoUrl) {
+            throw new Error(
+                `SCRAPING_SCHEMA_ERROR: Apify latestPosts ${index}번의 type과 videoUrl이 서로 모순됩니다.`
+            );
+        }
+
+        const carousel = type === 'carousel'
+            ? parseApifyChildPosts(post, index)
+            : undefined;
 
         return {
             id: String(post.id),
             shortCode: post.shortCode,
             caption: post.caption ?? undefined,
             hashtags: post.hashtags ?? [],
-            imageUrl: post.displayUrl || undefined,
+            imageUrl: thumbnailUrl,
+            ...(type === 'video' || type === 'reel' ? { thumbnailUrl } : {}),
             videoUrl: post.videoUrl || undefined,
-            type: type === 'video' || post.is_video === true
-                ? 'video'
-                : type === 'sidecar'
-                  ? 'carousel'
-                  : 'image',
+            type,
+            ...(carousel
+                ? {
+                    mediaItems: carousel.mediaItems,
+                    declaredMediaCount: carousel.declaredMediaCount,
+                    childrenComplete: true,
+                }
+                : {}),
             likesCount: post.likesCount ?? 0,
             commentsCount: post.commentsCount ?? 0,
             timestamp: normalizeInstagramTimestamp(post.timestamp),
@@ -142,6 +371,22 @@ function mapProfile(profile: Record<string, unknown>, includePosts: boolean): In
         );
     }
     const value = parsed.data;
+    const latestPosts = includePosts ? parseLatestPosts(value.latestPosts) : undefined;
+    if (includePosts && !value.private && value.postsCount > 0 && latestPosts?.length === 0) {
+        throw new Error(
+            'SCRAPING_INCOMPLETE_ERROR: Apify public profile has posts but no usable latestPosts.'
+        );
+    }
+    const requiredRecentPosts = Math.min(value.postsCount, MAX_RECENT_POSTS);
+    if (
+        includePosts
+        && !value.private
+        && (latestPosts?.length ?? 0) < requiredRecentPosts
+    ) {
+        throw new Error(
+            'SCRAPING_INCOMPLETE_ERROR: Apify public profile recent-post snapshot is incomplete.'
+        );
+    }
     return {
         username: value.username,
         fullName: value.fullName ?? undefined,
@@ -153,7 +398,7 @@ function mapProfile(profile: Record<string, unknown>, includePosts: boolean): In
         postsCount: value.postsCount,
         isPrivate: value.private,
         isVerified: value.verified,
-        ...(includePosts ? { latestPosts: parseLatestPosts(value.latestPosts) } : {}),
+        ...(includePosts ? { latestPosts } : {}),
     };
 }
 
@@ -206,7 +451,7 @@ function relationshipDefinition(
         maximumLimit: integerSetting(
             env,
             'APIFY_RELATIONSHIP_MAX_RESULTS_PER_OPERATION',
-            1_000,
+            1_200,
             1,
             500_000
         ),
@@ -214,7 +459,7 @@ function relationshipDefinition(
         maximumEstimatedCostUsd: numberSetting(
             env,
             'APIFY_RELATIONSHIP_MAX_ESTIMATED_COST_USD_PER_OPERATION',
-            1,
+            1.1,
             0.00000001,
             100_000
         ),
@@ -405,11 +650,18 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
         return profile;
     }
 
-    async function getProfilesBatch(
+    interface CollectedProfileBatch {
+        profilesByUsername: Map<string, InstagramProfile>;
+        failuresByUsername: Map<string, Error>;
+        notFoundUsernames: Set<string>;
+        datasetContaminated: boolean;
+    }
+
+    async function collectProfilesBatch(
         usernames: string[],
         batchSize: number = 10,
         context?: ProviderCallContext
-    ): Promise<InstagramProfile[]> {
+    ): Promise<CollectedProfileBatch> {
         if (!Number.isInteger(batchSize) || batchSize <= 0) {
             throw new Error('SCRAPING_CONFIG_ERROR: batchSize는 양의 정수여야 합니다.');
         }
@@ -421,11 +673,15 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                 'SCRAPING_CONFIG_ERROR: a durable Apify profile operation must fit in one batch.'
             );
         }
-        const isDurableOperation = Boolean(context?.resumeRunId || context?.onRunStarted);
         const settings = profileSettings();
         const apify = client(context?.credentialSlot);
         const requested = new Set(usernames.map((username) => username.toLowerCase()));
-        const resultMap = new Map<string, InstagramProfile>();
+        const profilesByUsername = new Map<string, InstagramProfile>();
+        const failuresByUsername = new Map<string, Error>();
+        const notFoundUsernames = new Set<string>();
+        const seenDatasetUsernames = new Set<string>();
+        let datasetContaminated = false;
+        const durableRun = hasDurableProfileRunCheckpoint(context);
         for (let i = 0; i < usernames.length; i += batchSize) {
             const batch = usernames.slice(i, i + batchSize);
             const maximumChargeUsd = context?.maxChargeUsd
@@ -435,69 +691,240 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
             try {
                 run = await runWithApifyActorSlot(
                     settings.actorConcurrency,
-                    () => startOrResumeApifyActor(
-                        apify,
-                        PROFILE_ACTOR_ID,
-                        { usernames: batch },
-                        {
-                            logicalProvider: 'apify',
-                            credentialSlot: settings.credentialSlot,
-                            timeoutSecs: settings.timeoutSecs,
-                            maxItems: batch.length,
-                            maxTotalChargeUsd: maximumChargeUsd,
-                        },
-                        context
-                    )
+                    async () => {
+                        // Apify executes the whole batch remotely, so expose one real
+                        // representative only after the Actor slot is actually acquired.
+                        if (batch[0]) await reportProfileStart(context, batch[0]);
+                        return startOrResumeApifyActor(
+                            apify,
+                            PROFILE_ACTOR_ID,
+                            { usernames: batch },
+                            {
+                                logicalProvider: 'apify',
+                                credentialSlot: settings.credentialSlot,
+                                timeoutSecs: settings.timeoutSecs,
+                                maxItems: batch.length,
+                                maxTotalChargeUsd: maximumChargeUsd,
+                            },
+                            context
+                        );
+                    }
                 );
             } catch (error) {
+                if (isTypedScrapingError(
+                    error,
+                    'SCRAPING_AMBIGUOUS_START_ERROR:',
+                    'SCRAPING_RUN_CHECKPOINT_ERROR:',
+                    'SCRAPING_RUN_PENDING_ERROR:',
+                    'ANALYSIS_PERSISTENCE_ERROR:',
+                    'ANALYSIS_V2_PROGRESS_',
+                    'SCRAPING_CONFIG_ERROR:',
+                    'SCRAPING_BUDGET_ERROR:',
+                    'SCRAPING_SCHEMA_ERROR:'
+                )) {
+                    throw error;
+                }
                 if (
-                    error instanceof Error
-                    && (
-                        error.message.startsWith('SCRAPING_AMBIGUOUS_START_ERROR:')
-                        || error.message.startsWith('SCRAPING_RUN_CHECKPOINT_ERROR:')
-                        || error.message.startsWith('ANALYSIS_PERSISTENCE_ERROR:')
+                    durableRun
+                    && isTypedScrapingError(
+                        error,
+                        'SCRAPING_ERROR: Apify run status request failed.'
                     )
                 ) {
-                    throw error;
+                    throw profileRunPending(
+                        'Apify profile run status is not yet observable; retry the checkpointed run.'
+                    );
                 }
                 throw new Error('SCRAPING_ERROR: Apify profile actor transport request failed.');
             }
             if (run.status !== 'SUCCEEDED') {
+                if (durableRun && RESUMABLE_APIFY_STATUSES.has(run.status)) {
+                    throw profileRunPending(
+                        `Apify profile run status=${run.status}; retry the checkpointed run.`
+                    );
+                }
                 throw new Error(`SCRAPING_ERROR: Apify profile actor status=${run.status}`);
             }
             if (!run.defaultDatasetId) {
                 throw new Error('SCRAPING_SCHEMA_ERROR: Apify profile run에 defaultDatasetId가 없습니다.');
             }
-            const page = await waitForSettledProfileDataset(
-                apify,
-                run.defaultDatasetId,
-                batch.length,
-                settings
-            );
+            let page;
+            try {
+                page = await waitForSettledProfileDataset(
+                    apify,
+                    run.defaultDatasetId,
+                    batch.length,
+                    settings
+                );
+            } catch (error) {
+                if (
+                    durableRun
+                    && isTypedScrapingError(
+                        error,
+                        'SCRAPING_ERROR:',
+                        'SCRAPING_INCOMPLETE_ERROR:'
+                    )
+                ) {
+                    throw profileRunPending(
+                        'Apify profile dataset is not yet readable; retry the checkpointed run.'
+                    );
+                }
+                throw error;
+            }
             context?.recordUsage({
                 estimated_cost_usd: page.items.length * settings.estimatedCostPerResultUsd,
             });
             for (const item of page.items) {
-                const profile = mapProfile(item as Record<string, unknown>, true);
-                const key = profile.username?.toLowerCase();
-                if (!key || !requested.has(key)) {
-                    throw new Error('SCRAPING_SCHEMA_ERROR: Apify profile username이 요청과 다릅니다.');
+                const explicitNotFound = profileNotFoundEnvelopeSchema.safeParse(item);
+                if (explicitNotFound.success) {
+                    const key = explicitNotFound.data.username.toLowerCase();
+                    if (!requested.has(key) || seenDatasetUsernames.has(key)) {
+                        datasetContaminated = true;
+                        continue;
+                    }
+                    seenDatasetUsernames.add(key);
+                    notFoundUsernames.add(key);
+                    continue;
                 }
-                if (resultMap.has(key)) {
-                    throw new Error('SCRAPING_SCHEMA_ERROR: Apify profile dataset에 중복 username이 있습니다.');
+                const envelope = profileUsernameEnvelopeSchema.safeParse(item);
+                if (!envelope.success) {
+                    datasetContaminated = true;
+                    continue;
                 }
-                resultMap.set(key, profile);
+                const key = envelope.data.username.toLowerCase();
+                if (!requested.has(key)) {
+                    datasetContaminated = true;
+                    continue;
+                }
+                if (seenDatasetUsernames.has(key)) {
+                    profilesByUsername.delete(key);
+                    failuresByUsername.set(
+                        key,
+                        new Error(
+                            'SCRAPING_SCHEMA_ERROR: Apify profile dataset에 중복 username이 있습니다.'
+                        )
+                    );
+                    datasetContaminated = true;
+                    continue;
+                }
+                seenDatasetUsernames.add(key);
+                try {
+                    const profile = mapProfile(item as Record<string, unknown>, true);
+                    profilesByUsername.set(key, profile);
+                } catch (error) {
+                    failuresByUsername.set(
+                        key,
+                        error instanceof Error
+                            ? error
+                            : new Error('SCRAPING_SCHEMA_ERROR: Apify profile row mapping failed.')
+                    );
+                }
             }
         }
-        const results = [...resultMap.values()];
+        return {
+            profilesByUsername,
+            failuresByUsername,
+            notFoundUsernames,
+            datasetContaminated,
+        };
+    }
+
+    async function getProfilesBatch(
+        usernames: string[],
+        batchSize: number = 10,
+        context?: ProviderCallContext
+    ): Promise<InstagramProfile[]> {
+        const collected = await collectProfilesBatch(usernames, batchSize, context);
+        const firstFailure = collected.failuresByUsername.values().next().value;
+        if (firstFailure) throw firstFailure;
+        if (collected.datasetContaminated) {
+            throw new Error('SCRAPING_SCHEMA_ERROR: Apify profile dataset contains invalid rows.');
+        }
+        const results = [...collected.profilesByUsername.values()];
         context?.recordUsage({ result_count: results.length });
-        const coverage = requested.size > 0 ? results.length / requested.size : 1;
-        const unavailableCount = requested.size - results.length;
-        if (coverage < 0.95 && (!isDurableOperation || unavailableCount > 1)) {
+        const requested = new Set(usernames.map(username => username.toLowerCase()));
+        const ambiguousOmissions = [...requested].filter(username => (
+            !collected.profilesByUsername.has(username)
+            && !collected.notFoundUsernames.has(username)
+        ));
+        if (ambiguousOmissions.length > 0) {
+            if (hasDurableProfileRunCheckpoint(context)) {
+                throw profileRunPending(
+                    'Apify profile dataset omitted accounts without explicit not-found evidence.'
+                );
+            }
             throw new Error(
-                `SCRAPING_INCOMPLETE_ERROR: Apify profile batch 커버리지가 ${(coverage * 100).toFixed(1)}%입니다.`
+                'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset omitted accounts without explicit not-found evidence.'
             );
         }
+        return results;
+    }
+
+    async function getProfilesBatchOutcomes(
+        usernames: string[],
+        batchSize: number = 10,
+        context?: ProviderCallContext
+    ): Promise<ProfileAttemptResult[]> {
+        const startedAt = Date.now();
+        const collected = await collectProfilesBatch(usernames, batchSize, context);
+        const latencyMs = profileAttemptLatency(startedAt);
+        const missingUsernames = usernames.filter(requestedUsername => {
+            const key = requestedUsername.trim().toLowerCase();
+            return !collected.profilesByUsername.has(key)
+                && !collected.failuresByUsername.has(key)
+                && !collected.notFoundUsernames.has(key);
+        });
+        if (missingUsernames.length > 0 && hasDurableProfileRunCheckpoint(context)) {
+            throw profileRunPending(
+                'Apify profile dataset omitted accounts without explicit not-found evidence.'
+            );
+        }
+        const results = usernames.map((requestedUsername) => {
+            const key = requestedUsername.trim().toLowerCase();
+            const profile = collected.profilesByUsername.get(key);
+            if (profile) {
+                return successfulProfileAttempt({
+                    requestedUsername,
+                    source: 'apify',
+                    profile,
+                    requestCount: 1,
+                    latencyMs,
+                });
+            }
+            const failure = collected.failuresByUsername.get(key);
+            if (failure || collected.datasetContaminated) {
+                return failedProfileAttempt({
+                    requestedUsername,
+                    source: 'apify',
+                    error: failure ?? new Error(
+                        'SCRAPING_SCHEMA_ERROR: Apify profile dataset has an unattributed row.'
+                    ),
+                    requestCount: 1,
+                    latencyMs,
+                });
+            }
+            if (missingUsernames.includes(requestedUsername)) {
+                return failedProfileAttempt({
+                    requestedUsername,
+                    source: 'apify',
+                    error: new Error(
+                        'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset omitted an account without explicit not-found evidence.'
+                    ),
+                    requestCount: 1,
+                    latencyMs,
+                });
+            }
+            return unavailableProfileAttempt({
+                    requestedUsername,
+                    source: 'apify',
+                    reason: 'not_found',
+                    requestCount: 1,
+                    latencyMs,
+                });
+        });
+        context?.recordUsage({
+            result_count: results.filter(result => result.outcome.status === 'success').length,
+        });
         return results;
     }
 
@@ -526,6 +953,7 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
         getFollowing: (username, limit, context) =>
             collectRelationship(username, limit, 'following', context),
         getProfilesBatch,
+        getProfilesBatchOutcomes,
     };
 }
 

@@ -1,5 +1,7 @@
 import { lookup } from 'node:dns/promises';
-import { isIP } from 'node:net';
+import { request as httpsRequest } from 'node:https';
+import { isIP, type LookupFunction } from 'node:net';
+import { Readable } from 'node:stream';
 
 export const INSTAGRAM_MEDIA_HOST_SUFFIXES = [
     'instagram.com',
@@ -29,9 +31,20 @@ export interface ResolvedAddress {
 
 export type ResolveHostname = (hostname: string) => Promise<ResolvedAddress[]>;
 
+export interface SecureImageRequestOptions {
+    signal: AbortSignal;
+    headers?: HeadersInit;
+}
+
+export type SecureImageRequest = (
+    url: URL,
+    options: SecureImageRequestOptions,
+    addresses: readonly ResolvedAddress[]
+) => Promise<Response>;
+
 export interface SecureImageDownloadOptions {
     allowedHostSuffixes: readonly string[];
-    fetchImpl?: typeof fetch;
+    requestImpl?: SecureImageRequest;
     resolveHostname?: ResolveHostname;
     maxBytes: number;
     timeoutMs: number;
@@ -45,8 +58,119 @@ export interface SecureImageDownload {
     finalUrl: string;
 }
 
+export type SecureImageFetchFailureReason =
+    | 'invalid_configuration'
+    | 'invalid_url'
+    | 'blocked_source'
+    | 'invalid_redirect'
+    | 'source_missing'
+    | 'source_rejected'
+    | 'rate_limited'
+    | 'upstream_unavailable'
+    | 'network_failure'
+    | 'timeout'
+    | 'response_too_large'
+    | 'unsupported_content'
+    | 'invalid_response';
+
+export type SecureImageFetchFailureDisposition = 'transient' | 'permanent';
+
+/** A bounded, PII-free failure contract for callers that need deterministic retry policy. */
+export class SecureImageFetchError extends Error {
+    constructor(
+        readonly reason: SecureImageFetchFailureReason,
+        readonly disposition: SecureImageFetchFailureDisposition,
+        message: string
+    ) {
+        super(message);
+        this.name = 'SecureImageFetchError';
+    }
+}
+
+function secureImageFetchError(
+    reason: SecureImageFetchFailureReason,
+    disposition: SecureImageFetchFailureDisposition,
+    message: string
+): never {
+    throw new SecureImageFetchError(reason, disposition, message);
+}
+
 async function defaultResolveHostname(hostname: string): Promise<ResolvedAddress[]> {
     return lookup(hostname, { all: true, verbatim: true });
+}
+
+function pinnedLookup(addresses: readonly ResolvedAddress[]): LookupFunction {
+    return (_hostname, options, callback) => {
+        const requestedFamily = options.family || 0;
+        const eligible = requestedFamily === 0
+            ? addresses
+            : addresses.filter(({ family }) => family === requestedFamily);
+        if (eligible.length === 0) {
+            const error = new Error(
+                'No validated image address matches the requested family'
+            ) as NodeJS.ErrnoException;
+            error.code = 'ENOTFOUND';
+            callback(error, '', 0);
+            return;
+        }
+        if (options.all) {
+            callback(null, eligible.map(({ address, family }) => ({ address, family })));
+            return;
+        }
+        callback(null, eligible[0].address, eligible[0].family);
+    };
+}
+
+async function requestPinnedHttpsImage(
+    url: URL,
+    options: SecureImageRequestOptions,
+    addresses: readonly ResolvedAddress[]
+): Promise<Response> {
+    return new Promise((resolve, reject) => {
+        const headers = new Headers(options.headers);
+        headers.delete('connection');
+        headers.delete('content-length');
+        headers.delete('host');
+        headers.delete('transfer-encoding');
+
+        const request = httpsRequest(url, {
+            agent: false,
+            method: 'GET',
+            headers: Object.fromEntries(headers.entries()),
+            lookup: pinnedLookup(addresses),
+            servername: url.hostname,
+            signal: options.signal,
+        }, response => {
+            try {
+                const status = response.statusCode;
+                if (!status || status < 200 || status > 599) {
+                    response.destroy();
+                    reject(new Error('Image server returned an invalid HTTP status'));
+                    return;
+                }
+                const responseHeaders = new Headers();
+                for (let index = 0; index < response.rawHeaders.length; index += 2) {
+                    responseHeaders.append(
+                        response.rawHeaders[index],
+                        response.rawHeaders[index + 1] ?? ''
+                    );
+                }
+                resolve(new Response(
+                    Readable.toWeb(response) as ReadableStream<Uint8Array>,
+                    {
+                        status,
+                        statusText: response.statusMessage,
+                        headers: responseHeaders,
+                    }
+                ));
+            } catch (error) {
+                response.destroy();
+                reject(error);
+            }
+        });
+        request.once('error', reject);
+        request.end();
+    });
 }
 
 export function matchesAllowedHostSuffix(hostname: string, suffix: string): boolean {
@@ -141,8 +265,95 @@ export function isPublicNetworkAddress(address: string): boolean {
 
 function assertPositiveInteger(value: number, name: string): void {
     if (!Number.isSafeInteger(value) || value <= 0) {
-        throw new Error(`${name} must be a positive integer`);
+        secureImageFetchError(
+            'invalid_configuration',
+            'permanent',
+            `${name} must be a positive integer`
+        );
     }
+}
+
+interface ValidatedRemoteImageUrl {
+    url: URL;
+    addresses: ResolvedAddress[];
+}
+
+async function resolveAllowedRemoteImageUrl(
+    rawUrl: string,
+    allowedHostSuffixes: readonly string[],
+    resolveHostname: ResolveHostname = defaultResolveHostname
+): Promise<ValidatedRemoteImageUrl> {
+    if (typeof rawUrl !== 'string' || rawUrl.length === 0 || rawUrl.length > 8_192) {
+        secureImageFetchError('invalid_url', 'permanent', 'Image URL is invalid');
+    }
+
+    let parsed: URL;
+    try {
+        parsed = new URL(rawUrl);
+    } catch {
+        return secureImageFetchError('invalid_url', 'permanent', 'Image URL is invalid');
+    }
+
+    if (parsed.protocol !== 'https:') {
+        secureImageFetchError('invalid_url', 'permanent', 'Image URL must use HTTPS');
+    }
+    if (parsed.username || parsed.password) {
+        secureImageFetchError(
+            'invalid_url',
+            'permanent',
+            'Credentialed image URLs are not allowed'
+        );
+    }
+    if (parsed.port && parsed.port !== '443') {
+        secureImageFetchError(
+            'invalid_url',
+            'permanent',
+            'Non-standard image URL ports are not allowed'
+        );
+    }
+
+    const hostname = parsed.hostname.toLowerCase().replace(/\.$/, '');
+    if (isIP(hostname) !== 0) {
+        secureImageFetchError(
+            'blocked_source',
+            'permanent',
+            'IP-literal image URLs are not allowed'
+        );
+    }
+    if (!allowedHostSuffixes.some((suffix) => matchesAllowedHostSuffix(hostname, suffix))) {
+        secureImageFetchError('blocked_source', 'permanent', 'Image URL host is not allowed');
+    }
+
+    let addresses: ResolvedAddress[];
+    try {
+        addresses = await resolveHostname(hostname);
+    } catch {
+        return secureImageFetchError(
+            'network_failure',
+            'transient',
+            'Image host lookup failed'
+        );
+    }
+    const normalizedAddresses = addresses.map(({ address }) => ({
+        address,
+        family: isIP(address),
+    }));
+    if (
+        normalizedAddresses.length === 0
+        || normalizedAddresses.some(({ address, family }) => (
+            family === 0 || !isPublicNetworkAddress(address)
+        ))
+    ) {
+        secureImageFetchError(
+            'blocked_source',
+            'permanent',
+            'Image URL resolved to a non-public address'
+        );
+    }
+
+    parsed.hostname = hostname;
+    parsed.hash = '';
+    return { url: parsed, addresses: normalizedAddresses };
 }
 
 export async function validateAllowedRemoteImageUrl(
@@ -150,35 +361,11 @@ export async function validateAllowedRemoteImageUrl(
     allowedHostSuffixes: readonly string[],
     resolveHostname: ResolveHostname = defaultResolveHostname
 ): Promise<URL> {
-    if (typeof rawUrl !== 'string' || rawUrl.length === 0 || rawUrl.length > 8_192) {
-        throw new Error('Image URL is invalid');
-    }
-
-    let parsed: URL;
-    try {
-        parsed = new URL(rawUrl);
-    } catch {
-        throw new Error('Image URL is invalid');
-    }
-
-    if (parsed.protocol !== 'https:') throw new Error('Image URL must use HTTPS');
-    if (parsed.username || parsed.password) throw new Error('Credentialed image URLs are not allowed');
-    if (parsed.port && parsed.port !== '443') throw new Error('Non-standard image URL ports are not allowed');
-
-    const hostname = parsed.hostname.toLowerCase().replace(/\.$/, '');
-    if (isIP(hostname) !== 0) throw new Error('IP-literal image URLs are not allowed');
-    if (!allowedHostSuffixes.some((suffix) => matchesAllowedHostSuffix(hostname, suffix))) {
-        throw new Error('Image URL host is not allowed');
-    }
-
-    const addresses = await resolveHostname(hostname);
-    if (addresses.length === 0 || addresses.some(({ address }) => !isPublicNetworkAddress(address))) {
-        throw new Error('Image URL resolved to a non-public address');
-    }
-
-    parsed.hostname = hostname;
-    parsed.hash = '';
-    return parsed;
+    return (await resolveAllowedRemoteImageUrl(
+        rawUrl,
+        allowedHostSuffixes,
+        resolveHostname
+    )).url;
 }
 
 async function cancelBody(response: Response): Promise<void> {
@@ -195,7 +382,7 @@ export async function downloadSecureImage(
 ): Promise<SecureImageDownload> {
     const {
         allowedHostSuffixes,
-        fetchImpl = fetch,
+        requestImpl = requestPinnedHttpsImage,
         resolveHostname = defaultResolveHostname,
         maxBytes,
         timeoutMs,
@@ -205,46 +392,70 @@ export async function downloadSecureImage(
     assertPositiveInteger(maxBytes, 'maxBytes');
     assertPositiveInteger(timeoutMs, 'timeoutMs');
     if (!Number.isSafeInteger(maxRedirects) || maxRedirects < 0 || maxRedirects > 10) {
-        throw new Error('maxRedirects must be an integer from 0 to 10');
+        secureImageFetchError(
+            'invalid_configuration',
+            'permanent',
+            'maxRedirects must be an integer from 0 to 10'
+        );
     }
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     const abortPromise = new Promise<never>((_resolve, reject) => {
         controller.signal.addEventListener('abort', () => {
-            reject(new Error(`Image download timed out after ${timeoutMs}ms`));
+            reject(new SecureImageFetchError(
+                'timeout',
+                'transient',
+                `Image download timed out after ${timeoutMs}ms`
+            ));
         }, { once: true });
     });
 
     try {
         let current = await Promise.race([
-            validateAllowedRemoteImageUrl(rawUrl, allowedHostSuffixes, resolveHostname),
+            resolveAllowedRemoteImageUrl(rawUrl, allowedHostSuffixes, resolveHostname),
             abortPromise,
         ]);
         const visited = new Set<string>();
 
         for (let redirectCount = 0; ; redirectCount++) {
-            if (visited.has(current.href)) throw new Error('Image redirect loop detected');
-            visited.add(current.href);
+            if (visited.has(current.url.href)) {
+                secureImageFetchError(
+                    'invalid_redirect',
+                    'permanent',
+                    'Image redirect loop detected'
+                );
+            }
+            visited.add(current.url.href);
 
             const response = await Promise.race([
-                fetchImpl(current, {
-                    method: 'GET',
-                    redirect: 'manual',
+                requestImpl(current.url, {
                     signal: controller.signal,
                     headers,
-                }),
+                }, current.addresses),
                 abortPromise,
             ]);
 
             if (REDIRECT_STATUSES.has(response.status)) {
                 await cancelBody(response);
-                if (redirectCount >= maxRedirects) throw new Error('Image redirect limit exceeded');
+                if (redirectCount >= maxRedirects) {
+                    secureImageFetchError(
+                        'invalid_redirect',
+                        'permanent',
+                        'Image redirect limit exceeded'
+                    );
+                }
                 const location = response.headers.get('location');
-                if (!location) throw new Error('Image redirect did not include a location');
-                const nextUrl = new URL(location, current);
+                if (!location) {
+                    secureImageFetchError(
+                        'invalid_redirect',
+                        'permanent',
+                        'Image redirect did not include a location'
+                    );
+                }
+                const nextUrl = new URL(location, current.url);
                 current = await Promise.race([
-                    validateAllowedRemoteImageUrl(
+                    resolveAllowedRemoteImageUrl(
                         nextUrl.href,
                         allowedHostSuffixes,
                         resolveHostname
@@ -256,7 +467,20 @@ export async function downloadSecureImage(
 
             if (!response.ok) {
                 await cancelBody(response);
-                throw new Error(`Image download failed with status ${response.status}`);
+                const reason = response.status === 404 || response.status === 410
+                    ? 'source_missing'
+                    : response.status === 408 || response.status === 425 || response.status === 429
+                        ? 'rate_limited'
+                        : response.status >= 500
+                            ? 'upstream_unavailable'
+                            : 'source_rejected';
+                secureImageFetchError(
+                    reason,
+                    reason === 'rate_limited' || reason === 'upstream_unavailable'
+                        ? 'transient'
+                        : 'permanent',
+                    `Image download failed with status ${response.status}`
+                );
             }
 
             const contentType = response.headers.get('content-type')
@@ -265,7 +489,11 @@ export async function downloadSecureImage(
                 .toLowerCase() || 'application/octet-stream';
             if (!SAFE_IMAGE_CONTENT_TYPES.has(contentType)) {
                 await cancelBody(response);
-                throw new Error(`Unsupported image content type: ${contentType}`);
+                secureImageFetchError(
+                    'unsupported_content',
+                    'permanent',
+                    'Unsupported image content type'
+                );
             }
 
             const rawLength = response.headers.get('content-length');
@@ -273,15 +501,29 @@ export async function downloadSecureImage(
                 const declaredLength = Number(rawLength);
                 if (!Number.isFinite(declaredLength) || declaredLength < 0) {
                     await cancelBody(response);
-                    throw new Error('Image content length is invalid');
+                    secureImageFetchError(
+                        'invalid_response',
+                        'permanent',
+                        'Image content length is invalid'
+                    );
                 }
                 if (declaredLength > maxBytes) {
                     await cancelBody(response);
-                    throw new Error(`Image exceeds ${maxBytes} byte download limit`);
+                    secureImageFetchError(
+                        'response_too_large',
+                        'permanent',
+                        `Image exceeds ${maxBytes} byte download limit`
+                    );
                 }
             }
 
-            if (!response.body) throw new Error('Image response did not include a body');
+            if (!response.body) {
+                secureImageFetchError(
+                    'invalid_response',
+                    'permanent',
+                    'Image response did not include a body'
+                );
+            }
             const reader = response.body.getReader();
             const chunks: Buffer[] = [];
             let totalBytes = 0;
@@ -292,8 +534,16 @@ export async function downloadSecureImage(
                     totalBytes += value.byteLength;
                     if (totalBytes > maxBytes) {
                         controller.abort();
-                        await reader.cancel();
-                        throw new Error(`Image exceeds ${maxBytes} byte download limit`);
+                        try {
+                            await reader.cancel();
+                        } catch {
+                            // The abort can reject a signal-linked stream before cancellation settles.
+                        }
+                        secureImageFetchError(
+                            'response_too_large',
+                            'permanent',
+                            `Image exceeds ${maxBytes} byte download limit`
+                        );
                     }
                     chunks.push(Buffer.from(value));
                 }
@@ -304,14 +554,23 @@ export async function downloadSecureImage(
             return {
                 bytes: Buffer.concat(chunks, totalBytes),
                 contentType,
-                finalUrl: current.href,
+                finalUrl: current.url.href,
             };
         }
     } catch (error) {
-        if (controller.signal.aborted && !(error instanceof Error && error.message.includes('byte download limit'))) {
-            throw new Error(`Image download timed out after ${timeoutMs}ms`, { cause: error });
+        if (error instanceof SecureImageFetchError) throw error;
+        if (controller.signal.aborted) {
+            throw new SecureImageFetchError(
+                'timeout',
+                'transient',
+                `Image download timed out after ${timeoutMs}ms`
+            );
         }
-        throw error;
+        throw new SecureImageFetchError(
+            'network_failure',
+            'transient',
+            'Image download failed due to a network error'
+        );
     } finally {
         clearTimeout(timeoutId);
     }

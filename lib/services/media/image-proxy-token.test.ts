@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
     canonicalizeImageProxyUrl,
+    createAnalysisV2ResultImageProxyPath,
     createImageProxyPath,
+    verifyAnalysisV2ResultImageProxyToken,
     verifyImageProxyToken,
 } from './image-proxy-token';
 
@@ -15,9 +17,9 @@ afterEach(() => {
 function parseProxyPath(path: string) {
     const parsed = new URL(path, 'https://baram-detector.example');
     return {
-        url: parsed.searchParams.get('url') || '',
+        token: parsed.searchParams.get('token') || '',
+        result: parsed.searchParams.get('result') || '',
         expires: parsed.searchParams.get('expires') || '',
-        signature: parsed.searchParams.get('signature') || '',
     };
 }
 
@@ -51,11 +53,12 @@ describe('image proxy tokens', () => {
 
         const token = parseProxyPath(first!);
         expect(verifyImageProxyToken(
-            token.url,
+            token.token,
             token.expires,
-            token.signature,
             { nowMs: NOW_MS, secret: SECRET }
         )).toBe('https://cdninstagram.com/a.jpg?oe=123');
+        expect(first).not.toContain('cdninstagram.com');
+        expect(first).not.toContain(encodeURIComponent('https://cdninstagram.com'));
     });
 
     it('rejects tampering, noncanonical URLs, expired tokens, and excessive lifetimes', () => {
@@ -65,29 +68,42 @@ describe('image proxy tokens', () => {
         )!);
 
         expect(verifyImageProxyToken(
-            'https://cdninstagram.com/b.jpg?oe=123',
+            `${token.token.slice(0, -1)}${token.token.endsWith('a') ? 'b' : 'a'}`,
             token.expires,
-            token.signature,
             { nowMs: NOW_MS, secret: SECRET }
         )).toBeNull();
         expect(verifyImageProxyToken(
-            `${token.url}#cache-bust`,
+            token.token,
             token.expires,
-            token.signature,
-            { nowMs: NOW_MS, secret: SECRET }
-        )).toBeNull();
-        expect(verifyImageProxyToken(
-            token.url,
-            token.expires,
-            token.signature,
             { nowMs: NOW_MS + 3_600_000, secret: SECRET }
         )).toBeNull();
         expect(verifyImageProxyToken(
-            token.url,
+            token.token,
             String(Math.floor(NOW_MS / 1_000) + 10_000),
-            token.signature,
             { nowMs: NOW_MS, secret: SECRET }
         )).toBeNull();
+    });
+
+    it('creates a compact opaque result locator independent of a long CDN URL', () => {
+        const path = createAnalysisV2ResultImageProxyPath({
+            requestId: '123e4567-e89b-42d3-a456-426614174000',
+            kind: 'female',
+            candidateId: 'candidate-1',
+        }, { nowMs: NOW_MS, secret: SECRET });
+        expect(path).toBeDefined();
+        expect(path!.length).toBeLessThan(512);
+        expect(path).not.toContain('candidate-1');
+
+        const token = parseProxyPath(path!);
+        expect(verifyAnalysisV2ResultImageProxyToken(
+            token.result,
+            token.expires,
+            { nowMs: NOW_MS, secret: SECRET }
+        )).toEqual({
+            requestId: '123e4567-e89b-42d3-a456-426614174000',
+            kind: 'female',
+            candidateId: 'candidate-1',
+        });
     });
 
     it('omits invalid stored URLs instead of exposing an unsigned fallback', () => {

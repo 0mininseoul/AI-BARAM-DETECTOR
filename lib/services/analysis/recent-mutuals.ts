@@ -1,5 +1,10 @@
 import { RECENT_MUTUAL_BONUS_MAX } from '@/lib/constants/scoring';
 
+/**
+ * V1 legacy recent-mutual behavior for active requests only. V2 ranks verified women before
+ * applying points and badges through the canonical domain policy.
+ */
+
 const RECENT_MUTUAL_WINDOW = 10;
 const RECENT_MUTUAL_FEMALE_LIMIT = 5;
 

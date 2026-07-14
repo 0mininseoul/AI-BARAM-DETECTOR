@@ -1,10 +1,30 @@
 import { NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { hasValidAdminAuthorization } from '@/lib/services/instagram/admin-selection';
-import { isValidAnalysisRequestId } from '@/lib/services/analysis/observability';
+import {
+    classifyAnalysisFailure,
+    isValidAnalysisRequestId,
+} from '@/lib/services/analysis/observability';
 import { reconcileSettledAnalysisProviderCosts } from '@/lib/services/analysis/provider-cost-reconciliation';
+import {
+    loadAnalysisV2OperationalObservability,
+} from '@/lib/services/analysis/v2-operational-observability';
 
 const MAX_EVENT_ROWS = 500;
+const SAFE_OPERATIONAL_ERROR_CODES = new Set([
+    'ANALYSIS_V2_OBSERVABILITY_VALIDATION_ERROR',
+    'ANALYSIS_V2_OBSERVABILITY_PERSISTENCE_ERROR',
+]);
+
+function safeOperationalErrorCode(error: unknown): string {
+    if (
+        error instanceof Error
+        && SAFE_OPERATIONAL_ERROR_CODES.has(error.message)
+    ) {
+        return error.message;
+    }
+    return 'OBSERVABILITY_QUERY_FAILED';
+}
 
 /** GET /api/admin/analysis-observability?requestId=<uuid> */
 export async function GET(request: Request) {
@@ -18,12 +38,30 @@ export async function GET(request: Request) {
     }
 
     try {
+        const v2 = await loadAnalysisV2OperationalObservability(
+            supabaseAdmin,
+            requestId
+        );
+        if (v2) {
+            return NextResponse.json({
+                success: true,
+                ...v2,
+                costPolicy: {
+                    billingSource: 'analysis_v2_provider_runs+analysis_v2_ai_attempts',
+                    providerCostBasis: 'actual_and_conservative',
+                    geminiCostBasis: 'estimated',
+                    gcpInfrastructureIncluded: false,
+                },
+            });
+        }
+
         const reconciliation = await reconcileSettledAnalysisProviderCosts(
             supabaseAdmin,
             requestId
         );
         if (reconciliation.failed > 0 || reconciliation.hasMore) {
             console.warn('[analysis.observability] provider costs remain pending', {
+                requestId,
                 eligible: reconciliation.eligible,
                 failed: reconciliation.failed,
                 hasMore: reconciliation.hasMore,
@@ -63,8 +101,12 @@ export async function GET(request: Request) {
                 gcpInfrastructureIncluded: false,
             },
         });
-    } catch {
-        console.error('[analysis.observability] admin query failed');
+    } catch (error) {
+        console.error('[analysis.observability] admin query failed', {
+            requestId,
+            errorCode: safeOperationalErrorCode(error),
+            failureCategory: classifyAnalysisFailure(error),
+        });
         return NextResponse.json(
             { error: 'Failed to get analysis observability.' },
             { status: 500 }

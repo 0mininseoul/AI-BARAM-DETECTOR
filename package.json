@@ -2,12 +2,17 @@
   "name": "ai-baram-detector",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": "24.x"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
+    "test-admission:issue": "tsx --env-file=.env.local scripts/issue-analysis-test-admission.ts",
+    "test-entitlement:issue": "tsx --env-file=.env.local scripts/issue-analysis-test-entitlement.ts",
     "canary:instagram": "tsx --env-file=.env.local scripts/canary-instagram-provider.ts"
   },
   "dependencies": {
@@ -16,9 +21,12 @@
     "@google/genai": "^2.7.0",
     "@supabase/ssr": "^0.8.0",
     "@supabase/supabase-js": "^2.91.0",
+    "@vercel/oidc": "3.8.0",
     "apify-client": "^2.21.0",
     "framer-motion": "^12.29.2",
     "google-auth-library": "10.9.0",
+    "google-gax": "5.0.7",
+    "js-yaml": "4.3.0",
     "next": "16.2.6",
     "react": "19.2.3",
     "react-dom": "19.2.3",

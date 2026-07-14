@@ -1,10 +1,26 @@
 import type { InstagramProfile, InstagramFollower } from '@/lib/types/instagram';
+import type {
+    ProfileFetchOutcome,
+    ProfileFetchSource,
+} from '@/lib/domain/analysis/profile-fetch-outcome';
 
 export type Capability = 'profile' | 'profilesBatch' | 'followers' | 'following';
 
 export type ProviderName = 'apify' | 'coderx' | 'flashapi' | 'rapidapi' | 'selfhosted';
 export type InteractionProviderName = 'apify' | 'disabled';
-export type ApifyCredentialSlot = 'primary' | 'secondary';
+export const APIFY_CREDENTIAL_SLOTS = [
+    'primary',
+    'secondary',
+    'tertiary',
+    'quaternary',
+    'quinary',
+] as const;
+export type ApifyCredentialSlot = typeof APIFY_CREDENTIAL_SLOTS[number];
+
+export function isApifyCredentialSlot(value: unknown): value is ApifyCredentialSlot {
+    return typeof value === 'string'
+        && APIFY_CREDENTIAL_SLOTS.includes(value as ApifyCredentialSlot);
+}
 export type ProviderCostTerminalStatus = 'succeeded' | 'failed' | 'aborted' | 'timed_out';
 
 export interface ProviderCostRunStarted {
@@ -66,6 +82,10 @@ export interface ScrapeRequestOptions {
     expectedResultCount?: number;
     requestId?: string;
     onTelemetry?: ScraperTelemetryHook;
+    /** Internal UX heartbeat emitted only when work for an exact profile starts. */
+    onProfileStart?(username: string): void | Promise<void>;
+    /** Internal PII-free progress signal emitted after a primary profile is resolved. */
+    onProfileResolved?(): void | Promise<void>;
     providerRun?: ProviderRunCheckpoint;
 }
 
@@ -122,8 +142,27 @@ export interface ProviderCallContext extends ProviderCostRunCallbacks {
         maxChargeUsd: number;
     }): void | Promise<void>;
     onRunStarted?(runId: string): void | Promise<void>;
+    onProfileStart?(username: string): void | Promise<void>;
+    onProfileResolved?(): void | Promise<void>;
     recordUsage(delta: ProviderUsageDelta): void;
 }
+
+export type ProfileAttemptProvider = Extract<ProfileFetchSource, 'selfhosted' | 'apify'>;
+export type ProfileAttemptSuccessOutcome = Extract<ProfileFetchOutcome, { status: 'success' }>;
+export type ProfileAttemptUnavailableOutcome = Extract<
+    ProfileFetchOutcome,
+    { status: 'unavailable' }
+>;
+export type ProfileAttemptFailedOutcome = Extract<ProfileFetchOutcome, { status: 'failed' }>;
+
+/**
+ * One terminal result for one requested username in one provider attempt. Profiles are
+ * carried only on success; the persistence layer can store telemetry and profile data atomically.
+ */
+export type ProfileAttemptResult =
+    | { outcome: ProfileAttemptSuccessOutcome; profile: InstagramProfile }
+    | { outcome: ProfileAttemptUnavailableOutcome }
+    | { outcome: ProfileAttemptFailedOutcome };
 
 /**
  * 스크래핑 프로바이더. 각 프로바이더는 지원하는 기능만 구현한다.
@@ -132,6 +171,14 @@ export interface ProviderCallContext extends ProviderCostRunCallbacks {
 export interface ScraperProvider {
     readonly name: ProviderName;
     readonly paid?: boolean;
+    /**
+     * Lightweight identity/count contract. It deliberately does not parse timeline media, so
+     * checkout admission cannot fail because a post or carousel snapshot is incomplete.
+     */
+    getProfileSummary?(
+        username: string,
+        context?: ProviderCallContext
+    ): Promise<InstagramProfile | null>;
     getProfile?(username: string, context?: ProviderCallContext): Promise<InstagramProfile | null>;
     getFollowers?(
         username: string,
@@ -148,4 +195,9 @@ export interface ScraperProvider {
         batchSize?: number,
         context?: ProviderCallContext
     ): Promise<InstagramProfile[]>;
+    getProfilesBatchOutcomes?(
+        usernames: string[],
+        batchSize?: number,
+        context?: ProviderCallContext
+    ): Promise<ProfileAttemptResult[]>;
 }

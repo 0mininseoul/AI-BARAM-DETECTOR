@@ -1,6 +1,9 @@
 import type { InstagramProfile, InstagramFollower } from '@/lib/types/instagram';
+import { summarizeProfileFetchOutcomes } from '@/lib/domain/analysis/profile-fetch-outcome';
 import type {
     Capability,
+    ProfileAttemptProvider,
+    ProfileAttemptResult,
     ProviderCallContext,
     ProviderName,
     ProviderUsageDelta,
@@ -9,6 +12,13 @@ import type {
     ScraperProvider,
     ScraperTelemetryEvent,
 } from './providers/types';
+import {
+    failedProfileAttempt,
+    isSuccessfulProfileAttempt,
+    profileAttemptLatency,
+    successfulProfileAttempt,
+    validateProfileAttemptResults,
+} from './providers/profile-attempt';
 import {
     AUTOMATIC_FALLBACK,
     getScraperConfig,
@@ -41,6 +51,37 @@ function config(): ScraperConfig {
 }
 
 const MAX_PAID_FALLBACKS = 1;
+export const MAX_V2_PROFILE_BATCH_SIZE = 30;
+
+export interface ProfilesBatchV2AttemptSnapshot {
+    attempt: 'primary' | 'fallback';
+    source: ProfileAttemptProvider;
+    requestedUsernames: readonly string[];
+    results: readonly ProfileAttemptResult[];
+}
+
+export interface ProfilesBatchV2Resume {
+    primaryResults: readonly ProfileAttemptResult[];
+    frozenUnresolvedUsernames: readonly string[];
+}
+
+export interface ProfilesBatchV2Options {
+    requestId?: string;
+    onTelemetry?: ScrapeRequestOptions['onTelemetry'];
+    providerRun?: ScrapeRequestOptions['providerRun'];
+    onProfileStart?: ScrapeRequestOptions['onProfileStart'];
+    onProfileResolved?: ScrapeRequestOptions['onProfileResolved'];
+    resume?: ProfilesBatchV2Resume;
+    persistAttemptOutcomes(snapshot: ProfilesBatchV2AttemptSnapshot): Promise<void>;
+}
+
+export interface ProfilesBatchV2Result {
+    results: readonly ProfileAttemptResult[];
+    profiles: readonly InstagramProfile[];
+    primaryResults: readonly ProfileAttemptResult[];
+    fallbackResults: readonly ProfileAttemptResult[];
+    frozenUnresolvedUsernames: readonly string[];
+}
 
 interface UsageAccumulator {
     request_count: number;
@@ -207,7 +248,8 @@ async function runAttempt<T>(
     provider: ScraperProvider,
     call: (p: ScraperProvider, context: ProviderCallContext) => Promise<T> | undefined,
     fallback: boolean,
-    options?: ScrapeRequestOptions
+    options?: ScrapeRequestOptions,
+    valueResultCount: (value: T) => number = inferResultCount
 ): Promise<T> {
     const startedAt = Date.now();
     const usage: UsageAccumulator = {
@@ -227,6 +269,8 @@ async function runAttempt<T>(
         startReserved: options?.providerRun?.startReserved,
         onBeforeRunStart: options?.providerRun?.onBeforeRunStart,
         onRunStarted: options?.providerRun?.onRunStarted,
+        onProfileStart: options?.onProfileStart,
+        onProfileResolved: options?.onProfileResolved,
         onCostRunStarted: options?.providerRun?.onCostRunStarted,
         onCostRunFinished: options?.providerRun?.onCostRunFinished,
         recordUsage: (delta) => addUsage(usage, delta),
@@ -242,7 +286,7 @@ async function runAttempt<T>(
             );
         }
         const value = await pending;
-        if (usage.result_count === 0) usage.result_count = inferResultCount(value);
+        if (usage.result_count === 0) usage.result_count = valueResultCount(value);
         if (usage.raw_result_count === 0) usage.raw_result_count = usage.result_count;
         if (usage.unique_result_count === 0) usage.unique_result_count = usage.result_count;
         return value;
@@ -287,6 +331,188 @@ async function runAttempt<T>(
                 ? { rate_limit_remaining: usage.rate_limit_remaining }
                 : {}),
         });
+    }
+}
+
+function canonicalV2ProfileUsernames(usernames: readonly string[]): string[] {
+    if (usernames.length < 1 || usernames.length > MAX_V2_PROFILE_BATCH_SIZE) {
+        throw new Error(
+            `SCRAPING_CONFIG_ERROR: V2 profile batch must contain 1~${MAX_V2_PROFILE_BATCH_SIZE} usernames.`
+        );
+    }
+    const normalized = usernames.map(username => username.trim().toLowerCase());
+    if (
+        normalized.some(username => !isInstagramUsername(username))
+        || new Set(normalized).size !== normalized.length
+    ) {
+        throw new Error('SCRAPING_CONFIG_ERROR: V2 profile usernames are invalid or duplicated.');
+    }
+    return normalized;
+}
+
+function canonicalFrozenSubset(
+    frozenUsernames: readonly string[],
+    requestedUsernames: readonly string[]
+): string[] {
+    const normalized = frozenUsernames.map(username => username.trim().toLowerCase());
+    const requested = new Set(requestedUsernames);
+    if (
+        normalized.some(username => !isInstagramUsername(username) || !requested.has(username))
+        || new Set(normalized).size !== normalized.length
+    ) {
+        throw new Error('SCRAPING_CONFIG_ERROR: frozen unresolved usernames are invalid.');
+    }
+    return normalized;
+}
+
+function immutableAttemptResults(
+    results: readonly ProfileAttemptResult[]
+): readonly ProfileAttemptResult[] {
+    return Object.freeze(results.map((result) => {
+        const outcome = Object.freeze({ ...result.outcome });
+        return Object.freeze(isSuccessfulProfileAttempt(result)
+            ? { outcome, profile: result.profile }
+            : { outcome }) as ProfileAttemptResult;
+    }));
+}
+
+function profilesToAttemptResults(
+    requestedUsernames: readonly string[],
+    profiles: readonly InstagramProfile[],
+    source: ProfileAttemptProvider,
+    startedAt: number
+): ProfileAttemptResult[] {
+    const requested = new Set(requestedUsernames);
+    const returned = new Map<string, InstagramProfile>();
+    for (const profile of profiles) {
+        const username = typeof profile?.username === 'string'
+            ? profile.username.trim().toLowerCase()
+            : '';
+        if (!isInstagramUsername(username) || !requested.has(username) || returned.has(username)) {
+            throw new Error(
+                'SCRAPING_SCHEMA_ERROR: V2 profile attempt returned an unexpected or duplicate username.'
+            );
+        }
+        returned.set(username, profile);
+    }
+
+    const latencyMs = profileAttemptLatency(startedAt);
+    return requestedUsernames.map((requestedUsername) => {
+        const profile = returned.get(requestedUsername);
+        if (profile) {
+            return successfulProfileAttempt({
+                requestedUsername,
+                source,
+                profile,
+                requestCount: 1,
+                latencyMs,
+            });
+        }
+        return failedProfileAttempt({
+            requestedUsername,
+            source,
+            error: new Error(
+                'SCRAPING_INCOMPLETE_ERROR: provider omitted a terminal result without explicit not-found evidence.'
+            ),
+            requestCount: 1,
+            latencyMs,
+        });
+    });
+}
+
+function allFailedProfileAttempts(
+    requestedUsernames: readonly string[],
+    source: ProfileAttemptProvider,
+    error: unknown,
+    startedAt: number
+): ProfileAttemptResult[] {
+    const latencyMs = profileAttemptLatency(startedAt);
+    return requestedUsernames.map(requestedUsername => failedProfileAttempt({
+        requestedUsername,
+        source,
+        error,
+        requestCount: 1,
+        latencyMs,
+    }));
+}
+
+async function runProfileOutcomeAttempt(
+    provider: ScraperProvider,
+    source: ProfileAttemptProvider,
+    requestedUsernames: readonly string[],
+    fallback: boolean,
+    options: ScrapeRequestOptions
+): Promise<{
+    results: readonly ProfileAttemptResult[];
+    paidRunBarrierError?: Error;
+}> {
+    const startedAt = Date.now();
+    try {
+        const results = await runAttempt(
+            'profilesBatch',
+            provider,
+            (candidate, context) => {
+                const exact = candidate.getProfilesBatchOutcomes?.(
+                    [...requestedUsernames],
+                    requestedUsernames.length,
+                    context
+                );
+                if (exact) return exact;
+                return candidate.getProfilesBatch?.(
+                    [...requestedUsernames],
+                    requestedUsernames.length,
+                    context
+                ).then(profiles => profilesToAttemptResults(
+                    requestedUsernames,
+                    profiles,
+                    source,
+                    startedAt
+                ));
+            },
+            fallback,
+            options,
+            value => value.filter(result => result.outcome.status === 'success').length
+        );
+        return {
+            results: immutableAttemptResults(
+                validateProfileAttemptResults(requestedUsernames, source, results)
+            ),
+        };
+    } catch (error) {
+        if (
+            error instanceof Error
+            && error.message.startsWith('SCRAPING_CONFIG_ERROR:')
+        ) {
+            throw error;
+        }
+        const paidRunBarrierError = error instanceof Error && [
+            'SCRAPING_AMBIGUOUS_START_ERROR:',
+            'SCRAPING_RUN_CHECKPOINT_ERROR:',
+            'SCRAPING_RUN_PENDING_ERROR:',
+            'ANALYSIS_PERSISTENCE_ERROR:',
+            'ANALYSIS_V2_PROGRESS_',
+        ].some(prefix => error.message.startsWith(prefix))
+            ? error
+            : undefined;
+        return {
+            results: immutableAttemptResults(
+                allFailedProfileAttempts(requestedUsernames, source, error, startedAt)
+            ),
+            ...(paidRunBarrierError ? { paidRunBarrierError } : {}),
+        };
+    }
+}
+
+async function persistProfileAttempt(
+    options: ProfilesBatchV2Options,
+    snapshot: ProfilesBatchV2AttemptSnapshot
+): Promise<void> {
+    try {
+        await options.persistAttemptOutcomes(snapshot);
+    } catch {
+        throw new Error(
+            `PROFILE_FETCH_PERSISTENCE_ERROR: ${snapshot.attempt} outcomes were not persisted.`
+        );
     }
 }
 
@@ -498,6 +724,169 @@ export async function getProfilesBatch(
         options?.fallback ?? c.fallback,
         options
     );
+}
+
+/**
+ * V2 profile path. Free-provider outcomes are durably acknowledged before the paid
+ * input is frozen, and a retry must supply that frozen snapshot instead of rerunning free work.
+ */
+export async function getProfilesBatchV2(
+    usernames: readonly string[],
+    options: ProfilesBatchV2Options
+): Promise<ProfilesBatchV2Result> {
+    if (!options || typeof options.persistAttemptOutcomes !== 'function') {
+        throw new Error('SCRAPING_CONFIG_ERROR: V2 profile persistence callback is required.');
+    }
+    const requestedUsernames = Object.freeze(canonicalV2ProfileUsernames(usernames));
+    const primary = providers.selfhosted;
+    const fallback = providers.apify;
+    if (
+        !primary
+        || primary.name !== 'selfhosted'
+        || primary.paid !== false
+        || !fallback
+        || fallback.name !== 'apify'
+        || fallback.paid !== true
+    ) {
+        throw new Error(
+            'SCRAPING_CONFIG_ERROR: V2 profiles require free selfhosted primary and paid Apify fallback.'
+        );
+    }
+    if (options.providerRun?.logicalProvider && options.providerRun.logicalProvider !== 'apify') {
+        throw new Error('SCRAPING_CONFIG_ERROR: V2 profile fallback can only resume Apify.');
+    }
+    if (
+        (options.providerRun?.resumeRunId || options.providerRun?.startReserved)
+        && !options.resume
+    ) {
+        throw new Error(
+            'SCRAPING_CONFIG_ERROR: a resumed paid profile run requires the frozen primary snapshot.'
+        );
+    }
+
+    let primaryResults: readonly ProfileAttemptResult[];
+    let frozenUnresolvedUsernames: readonly string[];
+    if (options.resume) {
+        primaryResults = immutableAttemptResults(validateProfileAttemptResults(
+            requestedUsernames,
+            'selfhosted',
+            options.resume.primaryResults
+        ));
+        const derived = summarizeProfileFetchOutcomes(
+            requestedUsernames,
+            primaryResults.map(result => result.outcome)
+        ).unresolvedUsernames;
+        const supplied = canonicalFrozenSubset(
+            options.resume.frozenUnresolvedUsernames,
+            requestedUsernames
+        );
+        if (
+            supplied.length !== derived.length
+            || supplied.some((username, index) => username !== derived[index])
+        ) {
+            throw new Error(
+                'PROFILE_FETCH_OUTCOME_ERROR: frozen unresolved usernames differ from primary outcomes.'
+            );
+        }
+        frozenUnresolvedUsernames = Object.freeze(supplied);
+    } else {
+        const primaryAttempt = await runProfileOutcomeAttempt(
+            primary,
+            'selfhosted',
+            requestedUsernames,
+            false,
+            {
+                requestId: options.requestId,
+                onTelemetry: options.onTelemetry,
+                onProfileStart: options.onProfileStart,
+                onProfileResolved: options.onProfileResolved,
+            }
+        );
+        if (primaryAttempt.paidRunBarrierError) throw primaryAttempt.paidRunBarrierError;
+        primaryResults = primaryAttempt.results;
+        await persistProfileAttempt(options, Object.freeze({
+            attempt: 'primary',
+            source: 'selfhosted',
+            requestedUsernames,
+            results: primaryResults,
+        }));
+        frozenUnresolvedUsernames = Object.freeze(
+            summarizeProfileFetchOutcomes(
+                requestedUsernames,
+                primaryResults.map(result => result.outcome)
+            ).unresolvedUsernames
+        );
+    }
+
+    let fallbackResults: readonly ProfileAttemptResult[] = Object.freeze([]);
+    if (frozenUnresolvedUsernames.length > 0) {
+        if (
+            !options.providerRun
+            || (
+                !options.providerRun.resumeRunId
+                && !options.providerRun.startReserved
+                && (
+                    typeof options.providerRun.onBeforeRunStart !== 'function'
+                    || typeof options.providerRun.onRunStarted !== 'function'
+                )
+            )
+        ) {
+            throw new Error(
+                'SCRAPING_CONFIG_ERROR: V2 paid fallback requires a durable provider-run checkpoint.'
+            );
+        }
+        const fallbackAttempt = await runProfileOutcomeAttempt(
+            fallback,
+            'apify',
+            frozenUnresolvedUsernames,
+            true,
+            {
+                requestId: options.requestId,
+                onTelemetry: options.onTelemetry,
+                onProfileStart: options.onProfileStart,
+                providerRun: options.providerRun,
+            }
+        );
+        fallbackResults = fallbackAttempt.results;
+        // A run/checkpoint barrier is not a terminal per-username provider outcome. Persisting
+        // synthetic failures here would seal the frozen fallback set and make a same-run retry
+        // conflict when the Actor later succeeds.
+        if (fallbackAttempt.paidRunBarrierError) throw fallbackAttempt.paidRunBarrierError;
+        await persistProfileAttempt(options, Object.freeze({
+            attempt: 'fallback',
+            source: 'apify',
+            requestedUsernames: frozenUnresolvedUsernames,
+            results: fallbackResults,
+        }));
+    }
+
+    const fallbackByUsername = new Map(
+        fallbackResults.map(result => [result.outcome.requestedUsername, result])
+    );
+    const finalResults = immutableAttemptResults(primaryResults.map((primaryResult) => {
+        if (primaryResult.outcome.status === 'success') return primaryResult;
+        const fallbackResult = fallbackByUsername.get(primaryResult.outcome.requestedUsername);
+        if (!fallbackResult) {
+            throw new Error(
+                'PROFILE_FETCH_OUTCOME_ERROR: unresolved username has no fallback result.'
+            );
+        }
+        return fallbackResult;
+    }));
+    summarizeProfileFetchOutcomes(
+        requestedUsernames,
+        finalResults.map(result => result.outcome)
+    );
+
+    return {
+        results: finalResults,
+        profiles: Object.freeze(finalResults.flatMap(result =>
+            isSuccessfulProfileAttempt(result) ? [result.profile] : []
+        )),
+        primaryResults,
+        fallbackResults,
+        frozenUnresolvedUsernames,
+    };
 }
 
 // ── 프로바이더 무관 순수 헬퍼 ──

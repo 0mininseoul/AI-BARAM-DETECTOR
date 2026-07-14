@@ -1,4 +1,5 @@
 import { Resend } from 'resend';
+import { appOriginForServer } from '@/lib/constants/app-url';
 
 // 지연 초기화 - 빌드 시 API 키 없어도 오류 방지
 let resendClient: Resend | null = null;
@@ -51,7 +52,7 @@ export async function sendAnalysisCompleteEmail(
   targetInstagramId: string,
   requestId: string
 ) {
-  const appUrl = process.env.NEXT_PUBLIC_APP_URL || 'https://baram-detector.com';
+  const appUrl = appOriginForServer();
   const resultUrl = `${appUrl}/result/${requestId}`;
 
   const html = `

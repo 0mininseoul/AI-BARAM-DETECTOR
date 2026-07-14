@@ -10,6 +10,15 @@
         },
         "app/api/analysis/step/route.ts": {
             "maxDuration": 300
+        },
+        "app/api/analysis/v2/worker/route.ts": {
+            "maxDuration": 300
+        },
+        "app/api/analysis/v2/recover/route.ts": {
+            "maxDuration": 300
+        },
+        "app/api/analysis/preflight/retention/route.ts": {
+            "maxDuration": 60
         }
     },
     "git": {

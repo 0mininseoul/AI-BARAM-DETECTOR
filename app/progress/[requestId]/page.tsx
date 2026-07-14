@@ -1,5 +1,6 @@
 'use client';
 
+import Image from 'next/image';
 import { useEffect, use, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAnalysisProgress } from '@/hooks/useAnalysisProgress';
@@ -10,9 +11,24 @@ import {
     decideAnalysisStepFailure,
     shouldClientDriveAnalysis,
 } from '@/lib/services/analysis/progress-retry';
+import { analysisV2EventCopy } from '@/lib/services/analysis/owner-view-presentation';
 
 interface PageProps {
     params: Promise<{ requestId: string }>;
+}
+
+const V2_TRACK_PRESENTATION = [
+    { key: 'relationshipAi', label: '맞팔·AI 판독' },
+    { key: 'interactions', label: '좋아요·댓글 단서' },
+    { key: 'finalization', label: '위험도·총평 정리' },
+] as const;
+
+function etaLabel(lowSeconds: number, highSeconds: number): string {
+    const lowMinutes = Math.max(1, Math.ceil(lowSeconds / 60));
+    const highMinutes = Math.max(lowMinutes, Math.ceil(highSeconds / 60));
+    return lowMinutes === highMinutes
+        ? `약 ${highMinutes}분 남음`
+        : `약 ${lowMinutes}~${highMinutes}분 남음`;
 }
 
 export default function ProgressPage({ params }: PageProps) {
@@ -37,7 +53,11 @@ export default function ProgressPage({ params }: PageProps) {
 
     // 단계별 분석 실행 함수
     const runNextStep = useCallback(async () => {
-        if (data?.backgroundProcessing === true || isRunningStep.current) return;
+        if (
+            data?.pipelineVersion === 'v2'
+            || data?.backgroundProcessing === true
+            || isRunningStep.current
+        ) return;
         isRunningStep.current = true;
 
         try {
@@ -129,7 +149,7 @@ export default function ProgressPage({ params }: PageProps) {
                 scheduleNextStep(ANALYSIS_STEP_RECOVERY_DELAY_MS, true);
             }
         }
-    }, [data?.backgroundProcessing, refetch, requestId, scheduleNextStep]);
+    }, [data?.backgroundProcessing, data?.pipelineVersion, refetch, requestId, scheduleNextStep]);
 
     useEffect(() => {
         runNextStepRef.current = runNextStep;
@@ -138,6 +158,7 @@ export default function ProgressPage({ params }: PageProps) {
     // pending 또는 processing 상태이면 분석 단계 실행
     useEffect(() => {
         if (
+            data?.pipelineVersion === 'v2' ||
             data?.backgroundProcessing === true ||
             data?.status === 'completed' ||
             data?.status === 'failed'
@@ -164,7 +185,7 @@ export default function ProgressPage({ params }: PageProps) {
             }
             runNextStep();
         }
-    }, [data?.backgroundProcessing, data?.progress, data?.status, runNextStep]);
+    }, [data?.backgroundProcessing, data?.pipelineVersion, data?.progress, data?.status, runNextStep]);
 
     // 탭 복귀 시 파이프라인 재개
     useEffect(() => {
@@ -175,7 +196,8 @@ export default function ProgressPage({ params }: PageProps) {
             if (retryTimeoutRef.current || stepTimeoutRef.current) return;
 
             // 분석 진행 중이고 step이 안 돌고 있으면 재개
-            if (shouldClientDriveAnalysis(data?.status, data?.backgroundProcessing) &&
+            if (data?.pipelineVersion !== 'v2'
+                && shouldClientDriveAnalysis(data?.status, data?.backgroundProcessing) &&
                 !isRunningStep.current) {
                 retryCountRef.current = 0; // 탭 복귀는 fresh start
                 runNextStep();
@@ -184,7 +206,7 @@ export default function ProgressPage({ params }: PageProps) {
 
         document.addEventListener('visibilitychange', handleVisibility);
         return () => document.removeEventListener('visibilitychange', handleVisibility);
-    }, [data?.backgroundProcessing, data?.status, runNextStep]);
+    }, [data?.backgroundProcessing, data?.pipelineVersion, data?.status, runNextStep]);
 
     // 컴포넌트 언마운트 시 정리
     useEffect(() => {
@@ -204,9 +226,10 @@ export default function ProgressPage({ params }: PageProps) {
     // 완료되면 결과 페이지로 이동
     useEffect(() => {
         if (data?.status === 'completed') {
-            router.push(`/result/${requestId}`);
+            const pipeline = data.pipelineVersion === 'v2' ? '?pipeline=v2' : '';
+            router.push(`/result/${requestId}${pipeline}`);
         }
-    }, [data?.status, requestId, router]);
+    }, [data?.pipelineVersion, data?.status, requestId, router]);
 
     const handleLogout = async () => {
         try {
@@ -289,11 +312,23 @@ export default function ProgressPage({ params }: PageProps) {
                     <div className="absolute left-1/2 top-0 h-full w-px -translate-x-1/2 bg-line" />
                     <div className="absolute top-1/2 left-0 h-px w-full -translate-y-1/2 bg-line" />
                     <div className="absolute inset-0 flex items-center justify-center">
-                        <BrandMark size={40} className="anim-blink text-blood" />
+                        {data.pipelineVersion === 'v2' && data.activeProfile?.imageUrl ? (
+                            <div className="relative h-12 w-12 overflow-hidden rounded-full border border-blood bg-panel shadow-[0_0_18px_rgba(228,19,42,0.35)]">
+                                <Image
+                                    src={data.activeProfile.imageUrl}
+                                    alt="현재 확인 중인 프로필"
+                                    fill
+                                    sizes="48px"
+                                    className="object-cover"
+                                />
+                            </div>
+                        ) : (
+                            <BrandMark size={40} className="anim-blink text-blood" />
+                        )}
                     </div>
                 </div>
                 <h1 className="mt-8 text-[22px] font-extrabold tracking-tight text-fg">판독 중…</h1>
-                <p className="mt-2 text-center text-[13px] text-fg-dim">
+                <p className="mt-2 text-center text-[13px] text-fg-dim" aria-live="polite">
                     {data.progressStep || '판독을 준비하고 있습니다.'}
                 </p>
 
@@ -307,53 +342,118 @@ export default function ProgressPage({ params }: PageProps) {
                     </div>
                     <div className="mt-2 flex justify-between text-[12px] text-fg-mute">
                         <span className="num font-bold text-blood">{data.progress}%</span>
-                        <span>단계별 처리 중</span>
+                        <span>
+                            {data.pipelineVersion === 'v2' && data.etaRange
+                                ? etaLabel(data.etaRange.lowSeconds, data.etaRange.highSeconds)
+                                : '단계별 처리 중'}
+                        </span>
                     </div>
                 </div>
 
                 {/* step log */}
-                <div className="mt-7 w-full border border-line bg-ink-2">
-                    {ANALYSIS_PROGRESS_STEPS.map((step, index) => {
-                        const isComplete = data.progress >= step.threshold;
-                        const isCurrent =
-                            data.progress >= (ANALYSIS_PROGRESS_STEPS[index - 1]?.threshold || 0) &&
-                            data.progress < step.threshold;
+                {data.pipelineVersion === 'v2' && data.tracks ? (
+                    <div className="mt-7 w-full border border-line bg-ink-2">
+                        {V2_TRACK_PRESENTATION.map(({ key, label }) => {
+                            const track = data.tracks![key];
+                            const trackProgress = Math.round(track.progressBp / 10) / 10;
+                            const isComplete = track.state === 'completed';
+                            const isRunning = track.state === 'running';
+                            return (
+                                <div
+                                    key={key}
+                                    className="border-b border-line px-4 py-3 last:border-b-0"
+                                >
+                                    <div className="flex items-center gap-3">
+                                        <span className={`flex h-5 w-5 items-center justify-center text-[12px] font-bold ${
+                                            isComplete
+                                                ? 'bg-blood text-white'
+                                                : isRunning
+                                                  ? 'border border-blood text-blood'
+                                                  : 'border border-line-2 text-fg-mute'
+                                        }`}>
+                                            {isComplete ? '✓' : isRunning ? (
+                                                <span className="anim-blink h-1.5 w-1.5 bg-blood" />
+                                            ) : ''}
+                                        </span>
+                                        <span className={`text-[14px] ${
+                                            isRunning || isComplete
+                                                ? 'font-semibold text-fg'
+                                                : 'text-fg-mute'
+                                        }`}>
+                                            {label}
+                                        </span>
+                                        <span className="num ml-auto text-[11px] text-fg-mute">
+                                            {trackProgress}%
+                                        </span>
+                                    </div>
+                                    <div className="ml-8 mt-2 h-1 overflow-hidden bg-line">
+                                        <div
+                                            className="h-full bg-blood transition-[width] duration-500"
+                                            style={{ width: `${trackProgress}%` }}
+                                        />
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                ) : (
+                    <div className="mt-7 w-full border border-line bg-ink-2">
+                        {ANALYSIS_PROGRESS_STEPS.map((step, index) => {
+                            const isComplete = data.progress >= step.threshold;
+                            const isCurrent =
+                                data.progress >= (ANALYSIS_PROGRESS_STEPS[index - 1]?.threshold || 0) &&
+                                data.progress < step.threshold;
 
-                        return (
-                            <div
-                                key={step.label}
-                                className="flex items-center gap-3 border-b border-line px-4 py-3 last:border-b-0"
-                            >
-                                <span
-                                    className={`num flex h-5 w-5 items-center justify-center text-[12px] font-bold ${
-                                        isComplete
-                                            ? 'bg-blood text-white'
-                                            : isCurrent
-                                              ? 'border border-blood text-blood'
-                                              : 'border border-line-2 text-fg-mute'
-                                    }`}
+                            return (
+                                <div
+                                    key={step.label}
+                                    className="flex items-center gap-3 border-b border-line px-4 py-3 last:border-b-0"
                                 >
-                                    {isComplete ? '✓' : isCurrent ? '' : index + 1}
-                                    {isCurrent && <span className="anim-blink h-1.5 w-1.5 bg-blood" />}
-                                </span>
-                                <span
-                                    className={`text-[14px] ${
-                                        isComplete
-                                            ? 'font-medium text-fg'
-                                            : isCurrent
-                                              ? 'font-semibold text-fg'
-                                              : 'text-fg-mute'
-                                    }`}
-                                >
-                                    {step.label}
-                                </span>
-                                <span className="num ml-auto text-[11px] tracking-widest text-fg-mute">
-                                    {step.threshold}%
-                                </span>
-                            </div>
-                        );
-                    })}
-                </div>
+                                    <span
+                                        className={`num flex h-5 w-5 items-center justify-center text-[12px] font-bold ${
+                                            isComplete
+                                                ? 'bg-blood text-white'
+                                                : isCurrent
+                                                  ? 'border border-blood text-blood'
+                                                  : 'border border-line-2 text-fg-mute'
+                                        }`}
+                                    >
+                                        {isComplete ? '✓' : isCurrent ? '' : index + 1}
+                                        {isCurrent && <span className="anim-blink h-1.5 w-1.5 bg-blood" />}
+                                    </span>
+                                    <span
+                                        className={`text-[14px] ${
+                                            isComplete
+                                                ? 'font-medium text-fg'
+                                                : isCurrent
+                                                  ? 'font-semibold text-fg'
+                                                  : 'text-fg-mute'
+                                        }`}
+                                    >
+                                        {step.label}
+                                    </span>
+                                    <span className="num ml-auto text-[11px] tracking-widest text-fg-mute">
+                                        {step.threshold}%
+                                    </span>
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
+
+                {data.pipelineVersion === 'v2' && data.events.length > 0 && (
+                    <div className="mt-4 w-full border border-line bg-ink-2 px-4 py-3" aria-live="polite">
+                        <span className="eyebrow">실시간 판독 로그</span>
+                        <ul className="mt-2.5 space-y-2">
+                            {data.events.slice(-3).reverse().map((event) => (
+                                <li key={event.seq} className="flex items-start gap-2.5 text-[12px] leading-relaxed text-fg-dim">
+                                    <span className="mt-1.5 h-1.5 w-1.5 shrink-0 bg-blood" />
+                                    <span>{analysisV2EventCopy(event.copyCode)}</span>
+                                </li>
+                            ))}
+                        </ul>
+                    </div>
+                )}
 
                 {/* background continuity or legacy browser fallback */}
                 {data.backgroundProcessing ? (

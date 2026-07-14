@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
+import { CANONICAL_APP_ORIGIN } from "@/lib/constants/app-url";
 import "./globals.css";
 
 const paperlogy = localFont({
@@ -29,11 +30,14 @@ export const metadata: Metadata = {
   keywords: ["여사친", "위장여사친", "바람기", "AI분석", "인스타그램", "연애불안", "커플", "남사친"],
   authors: [{ name: "AI 위장 여사친 판독기" }],
   creator: "AI 위장 여사친 판독기",
-  metadataBase: new URL("https://ai-baram-detector.vercel.app"),
+  metadataBase: new URL(CANONICAL_APP_ORIGIN),
+  alternates: {
+    canonical: "/",
+  },
   openGraph: {
     type: "website",
     locale: "ko_KR",
-    url: "https://ai-baram-detector.vercel.app",
+    url: CANONICAL_APP_ORIGIN,
     siteName: "AI 위장 여사친 판독기",
     title: "AI 위장 여사친 판독기 - 내 남친의 위험한 친구 찾기",
     description: "내 남친이 맞팔 중인 여자들, 누가 제일 위험할까? AI가 인스타그램을 분석해 위장 여사친을 찾아드립니다.",

@@ -1,5 +1,6 @@
 import Link from "next/link";
 import type { ButtonHTMLAttributes, ReactNode } from "react";
+import { threatMeterFillCount } from "@/lib/services/analysis/owner-view-presentation";
 
 /* ============================================================
    CASE FILE — shared dossier primitives
@@ -162,23 +163,24 @@ export function DeepRiskAnalysis({
   );
 }
 
-/* --- segmented threat meter (qualitative, by grade) --- */
+/* --- segmented threat meter --- */
 export function ThreatBar({
   grade,
+  score,
   segments = 14,
   className = "",
 }: {
   grade: Grade;
+  score?: number;
   segments?: number;
   className?: string;
 }) {
-  const fillMap: Record<Grade, number> = { high_risk: 12, caution: 8, normal: 4 };
   const colorMap: Record<Grade, string> = {
     high_risk: "var(--color-blood)",
     caution: "var(--color-amber)",
     normal: "var(--color-jade)",
   };
-  const filled = fillMap[grade];
+  const filled = threatMeterFillCount({ grade, displayScore: score, segments });
   const color = colorMap[grade];
   return (
     <div className={`flex items-center gap-[3px] ${className}`} aria-hidden="true">

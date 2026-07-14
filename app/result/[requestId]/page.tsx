@@ -1,9 +1,18 @@
 'use client';
 
-import { useEffect, useState, use } from 'react';
+import { useEffect, useRef, useState, use } from 'react';
 import Image from 'next/image';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
+import type { AnalysisResultPageV1 } from '@/lib/contracts/analysis-v2';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
+import {
+    boundedOwnerResultPage,
+    OWNER_RESULT_PAGE_SIZE,
+    paginatedCountLabel,
+    paginatedRangeLabel,
+    v2ResultFailureAction,
+    type OwnerProgressStatus,
+} from '@/lib/services/analysis/owner-view-presentation';
 import {
     TopBar,
     Eyebrow,
@@ -91,6 +100,8 @@ interface FemaleAccount {
     bio: string;
     recentMutualRank?: 1 | 2 | 3 | 4 | 5;
     riskAnalysis: string[];
+    oneLineOverview?: string;
+    displayScore?: number;
 }
 
 interface PrivateAccount {
@@ -104,20 +115,61 @@ interface PrivateAccount {
 interface ResultData {
     requestId: string;
     status: string;
+    pipelineVersion: 'v1' | 'v2';
     summary: {
         targetInstagramId: string;
         targetProfileImage?: string;
         mutualFollows: number;
-        genderRatio: GenderRatio;
+        genderRatio: GenderRatio | null;
+        v2?: {
+            planId: 'basic' | 'standard' | 'plus';
+            followers: AnalysisResultPageV1['summary']['followers'];
+            following: AnalysisResultPageV1['summary']['following'];
+            publicMutuals: number;
+            privateMutuals: number;
+            screenedMutuals: number;
+            successfullyScreenedMutuals: number;
+            notScreenedMutuals: number;
+            exclusionApplied: boolean;
+            highRiskCount: number;
+        };
     };
     femaleAccounts: FemaleAccount[];
     privateAccounts: PrivateAccount[];
+    femaleNextCursor?: string | null;
+    privateNextCursor?: string | null;
 }
 
 interface ShareResponse {
     success: boolean;
     shareUrl: string;
     shareToken: string;
+}
+
+interface V2ProgressStatusResponse {
+    snapshot?: { status?: OwnerProgressStatus };
+}
+
+type ResultAccountKind = 'public' | 'private';
+type ResultPageDirection = 'previous' | 'next';
+
+interface ResultPageAction {
+    kind: ResultAccountKind;
+    direction: ResultPageDirection;
+}
+
+interface ResultPageNavigation {
+    pageIndex: number;
+    pageCursors: Array<string | null>;
+}
+
+type ResultPageNavigationState = Record<ResultAccountKind, ResultPageNavigation>;
+
+function initialResultPageNavigation(): ResultPageNavigationState {
+    return {
+        public: { pageIndex: 0, pageCursors: [null] },
+        private: { pageIndex: 0, pageCursors: [null] },
+    };
 }
 
 const InstaLink = ({ url }: { url: string }) => (
@@ -140,22 +192,188 @@ const BRACKET_BY_GRADE: Record<string, string> = {
     normal: 'var(--color-line-2)',
 };
 
+function mapV2Result(result: AnalysisResultPageV1): ResultData {
+    return {
+        requestId: result.requestId,
+        status: 'completed',
+        pipelineVersion: 'v2',
+        summary: {
+            targetInstagramId: result.summary.targetInstagramId,
+            targetProfileImage: result.summary.targetProfileImage || undefined,
+            mutualFollows: result.summary.detectedMutuals,
+            genderRatio: null,
+            v2: {
+                planId: result.summary.planId,
+                followers: result.summary.followers,
+                following: result.summary.following,
+                publicMutuals: result.summary.publicMutuals,
+                privateMutuals: result.summary.privateMutuals,
+                screenedMutuals: result.summary.screenedMutuals,
+                successfullyScreenedMutuals: result.summary.successfullyScreenedMutuals,
+                notScreenedMutuals: result.summary.notScreenedMutuals,
+                exclusionApplied: result.summary.exclusionApplied,
+                highRiskCount: result.femaleAccounts.filter(
+                    account => account.riskBand === 'high_risk'
+                ).length,
+            },
+        },
+        femaleAccounts: boundedOwnerResultPage(result.femaleAccounts).map(account => ({
+            instagramId: account.instagramId,
+            fullName: account.fullName || undefined,
+            profileImage: account.profileImage || undefined,
+            instagramUrl: `https://instagram.com/${account.instagramId}`,
+            riskGrade: account.riskBand,
+            bio: account.bio || '',
+            recentMutualRank: account.recentMutualRank !== null && account.recentMutualRank <= 5
+                ? account.recentMutualRank as 1 | 2 | 3 | 4 | 5
+                : undefined,
+            riskAnalysis: account.highRiskNarrative ? [...account.highRiskNarrative] : [],
+            oneLineOverview: account.oneLineOverview,
+            displayScore: account.displayScore,
+        })),
+        privateAccounts: boundedOwnerResultPage(result.privateAccounts).map(account => ({
+            instagramId: account.instagramId,
+            fullName: account.fullName || undefined,
+            profileImage: account.profileImage || undefined,
+            instagramUrl: `https://instagram.com/${account.instagramId}`,
+        })),
+        femaleNextCursor: result.femaleNextCursor,
+        privateNextCursor: result.privateNextCursor,
+    };
+}
+
+function ResultPaginationControls({
+    kind,
+    label,
+    pageIndex,
+    hasNextPage,
+    activeAction,
+    failedAction,
+    onPage,
+}: {
+    kind: ResultAccountKind;
+    label: string;
+    pageIndex: number;
+    hasNextPage: boolean;
+    activeAction: ResultPageAction | null;
+    failedAction: ResultPageAction | null;
+    onPage: (kind: ResultAccountKind, direction: ResultPageDirection) => void;
+}) {
+    const hasPreviousPage = pageIndex > 0;
+    if (!hasPreviousPage && !hasNextPage) return null;
+
+    const activeDirection = activeAction?.kind === kind ? activeAction.direction : null;
+    const failedDirection = failedAction?.kind === kind ? failedAction.direction : null;
+
+    return (
+        <div className="mt-4">
+            <div className={`grid gap-2 ${hasPreviousPage && hasNextPage ? 'grid-cols-2' : 'grid-cols-1'}`}>
+                {hasPreviousPage && (
+                    <button
+                        type="button"
+                        onClick={() => onPage(kind, 'previous')}
+                        disabled={activeAction !== null}
+                        className="border border-line-2 px-4 py-3 text-[13px] font-bold text-fg transition-colors hover:bg-panel disabled:text-fg-mute"
+                    >
+                        {activeDirection === 'previous'
+                            ? '이전 목록 불러오는 중…'
+                            : failedDirection === 'previous'
+                                ? '이전 목록 다시 불러오기'
+                                : `이전 ${OWNER_RESULT_PAGE_SIZE}명`}
+                    </button>
+                )}
+                {hasNextPage && (
+                    <button
+                        type="button"
+                        onClick={() => onPage(kind, 'next')}
+                        disabled={activeAction !== null}
+                        className="border border-line-2 px-4 py-3 text-[13px] font-bold text-fg transition-colors hover:bg-panel disabled:text-fg-mute"
+                    >
+                        {activeDirection === 'next'
+                            ? '불러오는 중…'
+                            : failedDirection === 'next'
+                                ? `${label} 다시 불러오기`
+                                : `${label} 더 보기`}
+                    </button>
+                )}
+            </div>
+            {failedDirection && (
+                <p className="mt-2 text-center text-[11px] text-blood" role="alert">
+                    {failedDirection === 'previous' ? '이전' : '다음'} {label}을 불러오지 못했습니다. 다시 시도해 주세요.
+                </p>
+            )}
+        </div>
+    );
+}
+
 export default function ResultPage({ params }: PageProps) {
     const { requestId } = use(params);
     const [data, setData] = useState<ResultData | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [shareLoading, setShareLoading] = useState(false);
+    const [pageAction, setPageAction] = useState<ResultPageAction | null>(null);
+    const [pageError, setPageError] = useState<ResultPageAction | null>(null);
+    const [pageNavigation, setPageNavigation] = useState(initialResultPageNavigation);
+    const [resultRetry, setResultRetry] = useState(0);
     const [tab, setTab] = useState<'public' | 'private'>('public');
+    const publicSectionRef = useRef<HTMLElement>(null);
+    const privateSectionRef = useRef<HTMLElement>(null);
     const router = useRouter();
+    const requestedPipeline = useSearchParams().get('pipeline');
 
     useEffect(() => {
+        const abortController = new AbortController();
+
         const fetchResult = async () => {
             try {
-                const response = await fetch(`/api/analysis/result/${requestId}`);
-                const result = await response.json();
+                setError(null);
+                let isV2Request = requestedPipeline === 'v2';
+                let response = await fetch(
+                    requestedPipeline === 'v2'
+                        ? `/api/analysis/v2/result/${requestId}?pageSize=50`
+                        : `/api/analysis/result/${requestId}`,
+                    { cache: 'no-store', signal: abortController.signal }
+                );
+                let result = await response.json();
+
+                if (
+                    response.status === 409
+                    && result.code === 'V2_ROUTE_REQUIRED'
+                    && result.pipelineVersion === 'v2'
+                    && typeof result.resultUrl === 'string'
+                    && result.resultUrl.startsWith('/api/analysis/v2/result/')
+                ) {
+                    isV2Request = true;
+                    response = await fetch(`${result.resultUrl}?pageSize=50`, {
+                        cache: 'no-store',
+                        signal: abortController.signal,
+                    });
+                    result = await response.json();
+                }
 
                 if (!response.ok) {
+                    if (isV2Request) {
+                        let progressStatus: OwnerProgressStatus | null = null;
+                        if (response.status === 404) {
+                            const progressResponse = await fetch(
+                                `/api/analysis/progress/${encodeURIComponent(requestId)}?limit=1`,
+                                { cache: 'no-store', signal: abortController.signal }
+                            );
+                            if (progressResponse.ok) {
+                                const progress = await progressResponse.json() as V2ProgressStatusResponse;
+                                progressStatus = progress.snapshot?.status ?? null;
+                            }
+                        }
+                        if (v2ResultFailureAction({
+                            resultStatus: response.status,
+                            progressStatus,
+                        }) === 'show_progress') {
+                            router.replace(`/progress/${requestId}`);
+                            return;
+                        }
+                        throw new Error('V2_RESULT_UNAVAILABLE');
+                    }
                     if (result.status && result.status !== 'completed') {
                         router.push(`/progress/${requestId}`);
                         return;
@@ -163,18 +381,108 @@ export default function ResultPage({ params }: PageProps) {
                     throw new Error(result.error);
                 }
 
-                setData(result);
+                const isV2Result = result.schemaVersion === 1
+                    && result.summary
+                    && 'detectedMutuals' in result.summary;
+                const displayResult = isV2Result
+                    ? mapV2Result(result as AnalysisResultPageV1)
+                    : { ...result, pipelineVersion: 'v1' as const };
+                setData(displayResult);
+                setPageNavigation(initialResultPageNavigation());
+                setPageAction(null);
+                setPageError(null);
+                setError(null);
                 trackEvent(EVENTS.VIEW_RESULT, { femaleCount: result.femaleAccounts?.length });
             } catch (err) {
+                if (err instanceof Error && err.name === 'AbortError') return;
                 console.error('Failed to fetch analysis result:', err);
-                setError('결과를 불러오는데 실패했습니다.');
+                setError('완료된 판독 결과를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요.');
             } finally {
-                setLoading(false);
+                if (!abortController.signal.aborted) setLoading(false);
             }
         };
 
-        fetchResult();
-    }, [requestId, router]);
+        void fetchResult();
+        return () => abortController.abort();
+    }, [requestId, requestedPipeline, resultRetry, router]);
+
+    const handleResultPage = async (
+        kind: ResultAccountKind,
+        direction: ResultPageDirection
+    ) => {
+        if (!data || data.pipelineVersion !== 'v2' || pageAction) return;
+        const navigation = pageNavigation[kind];
+        const cursor = direction === 'next'
+            ? kind === 'public' ? data.femaleNextCursor : data.privateNextCursor
+            : navigation.pageCursors[navigation.pageIndex - 1];
+        if (direction === 'next' && !cursor) return;
+        if (
+            direction === 'previous'
+            && (navigation.pageIndex === 0 || cursor === undefined)
+        ) return;
+
+        const action = { kind, direction } as const;
+        setPageAction(action);
+        setPageError(null);
+        try {
+            const cursorName = kind === 'public' ? 'femaleCursor' : 'privateCursor';
+            const query = new URLSearchParams({ pageSize: String(OWNER_RESULT_PAGE_SIZE) });
+            if (cursor) query.set(cursorName, cursor);
+            const response = await fetch(
+                `/api/analysis/v2/result/${requestId}?${query.toString()}`,
+                { cache: 'no-store' }
+            );
+            if (!response.ok) throw new Error(`V2 result page failed (${response.status}).`);
+            const next = mapV2Result(await response.json() as AnalysisResultPageV1);
+            setData(current => current && current.pipelineVersion === 'v2'
+                ? {
+                    ...current,
+                    femaleAccounts: kind === 'public'
+                        ? next.femaleAccounts
+                        : current.femaleAccounts,
+                    privateAccounts: kind === 'private'
+                        ? next.privateAccounts
+                        : current.privateAccounts,
+                    femaleNextCursor: kind === 'public'
+                        ? next.femaleNextCursor
+                        : current.femaleNextCursor,
+                    privateNextCursor: kind === 'private'
+                        ? next.privateNextCursor
+                        : current.privateNextCursor,
+                }
+                : current);
+            setPageNavigation(current => {
+                const currentNavigation = current[kind];
+                const pageIndex = direction === 'next'
+                    ? currentNavigation.pageIndex + 1
+                    : currentNavigation.pageIndex - 1;
+                const pageCursors = direction === 'next'
+                    ? [
+                        ...currentNavigation.pageCursors.slice(
+                            0,
+                            currentNavigation.pageIndex + 1
+                        ),
+                        cursor!,
+                    ]
+                    : currentNavigation.pageCursors;
+                return {
+                    ...current,
+                    [kind]: { pageIndex, pageCursors },
+                };
+            });
+            window.requestAnimationFrame(() => {
+                const section = kind === 'public'
+                    ? publicSectionRef.current
+                    : privateSectionRef.current;
+                section?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            });
+        } catch (err) {
+            console.error('Failed to load a V2 result page:', err);
+            setPageError(action);
+        } finally {
+            setPageAction(null);
+        }
+    };
 
     const handleShare = async () => {
         trackEvent(EVENTS.CLICK_SHARE_KAKAO);
@@ -240,20 +548,40 @@ export default function ResultPage({ params }: PageProps) {
     if (error || !data) {
         return (
             <div className="flex min-h-dvh flex-col items-center justify-center px-5">
-                <p className="mb-5 text-[14px] text-blood">{error}</p>
-                <button
-                    onClick={() => router.push('/analyze')}
-                    className="border border-line-2 px-5 py-2.5 text-[13px] font-bold text-fg transition-colors hover:border-fg-dim hover:bg-panel"
-                >
-                    다시 시도하기
-                </button>
+                <CaseCard bracket="var(--color-blood)" className="w-full max-w-[400px] p-8 text-center">
+                    <Eyebrow className="justify-center">결과 조회 오류</Eyebrow>
+                    <h1 className="mt-4 text-[21px] font-extrabold tracking-tight text-fg">
+                        판독 결과를 열지 못했습니다
+                    </h1>
+                    <p className="mt-3 text-[13px] leading-relaxed text-fg-dim" role="alert">
+                        {error || '판독 결과를 찾을 수 없습니다.'}
+                    </p>
+                    <div className="mt-7">
+                        <PrimaryButton
+                            onClick={() => {
+                                setLoading(true);
+                                setResultRetry(value => value + 1);
+                            }}
+                        >
+                            결과 다시 불러오기
+                        </PrimaryButton>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => router.push('/analyze')}
+                        className="mt-4 text-[12px] font-medium text-fg-mute transition-colors hover:text-fg"
+                    >
+                        새 판독으로 돌아가기
+                    </button>
+                </CaseCard>
             </div>
         );
     }
 
     const { summary, femaleAccounts, privateAccounts } = data;
     const gr = summary.genderRatio;
-    const highCount = femaleAccounts.filter((a) => a.riskGrade === 'high_risk').length;
+    const highCount = summary.v2?.highRiskCount
+        ?? femaleAccounts.filter((a) => a.riskGrade === 'high_risk').length;
 
     return (
         <div className="min-h-dvh pb-16">
@@ -296,8 +624,8 @@ export default function ResultPage({ params }: PageProps) {
                     </p>
                 )}
 
-                {/* gender breakdown */}
-                <CaseCard className="mt-6 p-5">
+                {/* pipeline-specific summary */}
+                {gr ? <CaseCard className="mt-6 p-5">
                     <div className="mb-4 flex items-center justify-between">
                         <span className="eyebrow">맞팔 계정 성별 분석</span>
                         <span className="num text-[12px] text-fg-dim">맞팔 {summary.mutualFollows}명</span>
@@ -325,13 +653,61 @@ export default function ResultPage({ params }: PageProps) {
                             </div>
                         ))}
                     </div>
-                </CaseCard>
+                </CaseCard> : summary.v2 ? (
+                    <CaseCard className="mt-6 p-5">
+                        <div className="flex items-center justify-between gap-3">
+                            <span className="eyebrow">수집 및 판독 범위</span>
+                            <span className="num text-[11px] uppercase text-fg-dim">{summary.v2.planId}</span>
+                        </div>
+                        <div className="mt-4 grid grid-cols-2 gap-px bg-line">
+                            {[
+                                { label: '팔로워', value: `${summary.v2.followers.collected}/${summary.v2.followers.declared}` },
+                                { label: '팔로잉', value: `${summary.v2.following.collected}/${summary.v2.following.declared}` },
+                                { label: '확인된 맞팔', value: String(summary.mutualFollows) },
+                                { label: '상세 판독', value: String(summary.v2.screenedMutuals) },
+                            ].map(item => (
+                                <div key={item.label} className="bg-ink-2 px-3 py-3">
+                                    <span className="text-[11px] text-fg-mute">{item.label}</span>
+                                    <p className="num mt-1 text-[17px] font-bold text-fg">{item.value}</p>
+                                </div>
+                            ))}
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-fg-dim">
+                            <span>공개 {summary.v2.publicMutuals}명</span>
+                            <span>비공개 {summary.v2.privateMutuals}명</span>
+                            <span>판독 완료 {summary.v2.successfullyScreenedMutuals}명</span>
+                            {summary.v2.notScreenedMutuals > 0 && (
+                                <span>플랜 범위 외 {summary.v2.notScreenedMutuals}명</span>
+                            )}
+                        </div>
+                    </CaseCard>
+                ) : null}
 
                 {/* public / private tabs */}
                 <div className="mt-9 grid grid-cols-2 border border-line bg-ink-2">
                     {([
-                        { key: 'public', label: '공개 계정', count: femaleAccounts.length },
-                        { key: 'private', label: '비공개 계정', count: privateAccounts.length },
+                        {
+                            key: 'public',
+                            label: '공개 계정',
+                            count: data.pipelineVersion === 'v2'
+                                ? paginatedRangeLabel(
+                                    pageNavigation.public.pageIndex,
+                                    femaleAccounts.length,
+                                    Boolean(data.femaleNextCursor)
+                                )
+                                : paginatedCountLabel(femaleAccounts.length, false),
+                        },
+                        {
+                            key: 'private',
+                            label: '비공개 계정',
+                            count: data.pipelineVersion === 'v2'
+                                ? paginatedRangeLabel(
+                                    pageNavigation.private.pageIndex,
+                                    privateAccounts.length,
+                                    Boolean(data.privateNextCursor)
+                                )
+                                : paginatedCountLabel(privateAccounts.length, false),
+                        },
                     ] as const).map((t) => (
                         <button
                             key={t.key}
@@ -347,7 +723,7 @@ export default function ResultPage({ params }: PageProps) {
                 </div>
 
                 {tab === 'public' ? (
-                <section className="mt-5">
+                <section ref={publicSectionRef} className="mt-5 scroll-mt-20">
                     <Eyebrow>위협 등급 순위</Eyebrow>
 
                     {femaleAccounts.length === 0 ? (
@@ -369,7 +745,12 @@ export default function ResultPage({ params }: PageProps) {
                                         <div className="min-w-0 flex-1">
                                             <div className="flex items-center gap-2">
                                                 <span className="num shrink-0 text-[12px] font-bold tracking-widest text-fg-mute">
-                                                    #{String(i + 1).padStart(2, '0')}
+                                                    #{String(
+                                                        pageNavigation.public.pageIndex
+                                                        * OWNER_RESULT_PAGE_SIZE
+                                                        + i
+                                                        + 1
+                                                    ).padStart(2, '0')}
                                                 </span>
                                                 <a
                                                     href={account.instagramUrl}
@@ -395,20 +776,45 @@ export default function ResultPage({ params }: PageProps) {
                                             )}
                                         </div>
                                     </div>
+                                    {account.oneLineOverview && (
+                                        <p className="mt-3 border-t border-line pt-3 text-[12px] leading-relaxed text-fg-dim">
+                                            {account.oneLineOverview}
+                                        </p>
+                                    )}
                                     {account.riskGrade === 'high_risk' && account.riskAnalysis.length > 0 && (
                                         <DeepRiskAnalysis lines={account.riskAnalysis} className="mt-3" />
                                     )}
                                     <div className="mt-3 flex items-center gap-3">
-                                        <ThreatBar grade={account.riskGrade} className="flex-1" />
+                                        <ThreatBar
+                                            grade={account.riskGrade}
+                                            score={account.displayScore}
+                                            className="flex-1"
+                                        />
+                                        {account.displayScore !== undefined && (
+                                            <span className="num shrink-0 text-[12px] font-bold text-fg">
+                                                {account.displayScore.toFixed(1)}/10
+                                            </span>
+                                        )}
                                         <InstaLink url={account.instagramUrl} />
                                     </div>
                                 </CaseCard>
                             ))}
                         </div>
                     )}
+                    {data.pipelineVersion === 'v2' && (
+                        <ResultPaginationControls
+                            kind="public"
+                            label="공개 계정"
+                            pageIndex={pageNavigation.public.pageIndex}
+                            hasNextPage={Boolean(data.femaleNextCursor)}
+                            activeAction={pageAction}
+                            failedAction={pageError}
+                            onPage={handleResultPage}
+                        />
+                    )}
                 </section>
                 ) : (
-                <section className="mt-5">
+                <section ref={privateSectionRef} className="mt-5 scroll-mt-20">
                     <Eyebrow>숨은 위험인물들</Eyebrow>
 
                     {privateAccounts.length === 0 ? (
@@ -447,6 +853,17 @@ export default function ResultPage({ params }: PageProps) {
                             ))}
                         </div>
                     )}
+                    {data.pipelineVersion === 'v2' && (
+                        <ResultPaginationControls
+                            kind="private"
+                            label="비공개 계정"
+                            pageIndex={pageNavigation.private.pageIndex}
+                            hasNextPage={Boolean(data.privateNextCursor)}
+                            activeAction={pageAction}
+                            failedAction={pageError}
+                            onPage={handleResultPage}
+                        />
+                    )}
                     <p className="mt-3 text-[11px] text-fg-mute">
                         비공개 계정은 이름 텍스트의 여성형 가능성 순이며, 이 추정은 틀릴 수 있어요.
                     </p>
@@ -454,7 +871,7 @@ export default function ResultPage({ params }: PageProps) {
                 )}
 
                 {/* share */}
-                <div className="mt-9">
+                {data.pipelineVersion === 'v1' && <div className="mt-9">
                     <PrimaryButton onClick={handleShare} disabled={shareLoading}>
                         {shareLoading ? (
                             <>
@@ -465,7 +882,7 @@ export default function ResultPage({ params }: PageProps) {
                             '리포트 공유하기'
                         )}
                     </PrimaryButton>
-                </div>
+                </div>}
 
                 <p className="mt-5 text-center text-[11px] text-fg-mute">
                     AI 판독 결과는 100% 정확하지 않으며, 참고용으로만 사용해 주세요.

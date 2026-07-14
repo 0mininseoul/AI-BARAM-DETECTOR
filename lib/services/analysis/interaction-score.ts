@@ -1,3 +1,7 @@
+/**
+ * V1 legacy interaction scoring for active requests only. V2 scoring is defined in
+ * `lib/domain/analysis/risk-policy.ts`.
+ */
 export const INTERACTION_SCORE_WEIGHTS = {
     femaleToTargetLikes: 35,
     femaleToTargetComments: 45,

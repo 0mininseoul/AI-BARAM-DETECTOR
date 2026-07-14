@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import sharp from 'sharp';
 import {
+    AnalysisImagePreparationError,
     downloadImageBytes,
     COST_OPTIMIZED_MAX_ANALYSIS_IMAGE_DIMENSION,
     DEFAULT_MAX_ANALYSIS_IMAGE_DIMENSION,
@@ -237,31 +238,48 @@ describe('image preprocessing', () => {
     });
 
     it('rejects declared downloads larger than the byte limit', async () => {
-        const fetchImpl = vi.fn(async () => new Response('too large', {
+        const requestImpl = vi.fn(async () => new Response('too large', {
             status: 200,
             headers: {
                 'content-length': '9',
                 'content-type': 'image/jpeg',
             },
-        })) as unknown as typeof fetch;
+        }));
 
         await expect(downloadImageBytes('https://cdninstagram.com/image.jpg', {
-            fetchImpl,
+            requestImpl,
             resolveHostname: publicResolver,
             maxBytes: 8,
-        })).rejects.toThrow('byte download limit');
+        })).rejects.toMatchObject({
+            reason: 'response_too_large',
+            disposition: 'permanent',
+        });
     });
 
     it('stops streamed downloads that cross the byte limit', async () => {
-        const fetchImpl = vi.fn(async () => new Response(new Uint8Array(9), {
+        const requestImpl = vi.fn(async () => new Response(new Uint8Array(9), {
             status: 200,
             headers: { 'content-type': 'image/jpeg' },
-        })) as unknown as typeof fetch;
+        }));
 
         await expect(downloadImageBytes('https://cdninstagram.com/image.jpg', {
-            fetchImpl,
+            requestImpl,
             resolveHostname: publicResolver,
             maxBytes: 8,
-        })).rejects.toThrow('byte download limit');
+        })).rejects.toMatchObject({
+            reason: 'response_too_large',
+            disposition: 'permanent',
+        });
+    });
+
+    it('classifies corrupt image bytes as a permanent decode failure without source details', async () => {
+        const failure = await normalizeImageToJpeg(Buffer.from('not-an-image'))
+            .catch(error => error);
+        expect(failure).toBeInstanceOf(AnalysisImagePreparationError);
+        expect(failure).toMatchObject({
+            message: 'ANALYSIS_IMAGE_PREPARATION_DECODE_FAILED',
+            reason: 'decode_failed',
+            disposition: 'permanent',
+        });
     });
 });
