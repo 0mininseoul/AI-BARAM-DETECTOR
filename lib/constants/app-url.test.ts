@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
     appOriginForRequest,
+    appRedirectUrlForRequest,
     appOriginForServer,
     CANONICAL_APP_ORIGIN,
 } from './app-url';
@@ -20,6 +21,37 @@ describe('canonical app origin', () => {
             .toBe('http://localhost:3000');
         expect(appOriginForRequest('http://127.0.0.1:3100/api/share/enable'))
             .toBe('http://127.0.0.1:3100');
+    });
+
+    it('resolves safe redirects against the canonical production origin', () => {
+        expect(appRedirectUrlForRequest(
+            'https://preview.example/auth/callback',
+            '/result/request-1?tab=private#account'
+        ).toString()).toBe(
+            `${CANONICAL_APP_ORIGIN}/result/request-1?tab=private#account`
+        );
+    });
+
+    it('preserves the request loopback origin for local redirects', () => {
+        expect(appRedirectUrlForRequest(
+            'http://127.0.0.1:3100/auth/callback',
+            '/result/request-1'
+        ).toString()).toBe('http://127.0.0.1:3100/result/request-1');
+    });
+
+    it.each([
+        'https://attacker.example/path',
+        '//attacker.example/path',
+        '/\\attacker.example/path',
+        '/%5cattacker.example/path',
+        '/%255cattacker.example/path',
+        '/%2f%2fattacker.example/path',
+        '/%252f%252fattacker.example/path',
+    ])('falls back for an unsafe redirect path: %s', rawPath => {
+        expect(appRedirectUrlForRequest(
+            'https://preview.example/auth/callback',
+            rawPath
+        ).toString()).toBe(`${CANONICAL_APP_ORIGIN}/analyze`);
     });
 
     it('uses local configuration only outside production', () => {

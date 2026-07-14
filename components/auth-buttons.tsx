@@ -2,6 +2,10 @@
 
 import { useState } from 'react';
 import { createClient } from '@/lib/supabase/client';
+import {
+    appOriginForRequest,
+    appRedirectUrlForRequest,
+} from '@/lib/constants/app-url';
 
 // Kakao / Google OAuth buttons, shared by the /login page and the login modal.
 // 로그인 버튼만 필요하므로 full useAuth(유저 조회/구독) 대신 supabase를 직접 호출한다.
@@ -12,10 +16,17 @@ export function AuthButtons({ redirectTo = '/analyze' }: { redirectTo?: string }
         setPending(provider);
         try {
             const supabase = createClient();
+            const appOrigin = appOriginForRequest(window.location.href);
+            const nextUrl = appRedirectUrlForRequest(window.location.href, redirectTo);
+            const callbackUrl = new URL('/auth/callback', appOrigin);
+            callbackUrl.searchParams.set(
+                'next',
+                `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`
+            );
             const { error } = await supabase.auth.signInWithOAuth({
                 provider,
                 options: {
-                    redirectTo: `${window.location.origin}/auth/callback?next=${redirectTo}`,
+                    redirectTo: callbackUrl.toString(),
                 },
             });
             if (error) {

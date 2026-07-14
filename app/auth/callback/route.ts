@@ -1,21 +1,19 @@
 import { createServerClient } from '@supabase/ssr';
 import { cookies } from 'next/headers';
 import { NextResponse } from 'next/server';
+import {
+    appOriginForRequest,
+    appRedirectUrlForRequest,
+} from '@/lib/constants/app-url';
 
 export async function GET(request: Request) {
-    const { searchParams, origin } = new URL(request.url);
+    const { searchParams } = new URL(request.url);
     const code = searchParams.get('code');
-    // 오픈 리다이렉트 방지: 내부 절대경로('/...')만 허용, 프로토콜-상대('//')·절대 URL 차단
-    const rawNext = searchParams.get('next') ?? '/analyze';
-    const next = rawNext.startsWith('/') && !rawNext.startsWith('//') ? rawNext : '/analyze';
-
-    // 리다이렉트 URL 계산
-    const forwardedHost = request.headers.get('x-forwarded-host');
-    const baseUrl = forwardedHost ? `https://${forwardedHost}` : origin;
+    const appOrigin = appOriginForRequest(request.url);
 
     if (!code) {
         console.error('Auth callback: No code provided');
-        return NextResponse.redirect(`${baseUrl}/login?error=no_code`);
+        return NextResponse.redirect(new URL('/login?error=no_code', appOrigin));
     }
 
     const cookieStore = await cookies();
@@ -43,13 +41,15 @@ export async function GET(request: Request) {
 
     if (error) {
         console.error('Auth callback error:', error);
-        return NextResponse.redirect(`${baseUrl}/login?error=${encodeURIComponent(error.message)}`);
+        const loginUrl = new URL('/login', appOrigin);
+        loginUrl.searchParams.set('error', error.message);
+        return NextResponse.redirect(loginUrl);
     }
 
     // 세션 검증을 통해 쿠키 설정 강제 (setAll 트리거)
     await supabase.auth.getUser();
 
-    const redirectUrl = new URL(next, baseUrl);
+    const redirectUrl = appRedirectUrlForRequest(request.url, searchParams.get('next'));
     redirectUrl.searchParams.set('verified', 'true');
 
     return NextResponse.redirect(redirectUrl);
