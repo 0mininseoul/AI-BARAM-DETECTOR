@@ -456,6 +456,9 @@ export default function LandingPage() {
               개인정보처리방침
             </Link>
           </div>
+          <p className="num mt-5 text-[11px] leading-relaxed text-fg-mute">
+            상호: Ascentum · 사업자등록번호: 478-59-01063
+          </p>
         </footer>
       </main>
 
