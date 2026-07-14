@@ -28,4 +28,16 @@ describe('V1 route isolation from durable V2 requests', () => {
         expect(cleanupBlock).toContain('abortRunningAnalysisProviderRuns');
         expect(cleanupBlock).toContain('failAnalysisRequest');
     });
+
+    it('makes both shared pages follow an explicit V2 route marker', () => {
+        const progressHook = source('hooks/useAnalysisProgress.ts');
+        const progressPage = source('app/progress/[requestId]/page.tsx');
+        const resultPage = source('app/result/[requestId]/page.tsx');
+
+        expect(progressHook).toContain("payload.code === 'V2_ROUTE_REQUIRED'");
+        expect(progressHook).toContain("payload.progressUrl.startsWith('/api/analysis/progress/')");
+        expect(progressPage).toContain("data.pipelineVersion === 'v2'");
+        expect(resultPage).toContain("result.code === 'V2_ROUTE_REQUIRED'");
+        expect(resultPage).toContain("result.resultUrl.startsWith('/api/analysis/v2/result/')");
+    });
 });

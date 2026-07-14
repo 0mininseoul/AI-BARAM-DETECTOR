@@ -1,0 +1,123 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const mocks = vi.hoisted(() => ({
+    createClient: vi.fn(),
+    getUser: vi.fn(),
+    from: vi.fn(),
+    expireStale: vi.fn(),
+}));
+
+vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
+vi.mock('@/lib/supabase/admin', () => ({
+    supabaseAdmin: { from: mocks.from },
+}));
+vi.mock('@/lib/services/analysis/start-cleanup', () => ({
+    expireStaleAnalysisBeforeStart: mocks.expireStale,
+}));
+vi.mock('@/lib/services/analysis/failure', () => ({
+    failAnalysisRequest: vi.fn(),
+    isAnalysisRequestStale: vi.fn(() => true),
+}));
+vi.mock('@/lib/services/analysis/provider-run', () => ({
+    abortRunningAnalysisProviderRuns: vi.fn(),
+}));
+vi.mock('@/lib/services/analysis/request-lease', () => ({
+    ANALYSIS_STEP_LEASE_SECONDS: 60,
+    acquireAnalysisRequestLease: vi.fn(),
+    releaseAnalysisRequestLease: vi.fn(),
+}));
+
+import { GET as getLegacyStatus } from '@/app/api/analysis/status/[requestId]/route';
+import { GET as getLegacyResult } from '@/app/api/analysis/result/[requestId]/route';
+
+const requestId = '123e4567-e89b-42d3-a456-426614174000';
+const userId = '223e4567-e89b-42d3-a456-426614174000';
+
+function context() {
+    return { params: Promise.resolve({ requestId }) };
+}
+
+function ownerQuery(row: Record<string, unknown>) {
+    const query = {
+        select: vi.fn(),
+        eq: vi.fn(),
+        maybeSingle: vi.fn(async () => ({ data: row, error: null })),
+        single: vi.fn(async () => ({ data: row, error: null })),
+    };
+    query.select.mockReturnValue(query);
+    query.eq.mockReturnValue(query);
+    return query;
+}
+
+describe('owner-facing V1/V2 route selection', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        mocks.createClient.mockResolvedValue({ auth: { getUser: mocks.getUser } });
+        mocks.getUser.mockResolvedValue({
+            data: { user: { id: userId } },
+            error: null,
+        });
+    });
+
+    it('routes an owned V2 request from legacy status to the durable progress endpoint', async () => {
+        mocks.from.mockReturnValue(ownerQuery({
+            id: requestId,
+            user_id: userId,
+            pipeline_version: 'v2',
+            status: 'processing',
+            current_step: 'profile_screening',
+            progress: 0,
+            progress_step: 'V2 analysis queued',
+            error_message: null,
+            background_processing: true,
+            created_at: '2026-07-14T00:00:00.000Z',
+            completed_at: null,
+            idempotency_key: 'test-key',
+        }));
+
+        const response = await getLegacyStatus(
+            new Request(`https://example.com/api/analysis/status/${requestId}`),
+            context()
+        );
+
+        expect(response.status).toBe(409);
+        expect(response.headers.get('cache-control')).toBe('private, no-store, max-age=0');
+        await expect(response.json()).resolves.toEqual({
+            error: 'V2 분석은 전용 진행 경로를 사용합니다.',
+            code: 'V2_ROUTE_REQUIRED',
+            pipelineVersion: 'v2',
+            progressUrl: `/api/analysis/progress/${requestId}`,
+        });
+        expect(mocks.expireStale).not.toHaveBeenCalled();
+    });
+
+    it('routes an owned V2 request before touching any legacy result table', async () => {
+        mocks.from.mockReturnValue(ownerQuery({
+            id: requestId,
+            user_id: userId,
+            pipeline_version: 'v2',
+            target_instagram_id: 'target',
+            status: 'completed',
+            progress: 100,
+            mutual_follows: 10,
+            gender_stats: null,
+            step_data: null,
+        }));
+
+        const response = await getLegacyResult(
+            new Request(`https://example.com/api/analysis/result/${requestId}`),
+            context()
+        );
+
+        expect(response.status).toBe(409);
+        expect(response.headers.get('cache-control')).toBe('private, no-store, max-age=0');
+        await expect(response.json()).resolves.toEqual({
+            error: 'V2 분석은 전용 결과 경로를 사용합니다.',
+            code: 'V2_ROUTE_REQUIRED',
+            pipelineVersion: 'v2',
+            resultUrl: `/api/analysis/v2/result/${requestId}`,
+        });
+        expect(mocks.from).toHaveBeenCalledOnce();
+        expect(mocks.from).toHaveBeenCalledWith('analysis_requests');
+    });
+});

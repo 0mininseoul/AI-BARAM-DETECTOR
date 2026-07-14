@@ -238,22 +238,20 @@ export async function POST(
 
         let analysisTasksConfig;
         let preflightTasksConfig;
-        try {
-            analysisTasksConfig = getAnalysisV2TasksConfig();
-            preflightTasksConfig = validatedPreflight.state === 'ready'
-                ? getPreflightTasksConfig()
-                : null;
-            if (!analysisTasksConfig || (
-                validatedPreflight.state === 'ready' && !preflightTasksConfig
-            )) {
-                throw new Error('queue disabled');
+        if (validatedPreflight.state === 'ready') {
+            try {
+                analysisTasksConfig = getAnalysisV2TasksConfig();
+                preflightTasksConfig = getPreflightTasksConfig();
+                if (!analysisTasksConfig || !preflightTasksConfig) {
+                    throw new Error('queue disabled');
+                }
+            } catch {
+                console.error('Analysis V2 task queue configuration is unavailable.');
+                return NextResponse.json(
+                    { error: '분석 작업 큐를 사용할 수 없습니다.', code: 'QUEUE_UNAVAILABLE' },
+                    { status: 503 }
+                );
             }
-        } catch {
-            console.error('Analysis V2 task queue configuration is unavailable.');
-            return NextResponse.json(
-                { error: '분석 작업 큐를 사용할 수 없습니다.', code: 'QUEUE_UNAVAILABLE' },
-                { status: 503 }
-            );
         }
 
         let admissionToken: string | null = null;

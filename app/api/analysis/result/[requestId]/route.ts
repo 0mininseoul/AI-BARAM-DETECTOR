@@ -33,7 +33,7 @@ export async function GET(
         // 2. 분석 요청 조회
         const { data: analysisRequest, error: requestError } = await supabaseAdmin
             .from('analysis_requests')
-            .select('id, user_id, target_instagram_id, status, progress, mutual_follows, gender_stats, step_data')
+            .select('id, user_id, pipeline_version, target_instagram_id, status, progress, mutual_follows, gender_stats, step_data')
             .eq('id', requestId)
             .eq('user_id', user.id)
             .single();
@@ -43,6 +43,21 @@ export async function GET(
                 { error: '분석 요청을 찾을 수 없습니다.' },
                 { status: 404 }
             );
+        }
+
+        if (analysisRequest.pipeline_version === 'v2') {
+            return NextResponse.json({
+                error: 'V2 분석은 전용 결과 경로를 사용합니다.',
+                code: 'V2_ROUTE_REQUIRED',
+                pipelineVersion: 'v2',
+                resultUrl: `/api/analysis/v2/result/${encodeURIComponent(analysisRequest.id)}`,
+            }, {
+                status: 409,
+                headers: {
+                    'Cache-Control': 'private, no-store, max-age=0',
+                    Vary: 'Cookie',
+                },
+            });
         }
 
         // 3. 분석이 완료되지 않은 경우

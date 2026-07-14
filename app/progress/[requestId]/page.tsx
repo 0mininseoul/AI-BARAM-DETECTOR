@@ -204,9 +204,10 @@ export default function ProgressPage({ params }: PageProps) {
     // 완료되면 결과 페이지로 이동
     useEffect(() => {
         if (data?.status === 'completed') {
-            router.push(`/result/${requestId}`);
+            const pipeline = data.pipelineVersion === 'v2' ? '?pipeline=v2' : '';
+            router.push(`/result/${requestId}${pipeline}`);
         }
-    }, [data?.status, requestId, router]);
+    }, [data?.pipelineVersion, data?.status, requestId, router]);
 
     const handleLogout = async () => {
         try {

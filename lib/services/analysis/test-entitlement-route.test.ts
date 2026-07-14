@@ -433,9 +433,43 @@ describe('analysis V2 durable test-entitlement route', () => {
 
         expect(response.status).toBe(200);
         expect(mocks.getPreflightTasksConfig).not.toHaveBeenCalled();
+        expect(mocks.getTasksConfig).not.toHaveBeenCalled();
         expect(mocks.rpc).toHaveBeenCalledOnce();
         expect(mocks.rpc.mock.calls[0][1].p_admission_token).toBeNull();
         expect(mocks.dispatchJob).toHaveBeenCalledOnce();
+    });
+
+    it('replays a terminal consumed request without requiring either queue configuration', async () => {
+        mocks.admissionAvailable.mockReturnValue(false);
+        mocks.getTasksConfig.mockReturnValue(null);
+        mocks.getPreflightTasksConfig.mockReturnValue(null);
+        installPreflightQuery(preflightRow({
+            status: 'consumed',
+            expires_at: new Date(Date.now() - 60_000).toISOString(),
+            consumed_request_id: REQUEST_ID,
+        }));
+        mocks.rpc.mockResolvedValueOnce({
+            data: consumedResult({
+                created: false,
+                request_status: 'completed',
+                background_processing: false,
+            }),
+            error: null,
+        });
+
+        const response = await POST(request(), context());
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({
+            schemaVersion: 1,
+            requestId: REQUEST_ID,
+            status: 'completed',
+            backgroundProcessing: false,
+        });
+        expect(mocks.getTasksConfig).not.toHaveBeenCalled();
+        expect(mocks.getPreflightTasksConfig).not.toHaveBeenCalled();
+        expect(mocks.rpc).toHaveBeenCalledOnce();
+        expect(mocks.dispatchJob).not.toHaveBeenCalled();
     });
 
     it('blocks a new ready admission when its dedicated kill switch is off', async () => {

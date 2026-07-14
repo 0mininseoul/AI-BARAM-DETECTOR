@@ -19,6 +19,11 @@ function isV1Pipeline(value: unknown): boolean {
     return value === null || value === 'v1';
 }
 
+const PRIVATE_NO_STORE_HEADERS = {
+    'Cache-Control': 'private, no-store, max-age=0',
+    Vary: 'Cookie',
+} as const;
+
 export async function GET(
     request: Request,
     { params }: { params: Promise<{ requestId: string }> }
@@ -52,6 +57,18 @@ export async function GET(
             );
         }
         let analysisRequest = initialStatus.data;
+
+        if (!isV1Pipeline(analysisRequest.pipeline_version)) {
+            return NextResponse.json({
+                error: 'V2 분석은 전용 진행 경로를 사용합니다.',
+                code: 'V2_ROUTE_REQUIRED',
+                pipelineVersion: 'v2',
+                progressUrl: `/api/analysis/progress/${encodeURIComponent(analysisRequest.id)}`,
+            }, {
+                status: 409,
+                headers: PRIVATE_NO_STORE_HEADERS,
+            });
+        }
 
         if (
             isV1Pipeline(analysisRequest.pipeline_version)
@@ -100,6 +117,7 @@ export async function GET(
 
         return NextResponse.json({
             requestId: analysisRequest.id,
+            pipelineVersion: 'v1',
             status: analysisRequest.status,
             progress: analysisRequest.progress,
             progressStep: analysisRequest.progress_step,
@@ -109,7 +127,7 @@ export async function GET(
             completedAt: analysisRequest.completed_at,
             // Keep the response field stable until a telemetry-based estimate is available.
             estimatedCompletionTime: null,
-        });
+        }, { headers: PRIVATE_NO_STORE_HEADERS });
     } catch (error) {
         console.error('Status check error:', error);
         return NextResponse.json(
