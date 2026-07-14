@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { PrimaryButton } from '@/components/case-ui';
 import { isAnalysisDeletable } from '@/lib/services/analysis/deletion';
+import { analysisPlanBadgePresentation } from '@/lib/services/analysis/owner-view-presentation';
 
 interface AnalysisRequest {
     id: string;
@@ -70,68 +71,67 @@ export default function AnalysisList({ initialAnalyses }: Props) {
 
     return (
         <div className="space-y-2.5">
-            {analyses.map((item) => (
-                <div
-                    key={item.id}
-                    onClick={() => handleCardClick(item.id, item.status)}
-                    className="group relative cursor-pointer border border-line bg-ink-2 p-4 transition-colors hover:border-blood/50 active:scale-[0.99]"
-                >
-                    <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                            <div className="flex items-center gap-2">
-                                <h3 className="truncate text-[15px] font-bold text-fg">@{item.target_instagram_id}</h3>
-                                <span
-                                    className={`shrink-0 border px-1.5 py-0.5 text-[10px] font-bold tracking-[0.1em] ${
-                                        item.plan_type === 'standard'
-                                            ? 'border-blood/40 bg-blood/10 text-blood'
-                                            : 'border-line-2 text-fg-mute'
-                                    }`}
-                                >
-                                    {item.plan_type === 'standard' ? 'STANDARD' : 'BASIC'}
+            {analyses.map((item) => {
+                const planBadge = analysisPlanBadgePresentation(item.plan_type);
+                return (
+                    <div
+                        key={item.id}
+                        onClick={() => handleCardClick(item.id, item.status)}
+                        className="group relative cursor-pointer border border-line bg-ink-2 p-4 transition-colors hover:border-blood/50 active:scale-[0.99]"
+                    >
+                        <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                                <div className="flex items-center gap-2">
+                                    <h3 className="truncate text-[15px] font-bold text-fg">@{item.target_instagram_id}</h3>
+                                    <span
+                                        className={`shrink-0 border px-1.5 py-0.5 text-[10px] font-bold tracking-[0.1em] ${planBadge.className}`}
+                                    >
+                                        {planBadge.label}
+                                    </span>
+                                </div>
+                                <div className="num mt-1.5 text-[12px] text-fg-mute">
+                                    {new Date(item.created_at).toLocaleDateString()}{' '}
+                                    {new Date(item.created_at).toLocaleTimeString()}
+                                </div>
+                            </div>
+
+                            {item.status === 'completed' ? (
+                                <span className="flex shrink-0 items-center gap-1.5 border border-jade/45 bg-jade/10 px-2 py-1 text-[11px] font-bold text-jade">
+                                    <span className="h-1.5 w-1.5 bg-jade" />
+                                    판독완료
                                 </span>
-                            </div>
-                            <div className="num mt-1.5 text-[12px] text-fg-mute">
-                                {new Date(item.created_at).toLocaleDateString()}{' '}
-                                {new Date(item.created_at).toLocaleTimeString()}
-                            </div>
+                            ) : item.status === 'failed' ? (
+                                <span className="flex shrink-0 items-center gap-1.5 border border-blood/45 bg-blood/10 px-2 py-1 text-[11px] font-bold text-blood">
+                                    <span className="h-1.5 w-1.5 bg-blood" />
+                                    판독실패
+                                </span>
+                            ) : (
+                                <span className="flex shrink-0 items-center gap-1.5 border border-amber/45 bg-amber/10 px-2 py-1 text-[11px] font-bold text-amber">
+                                    <span className="anim-blink h-1.5 w-1.5 bg-amber" />
+                                    {item.status === 'processing' ? '판독중' : '대기중'}
+                                </span>
+                            )}
                         </div>
 
-                        {item.status === 'completed' ? (
-                            <span className="flex shrink-0 items-center gap-1.5 border border-jade/45 bg-jade/10 px-2 py-1 text-[11px] font-bold text-jade">
-                                <span className="h-1.5 w-1.5 bg-jade" />
-                                판독완료
-                            </span>
-                        ) : item.status === 'failed' ? (
-                            <span className="flex shrink-0 items-center gap-1.5 border border-blood/45 bg-blood/10 px-2 py-1 text-[11px] font-bold text-blood">
-                                <span className="h-1.5 w-1.5 bg-blood" />
-                                판독실패
-                            </span>
-                        ) : (
-                            <span className="flex shrink-0 items-center gap-1.5 border border-amber/45 bg-amber/10 px-2 py-1 text-[11px] font-bold text-amber">
-                                <span className="anim-blink h-1.5 w-1.5 bg-amber" />
-                                {item.status === 'processing' ? '판독중' : '대기중'}
-                            </span>
+                        {isAnalysisDeletable(item.status) && (
+                            <button
+                                onClick={(e) => handleDelete(e, item.id)}
+                                disabled={loadingId === item.id}
+                                className="absolute bottom-3 right-3 p-2 text-fg-mute opacity-100 transition-colors hover:text-blood sm:opacity-0 sm:group-hover:opacity-100"
+                                title="기록 삭제"
+                            >
+                                {loadingId === item.id ? (
+                                    <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-fg-mute border-t-transparent" />
+                                ) : (
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-[18px] w-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                    </svg>
+                                )}
+                            </button>
                         )}
                     </div>
-
-                    {isAnalysisDeletable(item.status) && (
-                        <button
-                            onClick={(e) => handleDelete(e, item.id)}
-                            disabled={loadingId === item.id}
-                            className="absolute bottom-3 right-3 p-2 text-fg-mute opacity-100 transition-colors hover:text-blood sm:opacity-0 sm:group-hover:opacity-100"
-                            title="기록 삭제"
-                        >
-                            {loadingId === item.id ? (
-                                <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-fg-mute border-t-transparent" />
-                            ) : (
-                                <svg xmlns="http://www.w3.org/2000/svg" className="h-[18px] w-[18px]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                </svg>
-                            )}
-                        </button>
-                    )}
-                </div>
-            ))}
+                );
+            })}
         </div>
     );
 }

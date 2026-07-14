@@ -1,3 +1,5 @@
+import { PLAN_IDS, type PlanId } from '@/lib/domain/analysis/plan-catalog';
+
 export type OwnerProgressStatus =
     | 'queued'
     | 'processing'
@@ -70,6 +72,82 @@ export function analysisV2ProgressCopy(input: OwnerProgressPresentationInput): s
 export function paginatedCountLabel(loadedCount: number, hasNextPage: boolean): string {
     if (!Number.isSafeInteger(loadedCount) || loadedCount < 0) return '0';
     return `${loadedCount}${hasNextPage ? '+' : ''}`;
+}
+
+export const OWNER_RESULT_PAGE_SIZE = 50;
+
+export function boundedOwnerResultPage<T>(items: readonly T[]): T[] {
+    return items.slice(0, OWNER_RESULT_PAGE_SIZE);
+}
+
+export function paginatedRangeLabel(
+    pageIndex: number,
+    visibleCount: number,
+    hasNextPage: boolean
+): string {
+    if (
+        !Number.isSafeInteger(pageIndex)
+        || pageIndex < 0
+        || !Number.isSafeInteger(visibleCount)
+        || visibleCount <= 0
+        || visibleCount > OWNER_RESULT_PAGE_SIZE
+    ) {
+        return '0';
+    }
+    const first = pageIndex * OWNER_RESULT_PAGE_SIZE + 1;
+    const last = first + visibleCount - 1;
+    return `${first}-${last}${hasNextPage ? '+' : ''}`;
+}
+
+type OwnerRiskGrade = 'high_risk' | 'caution' | 'normal';
+
+const GRADE_FILL_RATIOS: Readonly<Record<OwnerRiskGrade, number>> = {
+    high_risk: 12 / 14,
+    caution: 8 / 14,
+    normal: 4 / 14,
+};
+
+export function threatMeterFillCount(input: {
+    grade: OwnerRiskGrade;
+    displayScore?: number;
+    segments: number;
+}): number {
+    if (!Number.isSafeInteger(input.segments) || input.segments < 1) return 0;
+    const ratio = typeof input.displayScore === 'number' && Number.isFinite(input.displayScore)
+        ? Math.min(10, Math.max(1, input.displayScore)) / 10
+        : GRADE_FILL_RATIOS[input.grade];
+    return Math.min(input.segments, Math.max(1, Math.round(ratio * input.segments)));
+}
+
+export interface AnalysisPlanBadgePresentation {
+    planId: PlanId;
+    label: string;
+    className: string;
+}
+
+const PLAN_BADGES = {
+    basic: {
+        planId: 'basic',
+        label: 'BASIC',
+        className: 'border-line-2 text-fg-mute',
+    },
+    standard: {
+        planId: 'standard',
+        label: 'STANDARD',
+        className: 'border-blood/40 bg-blood/10 text-blood',
+    },
+    plus: {
+        planId: 'plus',
+        label: 'PLUS',
+        className: 'border-amber/50 bg-amber/10 text-amber',
+    },
+} as const satisfies Readonly<Record<PlanId, AnalysisPlanBadgePresentation>>;
+
+export function analysisPlanBadgePresentation(
+    rawPlanId: string | null | undefined
+): AnalysisPlanBadgePresentation {
+    const planId = PLAN_IDS.find(candidate => candidate === rawPlanId) ?? 'basic';
+    return PLAN_BADGES[planId];
 }
 
 export type V2ResultFailureAction = 'show_error' | 'show_progress';

@@ -44,6 +44,9 @@ describe('V1 route isolation from durable V2 requests', () => {
         expect(resultPage).toContain("result.resultUrl.startsWith('/api/analysis/v2/result/')");
         expect(resultPage).toContain('v2ResultFailureAction({');
         expect(resultPage).toContain('paginatedCountLabel(');
-        expect(resultPage).toContain('setLoadMoreError(kind)');
+        expect(resultPage).toContain('boundedOwnerResultPage(result.femaleAccounts)');
+        expect(resultPage).toContain('? next.femaleAccounts');
+        expect(resultPage).toContain('setPageError(action)');
+        expect(resultPage).not.toContain('appendUniqueAccounts');
     });
 });

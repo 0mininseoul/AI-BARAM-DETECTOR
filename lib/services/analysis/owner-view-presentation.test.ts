@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+    analysisPlanBadgePresentation,
     analysisV2ProgressCopy,
+    boundedOwnerResultPage,
     paginatedCountLabel,
+    paginatedRangeLabel,
+    threatMeterFillCount,
     v2ResultFailureAction,
 } from './owner-view-presentation';
 
@@ -44,6 +48,35 @@ describe('owner view presentation behavior', () => {
     it('marks incomplete paginated counts and becomes exact on the final page', () => {
         expect(paginatedCountLabel(50, true)).toBe('50+');
         expect(paginatedCountLabel(73, false)).toBe('73');
+    });
+
+    it('labels the current bounded result page without accumulating prior rows', () => {
+        expect(boundedOwnerResultPage(Array.from({ length: 900 }, (_, index) => index)))
+            .toHaveLength(50);
+        expect(paginatedRangeLabel(0, 50, true)).toBe('1-50+');
+        expect(paginatedRangeLabel(1, 50, true)).toBe('51-100+');
+        expect(paginatedRangeLabel(2, 23, false)).toBe('101-123');
+    });
+
+    it('derives the threat meter from the actual 1-10 score', () => {
+        expect(threatMeterFillCount({ grade: 'normal', displayScore: 1, segments: 14 })).toBe(1);
+        expect(threatMeterFillCount({ grade: 'caution', displayScore: 4.2, segments: 14 })).toBe(6);
+        expect(threatMeterFillCount({ grade: 'high_risk', displayScore: 6.8, segments: 14 })).toBe(10);
+        expect(threatMeterFillCount({ grade: 'high_risk', displayScore: 10, segments: 14 })).toBe(14);
+        expect(threatMeterFillCount({ grade: 'caution', segments: 14 })).toBe(8);
+    });
+
+    it('presents every supported plan explicitly and keeps legacy null rows basic', () => {
+        expect(analysisPlanBadgePresentation('basic')).toMatchObject({
+            planId: 'basic', label: 'BASIC',
+        });
+        expect(analysisPlanBadgePresentation('standard')).toMatchObject({
+            planId: 'standard', label: 'STANDARD',
+        });
+        expect(analysisPlanBadgePresentation('plus')).toMatchObject({
+            planId: 'plus', label: 'PLUS',
+        });
+        expect(analysisPlanBadgePresentation(null).planId).toBe('basic');
     });
 
     it('redirects only a 404 with a durable progress view and never redirects server failures', () => {
