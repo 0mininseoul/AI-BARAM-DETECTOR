@@ -240,12 +240,55 @@ export default function LandingPage() {
             </p>
           </motion.div>
 
+          {/* input + submit — 서브카피 바로 아래(액션 우선). 도감 카드는 그 아래에서 결과 미리보기 */}
+          <div className="mt-7 space-y-2.5">
+            <div className="relative">
+              <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-fg-dim">@</span>
+              <input
+                id="ig-hero"
+                ref={inputRef}
+                type="text"
+                value={igId}
+                onChange={(e) => {
+                  setIgId(e.target.value);
+                  if (heroError) setHeroError(null);
+                }}
+                onKeyDown={(e) => e.key === 'Enter' && !starting && handleStart()}
+                placeholder="남자친구 인스타그램 아이디"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                aria-label="남자친구 인스타그램 아이디"
+                className="w-full border border-line bg-ink-2 py-4 pl-9 pr-4 text-[15px] text-fg placeholder-fg-mute transition-colors focus:border-blood focus:outline-none"
+              />
+            </div>
+            {heroError && <p className="px-1 text-[12px] text-blood">{heroError}</p>}
+            <PrimaryButton onClick={handleStart} size="lg" disabled={starting}>
+              {starting ? (
+                <>
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                  판독 요청 중…
+                </>
+              ) : (
+                <>
+                  지금 바로 위장여사친 판독하기
+                  <span aria-hidden className="transition-transform group-hover:translate-x-0.5">
+                    →
+                  </span>
+                </>
+              )}
+            </PrimaryButton>
+            <p className="text-center text-[12px] text-fg-mute">
+              판독 결과는 상대방에게 절대 통보되지 않습니다.
+            </p>
+          </div>
+
           {/* signature: live dossier readout */}
           <motion.div
             initial={reduce ? false : { opacity: 0, scale: 0.98 }}
             animate={{ opacity: 1, scale: 1 }}
             transition={{ delay: reduce ? 0 : 0.25, duration: 0.5, ease: EASE }}
-            className="mt-8"
+            className="mt-10"
           >
             <CaseCard bracket="var(--color-blood)" className="overflow-hidden">
               {/* scanning line */}
@@ -293,51 +336,6 @@ export default function LandingPage() {
               </div>
             </CaseCard>
           </motion.div>
-
-          {/* input + submit */}
-          <div className="mt-8 space-y-2.5">
-            <label htmlFor="ig-hero" className="block text-[15px] font-bold text-fg">
-              지금 바로 위장여사친 판독하기
-            </label>
-            <div className="relative">
-              <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-fg-dim">@</span>
-              <input
-                id="ig-hero"
-                ref={inputRef}
-                type="text"
-                value={igId}
-                onChange={(e) => {
-                  setIgId(e.target.value);
-                  if (heroError) setHeroError(null);
-                }}
-                onKeyDown={(e) => e.key === 'Enter' && !starting && handleStart()}
-                placeholder="남자친구 인스타그램 아이디"
-                autoCapitalize="none"
-                autoCorrect="off"
-                spellCheck={false}
-                aria-label="남자친구 인스타그램 아이디"
-                className="w-full border border-line bg-ink-2 py-4 pl-9 pr-16 text-[15px] text-fg placeholder-fg-mute transition-colors focus:border-blood focus:outline-none"
-              />
-              <button
-                onClick={handleStart}
-                disabled={starting}
-                aria-label="판독하기"
-                className="absolute right-1.5 top-1/2 flex h-11 w-11 -translate-y-1/2 items-center justify-center bg-blood text-white transition-colors hover:bg-blood-2 disabled:bg-panel disabled:text-fg-mute"
-              >
-                {starting ? (
-                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                ) : (
-                  <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M5 12h13M12 5.5 18.5 12 12 18.5" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                )}
-              </button>
-            </div>
-            {heroError && <p className="px-1 text-[12px] text-blood">{heroError}</p>}
-            <p className="text-center text-[12px] text-fg-mute">
-              판독 결과는 상대방에게 절대 통보되지 않습니다.
-            </p>
-          </div>
         </section>
 
         {/* ---------- assurance strip ---------- */}
