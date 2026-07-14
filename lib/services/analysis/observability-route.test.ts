@@ -151,8 +151,13 @@ function installQueryMocks() {
 }
 
 describe('analysis observability admin route', () => {
+    let errorSpy: ReturnType<typeof vi.spyOn>;
+    let warnSpy: ReturnType<typeof vi.spyOn>;
+
     beforeEach(() => {
         vi.clearAllMocks();
+        errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
         mocks.reconcileProviderCosts.mockResolvedValue({
             eligible: 0,
             finalized: 0,
@@ -164,6 +169,8 @@ describe('analysis observability admin route', () => {
     });
 
     afterEach(() => {
+        errorSpy.mockRestore();
+        warnSpy.mockRestore();
         delete process.env.ADMIN_API_KEY;
     });
 
@@ -239,6 +246,72 @@ describe('analysis observability admin route', () => {
         expect(mocks.reconcileProviderCosts).toHaveBeenCalledWith(
             expect.anything(),
             requestId
+        );
+    });
+
+    it('correlates pending provider-cost warnings with the safe request ID', async () => {
+        installQueryMocks();
+        mocks.reconcileProviderCosts.mockResolvedValue({
+            eligible: 3,
+            finalized: 1,
+            failed: 1,
+            hasMore: true,
+        });
+
+        const response = await GET(request());
+
+        expect(response.status).toBe(200);
+        expect(warnSpy).toHaveBeenCalledWith(
+            '[analysis.observability] provider costs remain pending',
+            {
+                requestId,
+                eligible: 3,
+                failed: 1,
+                hasMore: true,
+            }
+        );
+    });
+
+    it('logs only a correlated sanitized error when the V2 RPC fails', async () => {
+        mocks.rpc.mockResolvedValue({
+            data: null,
+            error: { message: 'database host and credential details' },
+        });
+
+        const response = await GET(request());
+
+        expect(response.status).toBe(500);
+        expect(errorSpy).toHaveBeenCalledWith(
+            '[analysis.observability] admin query failed',
+            {
+                requestId,
+                errorCode: 'ANALYSIS_V2_OBSERVABILITY_PERSISTENCE_ERROR',
+                failureCategory: 'persistence',
+            }
+        );
+        expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(
+            'database host and credential details'
+        );
+    });
+
+    it('does not treat an arbitrary uppercase error message as a safe error code', async () => {
+        mocks.reconcileProviderCosts.mockRejectedValue(
+            new Error('SUPER_SECRET_TOKEN_VALUE')
+        );
+
+        const response = await GET(request());
+
+        expect(response.status).toBe(500);
+        expect(errorSpy).toHaveBeenCalledWith(
+            '[analysis.observability] admin query failed',
+            {
+                requestId,
+                errorCode: 'OBSERVABILITY_QUERY_FAILED',
+                failureCategory: 'unknown',
+            }
+        );
+        expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(
+            'SUPER_SECRET_TOKEN_VALUE'
         );
     });
 

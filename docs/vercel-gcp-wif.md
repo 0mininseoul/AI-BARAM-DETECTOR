@@ -88,12 +88,31 @@ Vercel Production에는 다음 값을 설정한다.
 
 ```dotenv
 ANALYSIS_V2_ADMISSION_ENABLED=false
+ANALYSIS_V2_TASKS_ENABLED=true
+ANALYSIS_V2_TASKS_PROJECT=PROJECT_ID
+ANALYSIS_V2_TASKS_LOCATION=asia-northeast3
+ANALYSIS_V2_TASKS_QUEUE=analysis-v2-pipeline
+ANALYSIS_V2_TASKS_TARGET_URL=https://analysis-worker.example.com/api/analysis/v2/worker
+ANALYSIS_V2_TASKS_OIDC_AUDIENCE=https://analysis-worker.example.com
+ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL=analysis-v2-task@PROJECT_ID.iam.gserviceaccount.com
 ANALYSIS_V2_TASKS_CALLER_AUTH_MODE=vercel-wif
+PREFLIGHT_TASKS_ENABLED=true
+PREFLIGHT_TASKS_PROJECT=PROJECT_ID
+PREFLIGHT_TASKS_LOCATION=asia-northeast3
+PREFLIGHT_TASKS_QUEUE=analysis-preflight
+PREFLIGHT_TASKS_TARGET_URL=https://analysis-worker.example.com/api/analysis/preflight/worker
+PREFLIGHT_TASKS_OIDC_AUDIENCE=https://analysis-worker.example.com
+PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL=analysis-v2-task@PROJECT_ID.iam.gserviceaccount.com
 PREFLIGHT_TASKS_CALLER_AUTH_MODE=vercel-wif
 GCP_VERCEL_WIF_PROVIDER_RESOURCE=projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL/providers/PROVIDER
 ANALYSIS_V2_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL=analysis-v2-enqueuer@PROJECT_ID.iam.gserviceaccount.com
 PREFLIGHT_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL=analysis-v2-enqueuer@PROJECT_ID.iam.gserviceaccount.com
 ```
+
+queue/project/location, worker 경로를 포함한 target URL, origin만 담은 OIDC audience,
+호출 대상 task 서비스 계정은 모두 작업 등록 시 필수다. `*_TASKS_ENABLED=false`이면
+WIF가 정상이어도 작업을 등록하지 않으므로 운영 Vercel에는 두 값을 `true`로 둔다.
+초기 구성 중에는 `ANALYSIS_V2_ADMISSION_ENABLED=false`를 유지해 신규 요청만 막는다.
 
 Vercel 프로젝트 설정에서 OIDC 토큰 발급이 활성화되어 있어야 한다. `VERCEL_OIDC_TEAM_SLUG`, `VERCEL_OIDC_TEAM_ID`, `VERCEL_OIDC_PROJECT_ID`는 인프라 bootstrap 입력일 뿐 애플리케이션 런타임 비밀값이 아니다. `VERCEL_OIDC_TOKEN`, 서비스 계정 JSON, `GOOGLE_SERVICE_ACCOUNT_KEY_BASE64`를 V2 작업 등록용으로 추가하지 않는다.
 
@@ -109,6 +128,16 @@ PREFLIGHT_TASKS_CALLER_AUTH_MODE=adc
 `ANALYSIS_V2_ADMISSION_ENABLED`는 신규 preflight/분석 생성만 제어한다. 이를 끄더라도 이미 인증된 Cloud Tasks worker와 Scheduler 복구는 계속 실행되도록 `ANALYSIS_V2_WORKER_ENABLED`, `ANALYSIS_V2_RECOVERY_ENABLED`를 별도로 유지한다. worker에는 연결된 서비스 계정 ADC만 사용한다. WIF provider 입력과 Vercel OIDC 값은 넣지 않는다. 배포 스크립트가 이 경계를 검사한다.
 
 두 Cloud Run gate는 배포 입력과 runtime 값이 각각 독립적이며 기본값은 모두 `false`다. 폐기된 `ANALYSIS_V2_WORKER_EXECUTION_ENABLED`를 설정하지 않는다. Vercel intake 전용 `ANALYSIS_V2_ADMISSION_ENABLED`도 Cloud Run revision에 존재하면 안 되며, 배포 스크립트는 두 이름을 기존 revision에서 제거한다.
+
+## 출시 gate 전환 순서
+
+1. Vercel Production에 위 작업 등록 환경변수를 배포하되 `ANALYSIS_V2_ADMISSION_ENABLED=false`를 유지한다.
+2. Cloud Run을 `ANALYSIS_V2_WORKER_ENABLED=false`, `ANALYSIS_V2_RECOVERY_ENABLED=false`로 배포하고 모든 `--check`를 통과시킨다.
+3. Cloud Run에서 `ANALYSIS_V2_WORKER_ENABLED=true`를 먼저 적용해 인증된 작업 처리 경로를 확인한다.
+4. Cloud Run에서 `ANALYSIS_V2_RECOVERY_ENABLED=true`를 적용하고 Scheduler 복구 호출과 backlog가 정상인지 확인한다.
+5. 서명된 E2E entitlement로 canary를 완료한 뒤 마지막으로 Vercel Production의 `ANALYSIS_V2_ADMISSION_ENABLED=true`를 배포한다.
+
+중단 시에는 신규 유입을 먼저 막기 위해 Vercel admission을 `false`로 되돌린다. 이미 등록된 작업을 안전하게 drain/복구해야 하므로 worker와 recovery gate는 별도 장애 근거가 없는 한 즉시 끄지 않는다.
 
 배포된 revision에는 컨테이너가 정확히 하나만 있어야 한다. env 이름 중복, sidecar/비기본 container placement, `VERCEL*`, WIF bootstrap 입력, enqueuer identity, 서비스 계정 키나 토큰 형태의 plaintext env는 모두 검증 실패다. build 서비스 계정은 `projects/PROJECT_ID/serviceAccounts/EMAIL` 전체 리소스 이름으로 전달한다.
 
