@@ -2,6 +2,7 @@ import { createClient } from '@/lib/supabase/server';
 import { supabaseAdmin } from '@/lib/supabase/admin';
 import { NextResponse } from 'next/server';
 import { generateShareToken } from '@/lib/services/share/generate-token';
+import { appOriginForRequest } from '@/lib/constants/app-url';
 
 export async function POST(request: Request) {
     try {
@@ -97,9 +98,10 @@ export async function POST(request: Request) {
         }
 
         // 6. 공유 URL 생성
-        const host = request.headers.get('host') || 'localhost:3000';
-        const protocol = host.includes('localhost') ? 'http' : 'https';
-        const shareUrl = `${protocol}://${host}/share/${shareToken}`;
+        const shareUrl = new URL(
+            `/share/${shareToken}`,
+            appOriginForRequest(request.url)
+        ).toString();
 
         return NextResponse.json({
             success: true,
