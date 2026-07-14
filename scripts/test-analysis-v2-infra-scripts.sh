@@ -93,7 +93,7 @@ case "$state" in
     build_operator_ready="true"
     enqueuer_identity_ready="true"
     ;;
-  ready)
+  ready|staged_build|staged_final|promoted|rolled_back|rolled_back_bootstrap|foreign_promoted)
     identity_ready="true"
     vertex_ready="true"
     build_identity_ready="true"
@@ -395,7 +395,25 @@ case "$command_line" in
     ;;
   "storage buckets describe"*)
     if [[ "$bucket_ready" == "true" ]]; then
-      if [[ "$state" == "bucket_retention" ]]; then
+      if [[ "$command_line" == *"gs://analysis-v2-lock-0123456789abcdef0123456789abcdef"* ]]; then
+        [[ "${FAKE_GCLOUD_LOCK_BUCKET_ADMIN_READ_DENIED:-false}" != "true" ]] \
+          || exit 1
+        jq -nc \
+          --arg location "${FAKE_GCLOUD_LOCK_BUCKET_LOCATION:-ASIA-NORTHEAST3}" \
+          --arg project_number "${FAKE_GCLOUD_LOCK_BUCKET_PROJECT_NUMBER:-123456789012}" '
+          {
+            location: $location,
+            projectNumber: $project_number,
+            iamConfiguration: {
+              uniformBucketLevelAccess: {enabled: true},
+              publicAccessPrevention: "enforced"
+            },
+            versioning: {enabled: false},
+            defaultEventBasedHold: false,
+            softDeletePolicy: {retentionDurationSeconds: "0"},
+            lifecycle: {rule: [{action: {type: "Delete"}, condition: {age: 1}}]}
+          }'
+      elif [[ "$state" == "bucket_retention" ]]; then
         printf '%s\n' '{"location":"ASIA-NORTHEAST3","projectNumber":"123456789012","iamConfiguration":{"uniformBucketLevelAccess":{"enabled":true},"publicAccessPrevention":"enforced"},"versioning":{"enabled":false},"retentionPolicy":{"retentionPeriod":"86400"},"defaultEventBasedHold":true,"softDeletePolicy":{"retentionDurationSeconds":"0"},"lifecycle":{"rule":[{"action":{"type":"Delete"},"condition":{"age":1}}]}}'
       elif [[ "$state" == "bucket_requester_pays" ]]; then
         printf '%s\n' '{"location":"ASIA-NORTHEAST3","projectNumber":"123456789012","iamConfiguration":{"uniformBucketLevelAccess":{"enabled":true},"publicAccessPrevention":"enforced"},"billing":{"requesterPays":true},"versioning":{"enabled":false},"defaultEventBasedHold":false,"softDeletePolicy":{"retentionDurationSeconds":"0"},"lifecycle":{"rule":[{"action":{"type":"Delete"},"condition":{"age":1}}]}}'
@@ -408,7 +426,15 @@ case "$command_line" in
     ;;
   "storage buckets get-iam-policy"*)
     if [[ "$bucket_ready" == "true" ]]; then
-      if [[ "$state" == "bucket_legacy" ]]; then
+      if [[ "$command_line" == *"gs://analysis-v2-lock-0123456789abcdef0123456789abcdef"* ]]; then
+        [[ "${FAKE_GCLOUD_LOCK_BUCKET_ADMIN_READ_DENIED:-false}" != "true" ]] \
+          || exit 1
+        if [[ "${FAKE_GCLOUD_LOCK_IAM_RUNTIME:-false}" == "true" ]]; then
+          printf '%s\n' '{"version":1,"etag":"lock-fixture","bindings":[{"role":"roles/storage.objectUser","members":["serviceAccount:analysis-recovery@test-project.iam.gserviceaccount.com"]}]}'
+        else
+          printf '%s\n' '{"version":1,"etag":"lock-fixture","bindings":[{"role":"roles/storage.objectUser","members":["user:operator@example.test"]}]}'
+        fi
+      elif [[ "$state" == "bucket_legacy" ]]; then
         printf '%s\n' '{"version":1,"etag":"fixture","bindings":[{"role":"roles/storage.legacyBucketOwner","members":["projectEditor:test-project","projectOwner:test-project"]},{"role":"roles/storage.legacyBucketReader","members":["projectViewer:test-project"]},{"role":"roles/storage.legacyObjectOwner","members":["projectEditor:test-project","projectOwner:test-project"]},{"role":"roles/storage.legacyObjectReader","members":["projectViewer:test-project"]},{"role":"projects/test-project/roles/analysisV2MediaArtifactWorker","members":["serviceAccount:analysis-recovery@test-project.iam.gserviceaccount.com"]}]}'
       else
         printf '%s\n' '{"version":1,"etag":"fixture","bindings":[{"role":"projects/test-project/roles/analysisV2MediaArtifactWorker","members":["serviceAccount:analysis-recovery@test-project.iam.gserviceaccount.com"]}]}'
@@ -417,20 +443,35 @@ case "$command_line" in
       exit 1
     fi
     ;;
+  "storage buckets create"*|"storage buckets update"*)
+    if [[ -n "${FAKE_GCLOUD_STORAGE_MUTATION_LOG:-}" ]]; then
+      printf '%s\n' "$command_line" >>"$FAKE_GCLOUD_STORAGE_MUTATION_LOG"
+    fi
+    ;;
   "storage buckets set-iam-policy"*)
     [[ -n "${FAKE_GCLOUD_STATE_FILE:-}" ]] \
       || exit 90
     policy_file="$5"
-    jq -e '
-      (.bindings | length) == 1
-      and .bindings[0].role == "projects/test-project/roles/analysisV2MediaArtifactWorker"
-      and .bindings[0].members == ["serviceAccount:analysis-recovery@test-project.iam.gserviceaccount.com"]
-    ' "$policy_file" >/dev/null
+    if [[ "$command_line" == *"gs://analysis-v2-lock-0123456789abcdef0123456789abcdef"* ]]; then
+      jq -e '
+        (.bindings | length) == 1
+        and .bindings[0].role == "roles/storage.objectUser"
+        and .bindings[0].members == ["user:operator@example.test"]
+      ' "$policy_file" >/dev/null
+    else
+      jq -e '
+        (.bindings | length) == 1
+        and .bindings[0].role == "projects/test-project/roles/analysisV2MediaArtifactWorker"
+        and .bindings[0].members == ["serviceAccount:analysis-recovery@test-project.iam.gserviceaccount.com"]
+      ' "$policy_file" >/dev/null
+    fi
     printf 'bucket_exact\n' >"$FAKE_GCLOUD_STATE_FILE"
     ;;
   "run deploy"*)
     deploy_source=''
     deploy_source_count=0
+    runtime_manifest=''
+    build_manifest=''
     for argument in "$@"; do
       case "$argument" in
         --ignore-file|--ignore-file=*)
@@ -441,6 +482,8 @@ case "$command_line" in
           deploy_source="${argument#--source=}"
           deploy_source_count=$((deploy_source_count + 1))
           ;;
+        --env-vars-file=*) runtime_manifest="${argument#--env-vars-file=}" ;;
+        --build-env-vars-file=*) build_manifest="${argument#--build-env-vars-file=}" ;;
       esac
     done
     [[ "$deploy_source_count" -eq 1 ]] || exit 92
@@ -450,6 +493,20 @@ case "$command_line" in
       *) exit 92 ;;
     esac
     [[ -f "$deploy_source/package.json" ]] || exit 93
+    [[ -f "$runtime_manifest" && -f "$build_manifest" ]] || exit 93
+    [[ "$runtime_manifest" != "${ANALYSIS_V2_WORKER_ENV_VARS_FILE:-}" \
+      && "$build_manifest" != "${ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE:-}" ]] \
+      || exit 93
+    [[ ! -w "$runtime_manifest" && ! -w "$build_manifest" ]] || exit 93
+    jq -e --arg slot "${ANALYSIS_V2_APIFY_API_TOKEN_SLOT:-}" '
+      .ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET == "test-project-analysis-v2-media"
+        and .ANALYSIS_V2_APIFY_API_TOKEN_SLOT == $slot
+        and (keys | all(test("(TOKEN|SECRET|PASSWORD|CREDENTIAL|_KEY)$") | not))
+    ' "$runtime_manifest" >/dev/null || exit 93
+    jq -e '
+      (keys | sort) == ["NEXT_PUBLIC_SUPABASE_ANON_KEY", "NEXT_PUBLIC_SUPABASE_URL"]
+        and ([.[] | select(length == 0)] | length) == 0
+    ' "$build_manifest" >/dev/null || exit 93
     [[ -f "$deploy_source/.gcloudignore" ]] || exit 94
     grep -Fxq '.env*' "$deploy_source/.gcloudignore" || exit 95
     [[ ! -e "$deploy_source/.git" && ! -e "$deploy_source/.env.local" ]] || exit 96
@@ -473,8 +530,57 @@ case "$command_line" in
     if [[ -n "${FAKE_GCLOUD_DEPLOY_SOURCE_PATH:-}" ]]; then
       printf '%s\n' "$deploy_source" >"$FAKE_GCLOUD_DEPLOY_SOURCE_PATH"
     fi
+    if [[ "${FAKE_GCLOUD_FIRST_DEPLOY:-false}" == "true" ]]; then
+      [[ "$command_line" != *"--no-traffic"* ]] || exit 98
+    else
+      [[ "$command_line" == *"--no-traffic"* ]] || exit 98
+    fi
+    source_commit="${FAKE_GCLOUD_SOURCE_COMMIT:-}"
+    [[ "$source_commit" =~ ^[0-9a-f]{40}$ ]] || exit 98
+    [[ "$command_line" == *"--update-labels=analysis-v2-source-commit=$source_commit"* ]] \
+      || exit 98
+    [[ "$command_line" == *"--revision-suffix=b${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"* ]] \
+      || exit 98
     [[ -n "${FAKE_GCLOUD_STATE_FILE:-}" ]] || exit 99
-    printf 'ready\n' >"$FAKE_GCLOUD_STATE_FILE"
+    printf 'staged_build\n' >"$FAKE_GCLOUD_STATE_FILE"
+    ;;
+  "run services update-traffic"*)
+    [[ -n "${FAKE_GCLOUD_STATE_FILE:-}" ]] || exit 99
+    source_commit="${FAKE_GCLOUD_SOURCE_COMMIT:-}"
+    target=''
+    for argument in "$@"; do
+      [[ "$argument" == --to-revisions=* ]] && target="${argument#--to-revisions=}"
+    done
+    if [[ "$target" == "analysis-worker-f${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}=100" ]]; then
+      printf 'promoted\n' >"$FAKE_GCLOUD_STATE_FILE"
+    elif [[ "$target" == 'analysis-worker-00002=100' ]]; then
+      printf 'rolled_back\n' >"$FAKE_GCLOUD_STATE_FILE"
+    elif [[ "$target" == "analysis-worker-b${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}=100" ]]; then
+      printf 'rolled_back_bootstrap\n' >"$FAKE_GCLOUD_STATE_FILE"
+    else
+      exit 98
+    fi
+    if [[ -n "${FAKE_GCLOUD_TRAFFIC_LOG:-}" ]]; then
+      printf '%s\n' "$command_line" >>"$FAKE_GCLOUD_TRAFFIC_LOG"
+    fi
+    if [[ -n "${FAKE_GCLOUD_EVENT_LOG:-}" ]]; then
+      printf '%s\n' "$command_line" >>"$FAKE_GCLOUD_EVENT_LOG"
+    fi
+    ;;
+  "run services update"*)
+    [[ -n "${FAKE_GCLOUD_STATE_FILE:-}" ]] || exit 99
+    source_commit="${FAKE_GCLOUD_SOURCE_COMMIT:-}"
+    expected_image='asia-northeast3-docker.pkg.dev/test-project/cloud-run-source-deploy/analysis-worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    [[ "$command_line" == *"--no-traffic"* ]] || exit 98
+    [[ "$command_line" == *"--image=$expected_image"* ]] || exit 98
+    [[ "$command_line" == *"--update-labels=analysis-v2-source-commit=$source_commit"* ]] \
+      || exit 98
+    [[ "$command_line" == *"--revision-suffix=f${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"* ]] \
+      || exit 98
+    if [[ -n "${FAKE_GCLOUD_ENDPOINT_UPDATE_LOG:-}" ]]; then
+      printf '%s\n' "$command_line" >"$FAKE_GCLOUD_ENDPOINT_UPDATE_LOG"
+    fi
+    printf 'staged_final\n' >"$FAKE_GCLOUD_STATE_FILE"
     ;;
   "run services describe"*)
     if [[ "$infra_ready" != "true" ]]; then
@@ -483,9 +589,42 @@ case "$command_line" in
       latest_created='analysis-worker-00002'
       latest_ready='analysis-worker-00002'
       traffic_revision='analysis-worker-00002'
+      source_commit="${FAKE_GCLOUD_SOURCE_COMMIT:-0000000000000000000000000000000000000000}"
+      if [[ "$state" == "staged_build" ]]; then
+        latest_created="analysis-worker-b${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
+        latest_ready="$latest_created"
+        if [[ "${FAKE_GCLOUD_FIRST_DEPLOY:-false}" == "true" \
+          || "${FAKE_GCLOUD_ACTIVE_BOOTSTRAP:-false}" == "true" ]]; then
+          traffic_revision="$latest_created"
+        fi
+      elif [[ "$state" == "staged_final" ]]; then
+        latest_created="analysis-worker-f${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
+        latest_ready="$latest_created"
+        if [[ "${FAKE_GCLOUD_FIRST_DEPLOY:-false}" == "true" \
+          || "${FAKE_GCLOUD_ACTIVE_BOOTSTRAP:-false}" == "true" ]]; then
+          traffic_revision="analysis-worker-b${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
+        fi
+      elif [[ "$state" == "promoted" ]]; then
+        latest_created="analysis-worker-f${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
+        latest_ready="$latest_created"
+        traffic_revision="$latest_created"
+      elif [[ "$state" == "rolled_back" ]]; then
+        latest_created="analysis-worker-f${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
+        latest_ready="$latest_created"
+      elif [[ "$state" == "rolled_back_bootstrap" ]]; then
+        latest_created="analysis-worker-f${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
+        latest_ready="$latest_created"
+        traffic_revision="analysis-worker-b${source_commit:0:6}${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
+      elif [[ "$state" == "foreign_promoted" ]]; then
+        latest_created='analysis-worker-foreign'
+        latest_ready="$latest_created"
+        traffic_revision="$latest_created"
+      fi
       runtime_queue='analysis-v2-pipeline'
       credential_name=''
       runtime_slot='quinary'
+      worker_gate='false'
+      recovery_gate='false'
       apify_secret_version='7'
       supabase_plaintext='false'
       sidecar='false'
@@ -506,13 +645,21 @@ case "$command_line" in
       [[ "$state" != "runtime_duplicate_env" ]] || duplicate_env='true'
       [[ "$state" != "runtime_admission_env" ]] || admission_env='true'
       [[ "$state" != "runtime_legacy_gate_env" ]] || legacy_gate_env='true'
+      if [[ "$state" == "staged_final" || "$state" == "promoted" \
+        || "$state" == "rolled_back" || "$state" == "rolled_back_bootstrap" ]]; then
+        worker_gate="${ANALYSIS_V2_WORKER_ENABLED:-false}"
+        recovery_gate="${ANALYSIS_V2_RECOVERY_ENABLED:-false}"
+      fi
       jq -nc \
         --arg latest_created "$latest_created" \
         --arg latest_ready "$latest_ready" \
         --arg traffic_revision "$traffic_revision" \
+        --arg source_commit "$source_commit" \
         --arg runtime_queue "$runtime_queue" \
         --arg credential_name "$credential_name" \
         --arg runtime_slot "$runtime_slot" \
+        --arg worker_gate "$worker_gate" \
+        --arg recovery_gate "$recovery_gate" \
         --arg apify_secret_version "$apify_secret_version" \
         --argjson supabase_plaintext "$supabase_plaintext" \
         --argjson sidecar "$sidecar" \
@@ -523,6 +670,7 @@ case "$command_line" in
         {
           metadata: {
             name: "analysis-worker",
+            labels: {"analysis-v2-source-commit": $source_commit},
             annotations: {
               "run.googleapis.com/ingress": "all",
               "run.googleapis.com/invoker-iam-disabled": "false",
@@ -531,12 +679,15 @@ case "$command_line" in
             }
           },
           spec: {template: {
-            metadata: {annotations: {
-              "run.googleapis.com/execution-environment": "gen2",
-              "run.googleapis.com/cpu-throttling": "true",
-              "run.googleapis.com/startup-cpu-boost": "true",
-              "autoscaling.knative.dev/maxScale": "6"
-            }},
+            metadata: {
+              labels: {"analysis-v2-source-commit": $source_commit},
+              annotations: {
+                "run.googleapis.com/execution-environment": "gen2",
+                "run.googleapis.com/cpu-throttling": "true",
+                "run.googleapis.com/startup-cpu-boost": "true",
+                "autoscaling.knative.dev/maxScale": "6"
+              }
+            },
             spec: {
               serviceAccountName: "analysis-recovery@test-project.iam.gserviceaccount.com",
               timeoutSeconds: 300,
@@ -546,8 +697,8 @@ case "$command_line" in
                 env: ([
                   {name: "ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET", value: "test-project-analysis-v2-media"},
                   {name: "ANALYSIS_V2_TASKS_ENABLED", value: "true"},
-                  {name: "ANALYSIS_V2_WORKER_ENABLED", value: "false"},
-                  {name: "ANALYSIS_V2_RECOVERY_ENABLED", value: "false"},
+                  {name: "ANALYSIS_V2_WORKER_ENABLED", value: $worker_gate},
+                  {name: "ANALYSIS_V2_RECOVERY_ENABLED", value: $recovery_gate},
                   {name: "ANALYSIS_V2_TASKS_PROJECT", value: "test-project"},
                   {name: "ANALYSIS_V2_TASKS_LOCATION", value: "asia-northeast3"},
                   {name: "ANALYSIS_V2_TASKS_QUEUE", value: $runtime_queue},
@@ -598,6 +749,42 @@ case "$command_line" in
       printf 'analysis-worker\n'
     fi
     ;;
+  "run revisions describe"*)
+    revision="$4"
+    source_commit="${FAKE_GCLOUD_SOURCE_COMMIT:-0000000000000000000000000000000000000000}"
+    known_good_recovery="${FAKE_GCLOUD_KNOWN_GOOD_RECOVERY_ENABLED:-false}"
+    revision_image='asia-northeast3-docker.pkg.dev/test-project/cloud-run-source-deploy/analysis-worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+    bootstrap_revision='false'
+    if [[ "$revision" == analysis-worker-b* \
+      || "${FAKE_GCLOUD_ACTIVE_BOOTSTRAP:-false}" == "true" ]]; then
+      bootstrap_revision='true'
+    fi
+    jq -nc \
+      --arg revision "$revision" \
+      --arg source_commit "$source_commit" \
+      --arg known_good_recovery "$known_good_recovery" \
+      --arg revision_image "$revision_image" \
+      --argjson bootstrap_revision "$bootstrap_revision" '{
+      metadata: {
+        name: $revision,
+        labels: {"analysis-v2-source-commit": $source_commit}
+      },
+      spec: {
+        containers: [{image: $revision_image, env: (
+          if $bootstrap_revision then [
+            {name: "ANALYSIS_V2_RECOVERY_ENABLED", value: "false"}
+          ] else [
+            {name: "ANALYSIS_V2_TASKS_ENABLED", value: "true"},
+            {name: "ANALYSIS_V2_WORKER_ENABLED", value: "false"},
+            {name: "ANALYSIS_V2_RECOVERY_ENABLED", value: $known_good_recovery},
+            {name: "PREFLIGHT_TASKS_ENABLED", value: "true"},
+            {name: "PREFLIGHT_LOCAL_AFTER_ENABLED", value: "false"}
+          ] end)
+        }]
+      },
+      status: {conditions: [{type: "Ready", status: "True"}]}
+    }'
+    ;;
   "run services get-iam-policy"*)
     if [[ "$infra_ready" == "true" ]]; then
       if [[ "$command_line" == *"format=csv"* ]]; then
@@ -618,6 +805,13 @@ case "$command_line" in
     ;;
   "tasks queues describe"*)
     if [[ "$infra_ready" != "true" ]]; then
+      exit 1
+    elif [[ "${FAKE_GCLOUD_CONCURRENT_PROMOTION_ON_FAILURE:-false}" == "true" \
+      && "$state" == "promoted" ]]; then
+      printf 'foreign_promoted\n' >"$FAKE_GCLOUD_STATE_FILE"
+      exit 1
+    elif [[ "${FAKE_GCLOUD_POST_PROMOTION_QUEUE_FAILURE:-false}" == "true" \
+      && "$state" == "promoted" ]]; then
       exit 1
     elif [[ "$command_line" == *"format=csv"* ]]; then
       if [[ "$command_line" == *" analysis-preflight "* ]]; then
@@ -661,28 +855,67 @@ case "$command_line" in
       || exit 90
     printf '%s\n' "$command_line" >>"$FAKE_GCLOUD_QUEUE_MUTATION_STATE_FILE"
     ;;
+  "scheduler jobs list"*)
+    [[ "${FAKE_GCLOUD_SCHEDULER_LIST_ERROR:-false}" != "true" ]] || exit 1
+    if [[ "${FAKE_GCLOUD_SCHEDULER_MISSING:-false}" != "true" ]]; then
+      printf '%s\n' \
+        'projects/test-project/locations/asia-northeast3/jobs/analysis-v2-recovery' \
+        'projects/test-project/locations/asia-northeast3/jobs/analysis-v2-preflight-retention'
+    fi
+    ;;
   "scheduler jobs describe"*)
     [[ "$infra_ready" == "true" ]] || exit 1
     [[ "${FAKE_GCLOUD_SCHEDULER_MISSING:-false}" != "true" ]] || exit 1
+    if [[ "${FAKE_GCLOUD_POST_PROMOTION_FAILURE:-false}" == "true" \
+      && "$state" == "promoted" ]]; then
+      exit 1
+    fi
     job="$4"
     if [[ "$job" == "analysis-v2-recovery" ]]; then
       schedule='* * * * *'
       uri='https://analysis-worker-test.asia-northeast3.run.app/api/analysis/v2/recover'
       deadline='300s'
+      scheduler_state=''
+      if [[ -n "${FAKE_GCLOUD_SCHEDULER_STATE_FILE:-}" \
+        && -f "$FAKE_GCLOUD_SCHEDULER_STATE_FILE" ]]; then
+        scheduler_state="$(<"$FAKE_GCLOUD_SCHEDULER_STATE_FILE")"
+      fi
+      if [[ -z "$scheduler_state" ]]; then
+        if [[ "${ANALYSIS_V2_RECOVERY_ENABLED:-false}" == "true" ]]; then
+          scheduler_state='ENABLED'
+        else
+          scheduler_state='PAUSED'
+        fi
+      fi
     elif [[ "$job" == "analysis-v2-preflight-retention" ]]; then
       schedule='*/5 * * * *'
       uri='https://analysis-worker-test.asia-northeast3.run.app/api/analysis/preflight/retention'
       deadline='60s'
+      scheduler_state=''
+      if [[ -n "${FAKE_GCLOUD_RETENTION_STATE_FILE:-}" \
+        && -f "$FAKE_GCLOUD_RETENTION_STATE_FILE" ]]; then
+        scheduler_state="$(<"$FAKE_GCLOUD_RETENTION_STATE_FILE")"
+      fi
+      scheduler_state="${scheduler_state:-ENABLED}"
     else
       exit 90
     fi
     audience='https://analysis-worker-test.asia-northeast3.run.app'
-    [[ "${FAKE_GCLOUD_SCHEDULER_DRIFT:-false}" != "true" ]] \
+    recovery_drift="${FAKE_GCLOUD_RECOVERY_DRIFT:-false}"
+    if [[ "${FAKE_GCLOUD_RECOVERY_DRIFT_ON_ROLLBACK:-false}" == "true" \
+      && "$state" == "rolled_back" ]]; then
+      recovery_drift='true'
+    fi
+    [[ "${FAKE_GCLOUD_SCHEDULER_DRIFT:-false}" != "true" \
+      && !( "$job" == "analysis-v2-preflight-retention" \
+        && "${FAKE_GCLOUD_RETENTION_DRIFT:-false}" == "true" ) \
+      && !( "$job" == "analysis-v2-recovery" \
+        && "$recovery_drift" == "true" ) ]] \
       || audience='https://wrong.example.test'
-    jq -nc --arg schedule "$schedule" --arg uri "$uri" --arg deadline "$deadline" --arg audience "$audience" '{
+    jq -nc --arg schedule "$schedule" --arg uri "$uri" --arg deadline "$deadline" --arg audience "$audience" --arg scheduler_state "$scheduler_state" '{
       schedule: $schedule,
       timeZone: "Etc/UTC",
-      state: "ENABLED",
+      state: $scheduler_state,
       attemptDeadline: $deadline,
       httpTarget: {
         uri: $uri,
@@ -702,6 +935,83 @@ case "$command_line" in
         maxDoublings: 3
       }
     }'
+    ;;
+  "scheduler jobs pause"*)
+    job="$4"
+    if [[ -n "${FAKE_GCLOUD_SCHEDULER_MUTATION_LOG:-}" ]]; then
+      printf '%s\n' "$command_line" >>"$FAKE_GCLOUD_SCHEDULER_MUTATION_LOG"
+    fi
+    if [[ "$job" == "analysis-v2-recovery" \
+      && -n "${FAKE_GCLOUD_SCHEDULER_STATE_FILE:-}" ]]; then
+      printf 'PAUSED\n' >"$FAKE_GCLOUD_SCHEDULER_STATE_FILE"
+    elif [[ "$job" == "analysis-v2-preflight-retention" \
+      && -n "${FAKE_GCLOUD_RETENTION_STATE_FILE:-}" ]]; then
+      printf 'PAUSED\n' >"$FAKE_GCLOUD_RETENTION_STATE_FILE"
+    fi
+    if [[ -n "${FAKE_GCLOUD_EVENT_LOG:-}" ]]; then
+      printf '%s\n' "$command_line" >>"$FAKE_GCLOUD_EVENT_LOG"
+    fi
+    ;;
+  "scheduler jobs resume"*)
+    job="$4"
+    if [[ -n "${FAKE_GCLOUD_SCHEDULER_MUTATION_LOG:-}" ]]; then
+      printf '%s\n' "$command_line" >>"$FAKE_GCLOUD_SCHEDULER_MUTATION_LOG"
+    fi
+    if [[ "$job" == "analysis-v2-recovery" \
+      && -n "${FAKE_GCLOUD_SCHEDULER_STATE_FILE:-}" ]]; then
+      printf 'ENABLED\n' >"$FAKE_GCLOUD_SCHEDULER_STATE_FILE"
+    elif [[ "$job" == "analysis-v2-preflight-retention" \
+      && -n "${FAKE_GCLOUD_RETENTION_STATE_FILE:-}" ]]; then
+      printf 'ENABLED\n' >"$FAKE_GCLOUD_RETENTION_STATE_FILE"
+    fi
+    if [[ -n "${FAKE_GCLOUD_EVENT_LOG:-}" ]]; then
+      printf '%s\n' "$command_line" >>"$FAKE_GCLOUD_EVENT_LOG"
+    fi
+    ;;
+  "storage cp"*)
+    lock_file="${FAKE_GCLOUD_DEPLOY_LOCK_FILE:-${FAKE_GCLOUD_STATE_FILE:-/tmp/analysis-v2-fake}.deploy-lock}"
+    [[ "$command_line" == *"--if-generation-match=0"* ]] || exit 98
+    [[ "$command_line" == *"gs://analysis-v2-lock-0123456789abcdef0123456789abcdef/asia-northeast3/analysis-worker.lock"* ]] \
+      || exit 98
+    [[ ! -e "$lock_file" ]] || exit 1
+    grep -Eq '^[0-9a-f]{40} [a-z0-9]{5} [a-f0-9]{32}$' "$3" \
+      || exit 98
+    cp "$3" "$lock_file"
+    if [[ -n "${FAKE_GCLOUD_EVENT_LOG:-}" ]]; then
+      printf '%s\n' "$command_line" >>"$FAKE_GCLOUD_EVENT_LOG"
+    fi
+    [[ "${FAKE_GCLOUD_LOCK_CP_AMBIGUOUS_SUCCESS:-false}" != "true" ]] \
+      || exit 1
+    ;;
+  "storage objects describe"*)
+    lock_file="${FAKE_GCLOUD_DEPLOY_LOCK_FILE:-${FAKE_GCLOUD_STATE_FILE:-/tmp/analysis-v2-fake}.deploy-lock}"
+    [[ -e "$lock_file" ]] || exit 1
+    if [[ "${FAKE_GCLOUD_LOCK_REPLACED_BEFORE_DESCRIBE:-false}" == "true" ]]; then
+      printf 'foreign deployment\n' >"$lock_file"
+      printf '23\n'
+    else
+      printf '17\n'
+    fi
+    ;;
+  "storage cat"*)
+    lock_file="${FAKE_GCLOUD_DEPLOY_LOCK_FILE:-${FAKE_GCLOUD_STATE_FILE:-/tmp/analysis-v2-fake}.deploy-lock}"
+    lock_generation='17'
+    [[ "${FAKE_GCLOUD_LOCK_REPLACED_BEFORE_DESCRIBE:-false}" != "true" ]] \
+      || lock_generation='23'
+    [[ "$command_line" == *"#$lock_generation"* && -e "$lock_file" ]] || exit 1
+    cat "$lock_file"
+    ;;
+  "storage rm"*)
+    lock_file="${FAKE_GCLOUD_DEPLOY_LOCK_FILE:-${FAKE_GCLOUD_STATE_FILE:-/tmp/analysis-v2-fake}.deploy-lock}"
+    lock_generation='17'
+    [[ "${FAKE_GCLOUD_LOCK_REPLACED_BEFORE_DESCRIBE:-false}" != "true" ]] \
+      || lock_generation='23'
+    [[ "$command_line" == *"--if-generation-match=$lock_generation"* ]] || exit 98
+    [[ -e "$lock_file" ]] || exit 1
+    rm -f "$lock_file"
+    if [[ -n "${FAKE_GCLOUD_EVENT_LOG:-}" ]]; then
+      printf '%s\n' "$command_line" >>"$FAKE_GCLOUD_EVENT_LOG"
+    fi
     ;;
   *)
     printf 'unexpected fake gcloud command: %s\n' "$command_line" >&2
@@ -732,6 +1042,18 @@ ANALYSIS_V2_APIFY_API_TOKEN_SLOT="quinary"
 APIFY_QUINARY_API_TOKEN="SECRET_SENTINEL_MUST_NOT_BE_PRINTED"
 EOF
 
+cat >"$temp_dir/runtime-quoted-secret.yaml" <<'EOF'
+ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET: "test-project-analysis-v2-media"
+ANALYSIS_V2_APIFY_API_TOKEN_SLOT: "quinary"
+"APIFY_QUINARY_API_TOKEN": "QUOTED_SECRET_SENTINEL_MUST_NOT_BE_PRINTED"
+EOF
+
+cat >"$temp_dir/runtime-quoted-gate.yaml" <<'EOF'
+ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET: "test-project-analysis-v2-media"
+ANALYSIS_V2_APIFY_API_TOKEN_SLOT: "quinary"
+"ANALYSIS_V2_TASKS_ENABLED": "true"
+EOF
+
 cat >"$temp_dir/runtime-wrong-slot.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="primary"
@@ -749,6 +1071,16 @@ EOF
 
 cat >"$temp_dir/build-secret.yaml" <<'EOF'
 SUPABASE_SERVICE_ROLE_KEY: "SECRET_BUILD_SENTINEL_MUST_NOT_BE_PRINTED"
+EOF
+cat >"$temp_dir/build-quoted-secret.yaml" <<'EOF'
+NEXT_PUBLIC_SUPABASE_URL: "https://fixture.example.test"
+NEXT_PUBLIC_SUPABASE_ANON_KEY: "public-anon"
+"SOME_API_KEY": "QUOTED_BUILD_SECRET_SENTINEL_MUST_NOT_BE_PRINTED"
+EOF
+cat >"$temp_dir/build-duplicate.yaml" <<'EOF'
+NEXT_PUBLIC_SUPABASE_URL: "https://fixture.example.test"
+"NEXT_PUBLIC_SUPABASE_URL": "https://duplicate.example.test"
+NEXT_PUBLIC_SUPABASE_ANON_KEY: "public-anon"
 EOF
 cat >"$temp_dir/build-extra.yaml" <<'EOF'
 NEXT_PUBLIC_SUPABASE_URL: "https://fixture.example.test"
@@ -778,6 +1110,7 @@ ANALYSIS_V2_APIFY_API_TOKEN_SLOT="quinary"
 ANALYSIS_V2_WORKER_EXECUTION_ENABLED="true"
 EOF
 
+repo_source_commit="$(git -C "$script_dir/.." rev-parse --verify 'HEAD^{commit}')"
 common_env=(
   "PATH=$temp_dir/bin:$PATH"
   'ANALYSIS_V2_TASKS_PROJECT=test-project'
@@ -794,14 +1127,37 @@ common_env=(
   'ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE=analysis-worker'
   'ANALYSIS_V2_TASKS_CLOUD_RUN_REGION=asia-northeast3'
   'ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=test-project-analysis-v2-media'
+  'ANALYSIS_V2_DEPLOY_LOCK_BUCKET=analysis-v2-lock-0123456789abcdef0123456789abcdef'
   'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=quinary'
   'ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION=7'
   'ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=7'
   'ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION=7'
   'ANALYSIS_V2_WORKER_ENABLED=false'
   'ANALYSIS_V2_RECOVERY_ENABLED=false'
+  'ANALYSIS_V2_DEPLOY_REVISION_NONCE=abc12'
+  "FAKE_GCLOUD_SOURCE_COMMIT=$repo_source_commit"
   "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml"
 )
+
+missing_deploy_lock_env=()
+for item in "${common_env[@]}"; do
+  [[ "$item" == ANALYSIS_V2_DEPLOY_LOCK_BUCKET=* ]] \
+    || missing_deploy_lock_env+=("$item")
+done
+if env -u ANALYSIS_V2_DEPLOY_LOCK_BUCKET "${missing_deploy_lock_env[@]}" \
+  bash "$script_dir/configure-analysis-v2-deploy-lock.sh" --check \
+  >"$temp_dir/deploy-lock-missing-env.out" 2>&1; then
+  fail "deploy-lock configuration accepted a missing persistent bucket name"
+fi
+assert_contains "$temp_dir/deploy-lock-missing-env.out" \
+  "missing required environment variable: ANALYSIS_V2_DEPLOY_LOCK_BUCKET"
+if env -u ANALYSIS_V2_DEPLOY_LOCK_BUCKET "${missing_deploy_lock_env[@]}" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-deploy-lock-missing-env.out" 2>&1; then
+  fail "worker deployment accepted a missing persistent deploy-lock bucket name"
+fi
+assert_contains "$temp_dir/worker-deploy-lock-missing-env.out" \
+  "ANALYSIS_V2_DEPLOY_LOCK_BUCKET is required"
 
 legacy_runtime_env=()
 for item in "${common_env[@]}"; do
@@ -987,6 +1343,55 @@ assert_contains "$temp_dir/bucket.out" "gcloud storage buckets update"
 assert_contains "$temp_dir/bucket.out" "dry-run complete: no mutations were applied"
 
 env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
+  bash "$script_dir/configure-analysis-v2-deploy-lock.sh" --check \
+  >"$temp_dir/deploy-lock-check.out"
+assert_contains "$temp_dir/deploy-lock-check.out" \
+  "only the configured deployer can access deploy locks"
+assert_contains "$temp_dir/deploy-lock-check.out" \
+  "Analysis V2 deploy-lock coordination bucket verified"
+
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=identity_ready' \
+  bash "$script_dir/configure-analysis-v2-deploy-lock.sh" --dry-run \
+  >"$temp_dir/deploy-lock-create-dry-run.out"
+assert_contains "$temp_dir/deploy-lock-create-dry-run.out" \
+  "gcloud storage buckets create gs://analysis-v2-lock-0123456789abcdef0123456789abcdef"
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
+  'FAKE_GCLOUD_LOCK_IAM_RUNTIME=true' \
+  bash "$script_dir/configure-analysis-v2-deploy-lock.sh" --check \
+  >"$temp_dir/deploy-lock-runtime-iam.out" 2>&1; then
+  fail "runtime identity access to the deploy-lock bucket was accepted"
+fi
+assert_contains "$temp_dir/deploy-lock-runtime-iam.out" \
+  "deploy-lock bucket IAM is not exact"
+
+: >"$temp_dir/deploy-lock-foreign-project-mutations.out"
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
+  'FAKE_GCLOUD_LOCK_BUCKET_PROJECT_NUMBER=999999999999' \
+  "FAKE_GCLOUD_STORAGE_MUTATION_LOG=$temp_dir/deploy-lock-foreign-project-mutations.out" \
+  bash "$script_dir/configure-analysis-v2-deploy-lock.sh" \
+  >"$temp_dir/deploy-lock-foreign-project.out" 2>&1; then
+  fail "foreign-project deploy-lock bucket was accepted"
+fi
+assert_contains "$temp_dir/deploy-lock-foreign-project.out" \
+  "belongs to another project or location; refusing to mutate it"
+[[ ! -s "$temp_dir/deploy-lock-foreign-project-mutations.out" ]] \
+  || fail "foreign-project deploy-lock bucket was mutated before ownership validation"
+
+: >"$temp_dir/deploy-lock-wrong-location-mutations.out"
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
+  'FAKE_GCLOUD_LOCK_BUCKET_LOCATION=US-CENTRAL1' \
+  "FAKE_GCLOUD_STORAGE_MUTATION_LOG=$temp_dir/deploy-lock-wrong-location-mutations.out" \
+  bash "$script_dir/configure-analysis-v2-deploy-lock.sh" \
+  >"$temp_dir/deploy-lock-wrong-location.out" 2>&1; then
+  fail "wrong-location deploy-lock bucket was accepted"
+fi
+assert_contains "$temp_dir/deploy-lock-wrong-location.out" \
+  "belongs to another project or location; refusing to mutate it"
+[[ ! -s "$temp_dir/deploy-lock-wrong-location-mutations.out" ]] \
+  || fail "wrong-location deploy-lock bucket was mutated before location validation"
+
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
   "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
@@ -997,6 +1402,10 @@ assert_contains "$temp_dir/worker.out" "--concurrency=2"
 assert_contains "$temp_dir/worker.out" "--max=6"
 assert_contains "$temp_dir/worker.out" "--cpu-throttling"
 assert_contains "$temp_dir/worker.out" "--clear-network"
+assert_contains "$temp_dir/worker.out" "--deploy-health-check"
+assert_not_contains "$temp_dir/worker.out" "--no-traffic"
+assert_contains "$temp_dir/worker.out" \
+  "--update-labels=analysis-v2-source-commit=$repo_source_commit"
 assert_contains "$temp_dir/worker.out" \
   "--build-service-account=projects/test-project/serviceAccounts/analysis-build@test-project.iam.gserviceaccount.com"
 assert_contains "$temp_dir/worker.out" \
@@ -1006,6 +1415,8 @@ assert_not_contains "$temp_dir/worker.out" "SECRET_SENTINEL_MUST_NOT_BE_PRINTED"
 assert_not_contains "$temp_dir/worker.out" "PUBLIC_BUILD_SENTINEL_MUST_NOT_BE_PRINTED"
 assert_contains "$temp_dir/worker.out" \
   "verifying prerequisite order: worker identity -> secrets -> media bucket -> worker deploy"
+assert_contains "$temp_dir/worker.out" \
+  "deploy-lock bucket metadata and IAM are audited separately by an admin"
 
 deploy_source_repo="$temp_dir/deploy-source-repo"
 mkdir -p "$deploy_source_repo/scripts"
@@ -1019,6 +1430,7 @@ cp "$script_dir/analysis-v2-source.gcloudignore" \
   "$deploy_source_repo/scripts/analysis-v2-source.gcloudignore"
 git -C "$deploy_source_repo" add .gitignore deploy-marker.txt package.json scripts
 git -C "$deploy_source_repo" commit -qm initial
+deploy_source_commit="$(git -C "$deploy_source_repo" rev-parse --verify 'HEAD^{commit}')"
 printf 'UNTRACKED_DEPLOY_SECRET_SENTINEL\n' >"$deploy_source_repo/.env.local"
 printf 'prerequisites_ready\n' >"$temp_dir/deploy-state"
 env "${common_env[@]}" \
@@ -1026,15 +1438,39 @@ env "${common_env[@]}" \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
   "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
   "FAKE_GCLOUD_STATE_FILE=$temp_dir/deploy-state" \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  'FAKE_GCLOUD_LOCK_BUCKET_ADMIN_READ_DENIED=true' \
+  'FAKE_GCLOUD_LOCK_CP_AMBIGUOUS_SUCCESS=true' \
+  'FAKE_GCLOUD_FIRST_DEPLOY=true' \
   "FAKE_GCLOUD_DEPLOY_LOG=$temp_dir/deploy-command.out" \
+  "FAKE_GCLOUD_ENDPOINT_UPDATE_LOG=$temp_dir/deploy-endpoint-update.out" \
+  "FAKE_GCLOUD_TRAFFIC_LOG=$temp_dir/deploy-traffic.out" \
   "FAKE_GCLOUD_DEPLOY_SOURCE_MANIFEST=$temp_dir/deploy-source-manifest.out" \
   "FAKE_GCLOUD_DEPLOY_SOURCE_PATH=$temp_dir/deploy-source-path.out" \
   bash "$script_dir/deploy-analysis-v2-worker.sh" \
   >"$temp_dir/worker-apply.out"
 assert_contains "$temp_dir/worker-apply.out" \
   "verified: source deploy uses a clean tracked commit archive"
+assert_contains "$temp_dir/worker-apply.out" \
+  "adopted this deployment's generation-bound lock after an ambiguous create response"
+[[ ! -e "$temp_dir/deploy-state.deploy-lock" ]] \
+  || fail "an ambiguously successful self-owned deploy lock was not released"
 assert_contains "$temp_dir/deploy-command.out" "run deploy analysis-worker"
 assert_not_contains "$temp_dir/deploy-command.out" "--ignore-file"
+assert_not_contains "$temp_dir/deploy-command.out" "--no-traffic"
+assert_contains "$temp_dir/deploy-command.out" \
+  "--update-labels=analysis-v2-source-commit=$deploy_source_commit"
+assert_contains "$temp_dir/deploy-endpoint-update.out" "--no-traffic"
+assert_contains "$temp_dir/deploy-endpoint-update.out" \
+  "--image=asia-northeast3-docker.pkg.dev/test-project/cloud-run-source-deploy/analysis-worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+assert_contains "$temp_dir/deploy-endpoint-update.out" \
+  "--update-labels=analysis-v2-source-commit=$deploy_source_commit"
+assert_contains "$temp_dir/deploy-endpoint-update.out" \
+  "--revision-suffix=f${deploy_source_commit:0:6}abc12"
+assert_contains "$temp_dir/deploy-traffic.out" \
+  "--to-revisions=analysis-worker-f${deploy_source_commit:0:6}abc12=100"
+[[ "$(<"$temp_dir/deploy-state")" == "promoted" ]] \
+  || fail "Cloud Run apply did not finish on the verified staged revision"
 assert_contains "$temp_dir/deploy-source-manifest.out" "./.gcloudignore"
 assert_contains "$temp_dir/deploy-source-manifest.out" "./deploy-marker.txt"
 assert_not_contains "$temp_dir/deploy-source-manifest.out" "./.env.local"
@@ -1042,6 +1478,317 @@ assert_not_contains "$temp_dir/worker-apply.out" "UNTRACKED_DEPLOY_SECRET_SENTIN
 deploy_archive_path="$(<"$temp_dir/deploy-source-path.out")"
 [[ ! -e "$deploy_archive_path" ]] \
   || fail "temporary deploy source archive was not removed"
+runtime_snapshot_path="$(grep -o -- '--env-vars-file=[^ ]*' \
+  "$temp_dir/deploy-command.out" | head -n 1 | cut -d= -f2-)"
+build_snapshot_path="$(grep -o -- '--build-env-vars-file=[^ ]*' \
+  "$temp_dir/deploy-command.out" | head -n 1 | cut -d= -f2-)"
+[[ -n "$runtime_snapshot_path" && -n "$build_snapshot_path" \
+  && ! -e "$runtime_snapshot_path" && ! -e "$build_snapshot_path" ]] \
+  || fail "validated env manifest snapshots were not removed after deployment"
+
+printf 'ready\n' >"$temp_dir/deploy-lock-state"
+printf 'locked\n' >"$temp_dir/deploy-lock-object"
+if env "${common_env[@]}" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/deploy-lock-state" \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  "FAKE_GCLOUD_DEPLOY_LOCK_FILE=$temp_dir/deploy-lock-object" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+  >"$temp_dir/deploy-lock.out" 2>&1; then
+  fail "concurrent deployment bypassed the exclusive Cloud Storage lock"
+fi
+assert_contains "$temp_dir/deploy-lock.out" \
+  "another deployment holds the Cloud Storage deploy lock"
+[[ -e "$temp_dir/deploy-lock-object" ]] \
+  || fail "failed lock acquisition removed another deployment's lock"
+
+printf 'ready\n' >"$temp_dir/replaced-lock-state"
+rm -f "$temp_dir/replaced-lock-object"
+: >"$temp_dir/replaced-lock-events.out"
+if env "${common_env[@]}" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/replaced-lock-state" \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  "FAKE_GCLOUD_DEPLOY_LOCK_FILE=$temp_dir/replaced-lock-object" \
+  "FAKE_GCLOUD_EVENT_LOG=$temp_dir/replaced-lock-events.out" \
+  'FAKE_GCLOUD_LOCK_CP_AMBIGUOUS_SUCCESS=true' \
+  'FAKE_GCLOUD_LOCK_REPLACED_BEFORE_DESCRIBE=true' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+  >"$temp_dir/replaced-lock.out" 2>&1; then
+  fail "deployment accepted a lock generation replaced before owner verification"
+fi
+assert_contains "$temp_dir/replaced-lock.out" \
+  "another deployment holds the Cloud Storage deploy lock"
+[[ "$(<"$temp_dir/replaced-lock-object")" == "foreign deployment" ]] \
+  || fail "owner mismatch cleanup removed or changed another deployment's lock"
+assert_not_contains "$temp_dir/replaced-lock-events.out" "storage rm"
+
+printf 'prerequisites_ready\n' >"$temp_dir/bootstrap-rollback-state"
+printf 'ENABLED\n' >"$temp_dir/bootstrap-retention-state"
+: >"$temp_dir/bootstrap-rollback-traffic.out"
+: >"$temp_dir/bootstrap-rollback-events.out"
+if env "${common_env[@]}" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/bootstrap-rollback-state" \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  'FAKE_GCLOUD_FIRST_DEPLOY=true' \
+  "FAKE_GCLOUD_RETENTION_STATE_FILE=$temp_dir/bootstrap-retention-state" \
+  "FAKE_GCLOUD_TRAFFIC_LOG=$temp_dir/bootstrap-rollback-traffic.out" \
+  "FAKE_GCLOUD_EVENT_LOG=$temp_dir/bootstrap-rollback-events.out" \
+  'FAKE_GCLOUD_POST_PROMOTION_QUEUE_FAILURE=true' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+  >"$temp_dir/bootstrap-rollback.out" 2>&1; then
+  fail "first-deployment post-promotion failure did not fail closed"
+fi
+[[ "$(<"$temp_dir/bootstrap-rollback-state")" == "rolled_back_bootstrap" ]] \
+  || fail "first-deployment failure did not restore the disabled bootstrap revision"
+assert_contains "$temp_dir/bootstrap-rollback-traffic.out" \
+  "--to-revisions=analysis-worker-b${deploy_source_commit:0:6}abc12=100"
+assert_contains "$temp_dir/bootstrap-rollback.out" \
+  "rollback verified: analysis-worker-b${deploy_source_commit:0:6}abc12 serves 100% of traffic"
+[[ "$(<"$temp_dir/bootstrap-retention-state")" == "PAUSED" ]] \
+  || fail "bootstrap rollback did not pause retention against the disabled revision"
+pause_line="$(grep -n 'scheduler jobs pause analysis-v2-preflight-retention' \
+  "$temp_dir/bootstrap-rollback-events.out" | tail -n 1 | cut -d: -f1)"
+rollback_line="$(grep -n -- "--to-revisions=analysis-worker-b${deploy_source_commit:0:6}abc12=100" \
+  "$temp_dir/bootstrap-rollback-events.out" | tail -n 1 | cut -d: -f1)"
+[[ -n "$pause_line" && -n "$rollback_line" && "$pause_line" -lt "$rollback_line" ]] \
+  || fail "bootstrap rollback did not pause retention before restoring disabled traffic"
+
+printf 'rolled_back_bootstrap\n' >"$temp_dir/bootstrap-retry-state"
+printf 'PAUSED\n' >"$temp_dir/bootstrap-retry-scheduler-state"
+printf 'PAUSED\n' >"$temp_dir/bootstrap-retry-retention-state"
+: >"$temp_dir/bootstrap-retry-events.out"
+if env "${common_env[@]}" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/bootstrap-retry-state" \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  'FAKE_GCLOUD_ACTIVE_BOOTSTRAP=true' \
+  "FAKE_GCLOUD_SCHEDULER_STATE_FILE=$temp_dir/bootstrap-retry-scheduler-state" \
+  "FAKE_GCLOUD_RETENTION_STATE_FILE=$temp_dir/bootstrap-retry-retention-state" \
+  "FAKE_GCLOUD_EVENT_LOG=$temp_dir/bootstrap-retry-events.out" \
+  'FAKE_GCLOUD_POST_PROMOTION_QUEUE_FAILURE=true' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+  >"$temp_dir/bootstrap-retry.out" 2>&1; then
+  fail "bootstrap retry post-promotion failure did not fail closed"
+fi
+[[ "$(<"$temp_dir/bootstrap-retry-state")" == "rolled_back_bootstrap" ]] \
+  || fail "bootstrap retry failure did not restore the disabled bootstrap revision"
+assert_contains "$temp_dir/bootstrap-retry.out" \
+  "active known-good revision is an execution-disabled bootstrap rollback revision"
+assert_contains "$temp_dir/bootstrap-retry.out" \
+  "execution-disabled bootstrap traffic defers Scheduler reconciliation until the final gated revision is promoted"
+assert_contains "$temp_dir/bootstrap-retry.out" \
+  "rollback verified: analysis-worker-b${deploy_source_commit:0:6}abc12 serves 100% of traffic"
+[[ "$(<"$temp_dir/bootstrap-retry-scheduler-state")" == "PAUSED" ]] \
+  || fail "bootstrap retry rollback did not keep recovery paused"
+[[ "$(<"$temp_dir/bootstrap-retry-retention-state")" == "PAUSED" ]] \
+  || fail "bootstrap retry rollback did not re-pause retention"
+resume_line="$(grep -n 'scheduler jobs resume analysis-v2-preflight-retention' \
+  "$temp_dir/bootstrap-retry-events.out" | head -n 1 | cut -d: -f1)"
+pause_line="$(grep -n 'scheduler jobs pause analysis-v2-preflight-retention' \
+  "$temp_dir/bootstrap-retry-events.out" | tail -n 1 | cut -d: -f1)"
+[[ -n "$resume_line" && -n "$pause_line" && "$resume_line" -lt "$pause_line" ]] \
+  || fail "bootstrap retry did not re-pause retention after the failed promoted revision"
+
+printf 'ready\n' >"$temp_dir/rollback-state"
+printf 'PAUSED\n' >"$temp_dir/rollback-scheduler-state"
+: >"$temp_dir/rollback-traffic.out"
+: >"$temp_dir/rollback-events.out"
+if env "${common_env[@]}" \
+  'ANALYSIS_V2_RECOVERY_ENABLED=true' \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/rollback-state" \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  "FAKE_GCLOUD_SCHEDULER_STATE_FILE=$temp_dir/rollback-scheduler-state" \
+  "FAKE_GCLOUD_TRAFFIC_LOG=$temp_dir/rollback-traffic.out" \
+  "FAKE_GCLOUD_EVENT_LOG=$temp_dir/rollback-events.out" \
+  'FAKE_GCLOUD_POST_PROMOTION_QUEUE_FAILURE=true' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+  >"$temp_dir/worker-rollback.out" 2>&1; then
+  fail "post-promotion verification failure did not fail the deployment"
+fi
+[[ "$(<"$temp_dir/rollback-state")" == "rolled_back" ]] \
+  || fail "failed deployment did not restore the recorded known-good revision"
+assert_contains "$temp_dir/rollback-traffic.out" \
+  "--to-revisions=analysis-worker-f${deploy_source_commit:0:6}abc12=100"
+assert_contains "$temp_dir/rollback-traffic.out" \
+  "--to-revisions=analysis-worker-00002=100"
+assert_contains "$temp_dir/worker-rollback.out" \
+  "rollback verified: analysis-worker-00002 serves 100% of traffic"
+pause_line="$(grep -n 'scheduler jobs pause analysis-v2-recovery' \
+  "$temp_dir/rollback-events.out" | tail -n 1 | cut -d: -f1)"
+rollback_line="$(grep -n -- '--to-revisions=analysis-worker-00002=100' \
+  "$temp_dir/rollback-events.out" | tail -n 1 | cut -d: -f1)"
+[[ -n "$pause_line" && -n "$rollback_line" && "$pause_line" -lt "$rollback_line" ]] \
+  || fail "recovery-disabled rollback did not pause Scheduler before restoring traffic"
+
+printf 'ready\n' >"$temp_dir/stale-rollback-state"
+printf 'PAUSED\n' >"$temp_dir/stale-rollback-scheduler-state"
+: >"$temp_dir/stale-rollback-traffic.out"
+if env "${common_env[@]}" \
+  'ANALYSIS_V2_RECOVERY_ENABLED=true' \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/stale-rollback-state" \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  "FAKE_GCLOUD_SCHEDULER_STATE_FILE=$temp_dir/stale-rollback-scheduler-state" \
+  "FAKE_GCLOUD_TRAFFIC_LOG=$temp_dir/stale-rollback-traffic.out" \
+  'FAKE_GCLOUD_CONCURRENT_PROMOTION_ON_FAILURE=true' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+  >"$temp_dir/stale-rollback.out" 2>&1; then
+  fail "simulated concurrent promotion did not fail the deployment"
+fi
+[[ "$(<"$temp_dir/stale-rollback-state")" == "foreign_promoted" ]] \
+  || fail "stale rollback overwrote traffic owned by another deployment"
+assert_contains "$temp_dir/stale-rollback.out" \
+  "refusing stale rollback because live traffic is owned by another deployment"
+assert_not_contains "$temp_dir/stale-rollback-traffic.out" \
+  "--to-revisions=analysis-worker-00002=100"
+
+printf 'ready\n' >"$temp_dir/prepromotion-failure-state"
+printf 'ENABLED\n' >"$temp_dir/prepromotion-failure-scheduler-state"
+printf 'ENABLED\n' >"$temp_dir/prepromotion-failure-retention-state"
+: >"$temp_dir/prepromotion-failure-events.out"
+if env "${common_env[@]}" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/prepromotion-failure-state" \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  'FAKE_GCLOUD_KNOWN_GOOD_RECOVERY_ENABLED=true' \
+  "FAKE_GCLOUD_SCHEDULER_STATE_FILE=$temp_dir/prepromotion-failure-scheduler-state" \
+  "FAKE_GCLOUD_RETENTION_STATE_FILE=$temp_dir/prepromotion-failure-retention-state" \
+  "FAKE_GCLOUD_EVENT_LOG=$temp_dir/prepromotion-failure-events.out" \
+  'FAKE_GCLOUD_RETENTION_DRIFT=true' \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+  >"$temp_dir/prepromotion-failure.out" 2>&1; then
+  fail "pre-promotion maintenance drift did not fail closed"
+fi
+[[ "$(<"$temp_dir/prepromotion-failure-state")" == "rolled_back" ]] \
+  || fail "pre-promotion maintenance failure did not preserve known-good traffic"
+[[ "$(<"$temp_dir/prepromotion-failure-scheduler-state")" == "ENABLED" ]] \
+  || fail "pre-promotion maintenance failure did not restore the live recovery gate"
+[[ "$(<"$temp_dir/prepromotion-failure-retention-state")" == "PAUSED" ]] \
+  || fail "pre-promotion retention drift was not left safely paused"
+assert_not_contains "$temp_dir/prepromotion-failure-events.out" \
+  "--to-revisions=analysis-worker-f${deploy_source_commit:0:6}abc12=100"
+pause_line="$(grep -n 'scheduler jobs pause analysis-v2-recovery' \
+  "$temp_dir/prepromotion-failure-events.out" | head -n 1 | cut -d: -f1)"
+rollback_line="$(grep -n -- '--to-revisions=analysis-worker-00002=100' \
+  "$temp_dir/prepromotion-failure-events.out" | tail -n 1 | cut -d: -f1)"
+resume_line="$(grep -n 'scheduler jobs resume analysis-v2-recovery' \
+  "$temp_dir/prepromotion-failure-events.out" | tail -n 1 | cut -d: -f1)"
+[[ -n "$pause_line" && -n "$rollback_line" && -n "$resume_line" \
+  && "$pause_line" -lt "$rollback_line" && "$rollback_line" -lt "$resume_line" ]] \
+  || fail "pre-promotion failure did not restore traffic before re-enabling recovery"
+
+printf 'ready\n' >"$temp_dir/drifted-recovery-rollback-state"
+printf 'PAUSED\n' >"$temp_dir/drifted-recovery-scheduler-state"
+: >"$temp_dir/drifted-recovery-events.out"
+if env "${common_env[@]}" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/drifted-recovery-rollback-state" \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  'FAKE_GCLOUD_KNOWN_GOOD_RECOVERY_ENABLED=true' \
+  'FAKE_GCLOUD_RECOVERY_DRIFT=true' \
+  "FAKE_GCLOUD_SCHEDULER_STATE_FILE=$temp_dir/drifted-recovery-scheduler-state" \
+  "FAKE_GCLOUD_EVENT_LOG=$temp_dir/drifted-recovery-events.out" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+  >"$temp_dir/drifted-recovery-rollback.out" 2>&1; then
+  fail "structurally drifted recovery job did not fail closed"
+fi
+[[ "$(<"$temp_dir/drifted-recovery-scheduler-state")" == "PAUSED" ]] \
+  || fail "rollback resumed a structurally drifted recovery Scheduler job"
+assert_contains "$temp_dir/drifted-recovery-rollback.out" \
+  "refusing to resume a structurally drifted recovery Scheduler job"
+assert_not_contains "$temp_dir/drifted-recovery-events.out" \
+  "scheduler jobs resume analysis-v2-recovery"
+
+printf 'ready\n' >"$temp_dir/enabled-drift-rollback-state"
+printf 'ENABLED\n' >"$temp_dir/enabled-drift-scheduler-state"
+: >"$temp_dir/enabled-drift-events.out"
+if env "${common_env[@]}" \
+  'ANALYSIS_V2_RECOVERY_ENABLED=true' \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/enabled-drift-rollback-state" \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  'FAKE_GCLOUD_KNOWN_GOOD_RECOVERY_ENABLED=true' \
+  'FAKE_GCLOUD_RECOVERY_DRIFT_ON_ROLLBACK=true' \
+  'FAKE_GCLOUD_POST_PROMOTION_QUEUE_FAILURE=true' \
+  "FAKE_GCLOUD_SCHEDULER_STATE_FILE=$temp_dir/enabled-drift-scheduler-state" \
+  "FAKE_GCLOUD_EVENT_LOG=$temp_dir/enabled-drift-events.out" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+  >"$temp_dir/enabled-drift-rollback.out" 2>&1; then
+  fail "enabled recovery drift during rollback did not fail closed"
+fi
+[[ "$(<"$temp_dir/enabled-drift-scheduler-state")" == "PAUSED" ]] \
+  || fail "rollback left a structurally drifted recovery job enabled"
+assert_contains "$temp_dir/enabled-drift-rollback.out" \
+  "refusing to resume a structurally drifted recovery Scheduler job"
+assert_contains "$temp_dir/enabled-drift-events.out" \
+  "scheduler jobs pause analysis-v2-recovery"
+
+printf 'ready\n' >"$temp_dir/recovery-disable-deploy-state"
+printf 'ENABLED\n' >"$temp_dir/recovery-disable-scheduler-state"
+: >"$temp_dir/recovery-disable-events.out"
+env "${common_env[@]}" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/recovery-disable-deploy-state" \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  'FAKE_GCLOUD_KNOWN_GOOD_RECOVERY_ENABLED=true' \
+  "FAKE_GCLOUD_SCHEDULER_STATE_FILE=$temp_dir/recovery-disable-scheduler-state" \
+  "FAKE_GCLOUD_EVENT_LOG=$temp_dir/recovery-disable-events.out" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+  >"$temp_dir/recovery-disable-deploy.out"
+pause_line="$(grep -n 'scheduler jobs pause analysis-v2-recovery' \
+  "$temp_dir/recovery-disable-events.out" | head -n 1 | cut -d: -f1)"
+promotion_line="$(grep -n -- "--to-revisions=analysis-worker-f${deploy_source_commit:0:6}abc12=100" \
+  "$temp_dir/recovery-disable-events.out" | head -n 1 | cut -d: -f1)"
+[[ -n "$pause_line" && -n "$promotion_line" && "$pause_line" -lt "$promotion_line" ]] \
+  || fail "recovery true-to-false deployment did not pause Scheduler before promotion"
+[[ "$(<"$temp_dir/recovery-disable-scheduler-state")" == "PAUSED" ]] \
+  || fail "recovery Scheduler was not paused after disabling recovery"
+
+printf 'ready\n' >"$temp_dir/recovery-enable-deploy-state"
+printf 'PAUSED\n' >"$temp_dir/recovery-enable-scheduler-state"
+: >"$temp_dir/recovery-enable-events.out"
+env "${common_env[@]}" \
+  'ANALYSIS_V2_RECOVERY_ENABLED=true' \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$deploy_source_repo" \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build.yaml" \
+  "FAKE_GCLOUD_STATE_FILE=$temp_dir/recovery-enable-deploy-state" \
+  "FAKE_GCLOUD_SOURCE_COMMIT=$deploy_source_commit" \
+  "FAKE_GCLOUD_SCHEDULER_STATE_FILE=$temp_dir/recovery-enable-scheduler-state" \
+  "FAKE_GCLOUD_EVENT_LOG=$temp_dir/recovery-enable-events.out" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" \
+  >"$temp_dir/recovery-enable-deploy.out"
+promotion_line="$(grep -n -- "--to-revisions=analysis-worker-f${deploy_source_commit:0:6}abc12=100" \
+  "$temp_dir/recovery-enable-events.out" | head -n 1 | cut -d: -f1)"
+resume_line="$(grep -n 'scheduler jobs resume analysis-v2-recovery' \
+  "$temp_dir/recovery-enable-events.out" | head -n 1 | cut -d: -f1)"
+[[ -n "$promotion_line" && -n "$resume_line" && "$promotion_line" -lt "$resume_line" ]] \
+  || fail "recovery false-to-true deployment resumed Scheduler before promotion"
+[[ "$(<"$temp_dir/recovery-enable-scheduler-state")" == "ENABLED" ]] \
+  || fail "recovery Scheduler was not enabled after recovery promotion"
 
 env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   'ANALYSIS_V2_WORKER_ENABLED=true' \
@@ -1051,6 +1798,7 @@ env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   >"$temp_dir/worker-independent-gates.out"
 assert_contains "$temp_dir/worker-independent-gates.out" \
   "ANALYSIS_V2_WORKER_ENABLED=true\\,ANALYSIS_V2_RECOVERY_ENABLED=false"
+assert_contains "$temp_dir/worker-independent-gates.out" "--no-traffic"
 assert_contains "$temp_dir/worker-independent-gates.out" \
   "--remove-env-vars=ANALYSIS_V2_ADMISSION_ENABLED\\,ANALYSIS_V2_WORKER_EXECUTION_ENABLED"
 assert_not_contains "$temp_dir/worker-independent-gates.out" \
@@ -1162,6 +1910,21 @@ assert_contains "$temp_dir/runtime-provider-secret.out" \
 assert_not_contains "$temp_dir/runtime-provider-secret.out" \
   "SECRET_SENTINEL_MUST_NOT_BE_PRINTED"
 
+for quoted_runtime_manifest in quoted-secret quoted-gate; do
+  if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
+    "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-$quoted_runtime_manifest.yaml" \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    >"$temp_dir/runtime-$quoted_runtime_manifest.out" 2>&1; then
+    fail "quoted runtime key bypassed structured manifest validation: $quoted_runtime_manifest"
+  fi
+done
+assert_contains "$temp_dir/runtime-quoted-secret.out" \
+  "runtime env file must not contain plaintext provider or credential key: APIFY_QUINARY_API_TOKEN"
+assert_not_contains "$temp_dir/runtime-quoted-secret.out" \
+  "QUOTED_SECRET_SENTINEL_MUST_NOT_BE_PRINTED"
+assert_contains "$temp_dir/runtime-quoted-gate.out" \
+  "runtime env file contains a forbidden placement, gate, or WIF bootstrap key: ANALYSIS_V2_TASKS_ENABLED"
+
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-wrong-slot.env" \
   bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
@@ -1182,6 +1945,30 @@ assert_contains "$temp_dir/build-secret.out" \
   "build env file contains a non-public or unsupported key: SUPABASE_SERVICE_ROLE_KEY"
 assert_not_contains "$temp_dir/build-secret.out" \
   "SECRET_BUILD_SENTINEL_MUST_NOT_BE_PRINTED"
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build-quoted-secret.yaml" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/build-quoted-secret.out" 2>&1; then
+  fail "quoted build secret key bypassed structured YAML validation"
+fi
+assert_contains "$temp_dir/build-quoted-secret.out" \
+  "build env file contains a non-public or unsupported key: SOME_API_KEY"
+assert_not_contains "$temp_dir/build-quoted-secret.out" \
+  "QUOTED_BUILD_SECRET_SENTINEL_MUST_NOT_BE_PRINTED"
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
+  "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=$temp_dir/build-duplicate.yaml" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/build-duplicate.out" 2>&1; then
+  fail "duplicate quoted/unquoted YAML key was accepted"
+fi
+assert_contains "$temp_dir/build-duplicate.out" \
+  "build env file must be a valid, duplicate-free YAML mapping"
+assert_not_contains "$temp_dir/build-duplicate.out" \
+  "https://duplicate.example.test"
 
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
   "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime.env" \
@@ -1301,6 +2088,43 @@ assert_contains "$temp_dir/worker-check.out" \
 assert_contains "$temp_dir/worker-check.out" \
   "Analysis V2 recovery and preflight retention schedulers verified"
 
+printf 'ENABLED\n' >"$temp_dir/recovery-scheduler-state"
+: >"$temp_dir/recovery-scheduler-mutations.out"
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  "FAKE_GCLOUD_SCHEDULER_STATE_FILE=$temp_dir/recovery-scheduler-state" \
+  "FAKE_GCLOUD_SCHEDULER_MUTATION_LOG=$temp_dir/recovery-scheduler-mutations.out" \
+  bash "$script_dir/configure-analysis-v2-maintenance.sh" \
+  >"$temp_dir/recovery-scheduler-pause.out"
+[[ "$(<"$temp_dir/recovery-scheduler-state")" == "PAUSED" ]] \
+  || fail "disabled recovery gate did not pause the recovery Scheduler job"
+assert_contains "$temp_dir/recovery-scheduler-mutations.out" \
+  "scheduler jobs pause analysis-v2-recovery"
+assert_not_contains "$temp_dir/recovery-scheduler-mutations.out" \
+  "analysis-v2-preflight-retention"
+
+printf 'PAUSED\n' >"$temp_dir/recovery-scheduler-state"
+: >"$temp_dir/recovery-scheduler-mutations.out"
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'ANALYSIS_V2_RECOVERY_ENABLED=true' \
+  "FAKE_GCLOUD_SCHEDULER_STATE_FILE=$temp_dir/recovery-scheduler-state" \
+  "FAKE_GCLOUD_SCHEDULER_MUTATION_LOG=$temp_dir/recovery-scheduler-mutations.out" \
+  bash "$script_dir/configure-analysis-v2-maintenance.sh" \
+  >"$temp_dir/recovery-scheduler-resume.out"
+[[ "$(<"$temp_dir/recovery-scheduler-state")" == "ENABLED" ]] \
+  || fail "enabled recovery gate did not resume the recovery Scheduler job"
+assert_contains "$temp_dir/recovery-scheduler-mutations.out" \
+  "scheduler jobs resume analysis-v2-recovery"
+
+printf 'ENABLED\n' >"$temp_dir/recovery-scheduler-state"
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  "FAKE_GCLOUD_SCHEDULER_STATE_FILE=$temp_dir/recovery-scheduler-state" \
+  bash "$script_dir/configure-analysis-v2-maintenance.sh" --check \
+  >"$temp_dir/recovery-scheduler-state-drift.out" 2>&1; then
+  fail "enabled recovery Scheduler was accepted while the recovery gate was false"
+fi
+assert_contains "$temp_dir/recovery-scheduler-state-drift.out" \
+  "scheduler job state has drifted: analysis-v2-recovery (PAUSED required)"
+
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   'FAKE_GCLOUD_SCHEDULER_DRIFT=true' \
   bash "$script_dir/configure-analysis-v2-maintenance.sh" --check \
@@ -1309,13 +2133,38 @@ if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
 fi
 assert_contains "$temp_dir/scheduler-drift-check.out" "scheduler job has drifted"
 
+printf 'ENABLED\n' >"$temp_dir/recovery-scheduler-state"
+: >"$temp_dir/recovery-scheduler-mutations.out"
 if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   'FAKE_GCLOUD_SCHEDULER_DRIFT=true' \
+  "FAKE_GCLOUD_SCHEDULER_STATE_FILE=$temp_dir/recovery-scheduler-state" \
+  "FAKE_GCLOUD_SCHEDULER_MUTATION_LOG=$temp_dir/recovery-scheduler-mutations.out" \
   bash "$script_dir/configure-analysis-v2-maintenance.sh" \
   >"$temp_dir/scheduler-drift-apply.out" 2>&1; then
   fail "scheduler drift was replaced without explicit approval"
 fi
 assert_contains "$temp_dir/scheduler-drift-apply.out" "inspect or use --reconcile-jobs"
+assert_contains "$temp_dir/scheduler-drift-apply.out" \
+  "safety pause applied before reporting scheduler configuration drift"
+[[ "$(<"$temp_dir/recovery-scheduler-state")" == "PAUSED" ]] \
+  || fail "recovery Scheduler drift failure did not first stop the disabled job"
+
+printf 'ENABLED\n' >"$temp_dir/retention-scheduler-state"
+: >"$temp_dir/retention-scheduler-mutations.out"
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_RETENTION_DRIFT=true' \
+  "FAKE_GCLOUD_RETENTION_STATE_FILE=$temp_dir/retention-scheduler-state" \
+  "FAKE_GCLOUD_SCHEDULER_MUTATION_LOG=$temp_dir/retention-scheduler-mutations.out" \
+  bash "$script_dir/configure-analysis-v2-maintenance.sh" \
+  >"$temp_dir/retention-scheduler-drift-apply.out" 2>&1; then
+  fail "retention drift was replaced without explicit approval"
+fi
+assert_contains "$temp_dir/retention-scheduler-drift-apply.out" \
+  "safety pause applied before reporting scheduler configuration drift: analysis-v2-preflight-retention"
+assert_contains "$temp_dir/retention-scheduler-mutations.out" \
+  "scheduler jobs pause analysis-v2-preflight-retention"
+[[ "$(<"$temp_dir/retention-scheduler-state")" == "PAUSED" ]] \
+  || fail "retention Scheduler drift failure did not stop the unsafe job"
 
 env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   'FAKE_GCLOUD_SCHEDULER_MISSING=true' \
@@ -1325,6 +2174,8 @@ assert_contains "$temp_dir/scheduler-create-dry-run.out" \
   "gcloud scheduler jobs create http analysis-v2-recovery"
 assert_contains "$temp_dir/scheduler-create-dry-run.out" \
   "gcloud scheduler jobs create http analysis-v2-preflight-retention"
+assert_contains "$temp_dir/scheduler-create-dry-run.out" \
+  "gcloud scheduler jobs pause analysis-v2-recovery"
 
 env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   'ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE=' \
@@ -1542,4 +2393,4 @@ for portable_mktemp_script in \
   fi
 done
 
-printf 'Analysis V2 infrastructure script dry-run tests passed\n'
+printf 'Analysis V2 infrastructure script tests passed\n'

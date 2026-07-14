@@ -12,6 +12,7 @@ readonly DEFAULT_MEMORY="2Gi"
 readonly DEFAULT_CONCURRENCY="2"
 readonly DEFAULT_MAX_INSTANCES="6"
 readonly DEFAULT_TIMEOUT_SECONDS="300"
+readonly PROVENANCE_LABEL_KEY="analysis-v2-source-commit"
 
 mode="apply"
 reconcile_iam="false"
@@ -28,7 +29,8 @@ Before applying this script, run the infrastructure scripts in this order:
   1. scripts/configure-analysis-v2-worker-identity.sh
   2. scripts/configure-analysis-v2-secrets.sh
   3. scripts/configure-analysis-v2-media-bucket.sh
-  4. scripts/deploy-analysis-v2-worker.sh
+  4. scripts/configure-analysis-v2-deploy-lock.sh
+  5. scripts/deploy-analysis-v2-worker.sh
 
 Required environment variables:
   ANALYSIS_V2_TASKS_PROJECT
@@ -44,6 +46,7 @@ Required environment variables:
   ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE
   ANALYSIS_V2_TASKS_CLOUD_RUN_REGION
   ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET
+  ANALYSIS_V2_DEPLOY_LOCK_BUCKET
   ANALYSIS_V2_APIFY_API_TOKEN_SLOT
   ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION
   ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION
@@ -72,6 +75,7 @@ Optional deployment environment variables:
   ANALYSIS_V2_WORKER_TIMEOUT_SECONDS         Fixed launch value: 300.
   ANALYSIS_V2_WORKER_ENABLED                 Enables authenticated worker drain; defaults false.
   ANALYSIS_V2_RECOVERY_ENABLED               Enables scheduled recovery; defaults false.
+  ANALYSIS_V2_DEPLOY_REVISION_NONCE          Optional 5-character lowercase test/deploy nonce.
 
 The deployed service uses request-based billing (CPU throttling), scale-to-zero,
 second-generation execution, and no VPC connector or Direct VPC network. That
@@ -155,8 +159,18 @@ validate_queue() {
 }
 
 validate_bucket() {
-  [[ "$1" =~ ^[a-z0-9]([a-z0-9-]{1,61}[a-z0-9])$ ]] \
-    || die "ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET is invalid"
+  local bucket="$1"
+  local label="$2"
+  [[ "$bucket" =~ ^[a-z0-9]([a-z0-9-]{1,61}[a-z0-9])$ ]] \
+    || die "$label is invalid"
+}
+
+validate_deploy_lock_bucket() {
+  local bucket="$1"
+  local random_suffix="${bucket##*-}"
+  validate_bucket "$bucket" "ANALYSIS_V2_DEPLOY_LOCK_BUCKET"
+  [[ "$random_suffix" =~ ^[a-f0-9]{32}$ ]] \
+    || die "ANALYSIS_V2_DEPLOY_LOCK_BUCKET must end with a persistent 128-bit lowercase hexadecimal suffix"
 }
 
 validate_slot() {
@@ -271,7 +285,7 @@ service_json() {
     --format=json 2>/dev/null
 }
 
-service_runtime_matches() {
+service_runtime_config_matches() {
   local config="$1"
   jq -e \
     --arg runtime_sa "$ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL" \
@@ -352,13 +366,28 @@ service_runtime_matches() {
         and ([.status.conditions[]? |
           select(.type == "Ready" and .status == "True")] | length) == 1
         and (.status.latestCreatedRevisionName // "") != ""
-        and .status.latestCreatedRevisionName == .status.latestReadyRevisionName
-        and (.status.latestReadyRevisionName as $latest
-          | [.status.traffic[]? | select((.percent // 0) > 0)] as $traffic
-          | ($traffic | length) == 1
-            and $traffic[0].revisionName == $latest
-            and ($traffic[0].percent | tonumber) == 100)' \
+        and .status.latestCreatedRevisionName == .status.latestReadyRevisionName' \
     <<<"$config" >/dev/null
+}
+
+service_traffic_matches_revision() {
+  local config="$1"
+  local revision="$2"
+  jq -e --arg revision "$revision" '
+    [.status.traffic[]? | select((.percent // 0) > 0)] as $traffic
+    | ($traffic | length) == 1
+      and $traffic[0].revisionName == $revision
+      and ($traffic[0].percent | tonumber) == 100
+  ' <<<"$config" >/dev/null
+}
+
+service_runtime_matches() {
+  local config="$1"
+  local latest_ready
+  latest_ready="$(jq -er '.status.latestReadyRevisionName' <<<"$config")" \
+    || return 1
+  service_runtime_config_matches "$config" \
+    && service_traffic_matches_revision "$config" "$latest_ready"
 }
 
 service_has_forbidden_plaintext_credential() {
@@ -386,6 +415,68 @@ service_has_forbidden_plaintext_credential() {
 service_origin() {
   local config="$1"
   jq -er '.status.url // .status.address.url' <<<"$config"
+}
+
+revision_json() {
+  local revision="$1"
+  gcloud run revisions describe "$revision" \
+    "--project=$ANALYSIS_V2_TASKS_PROJECT" \
+    "--region=$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION" \
+    --format=json 2>/dev/null
+}
+
+revision_is_ready_with_provenance() {
+  local config="$1"
+  local revision="$2"
+  local expected_sha="${3:-}"
+  jq -e \
+    --arg revision "$revision" \
+    --arg label_key "$PROVENANCE_LABEL_KEY" \
+    --arg expected_sha "$expected_sha" '
+      .metadata.name == $revision
+        and ((.metadata.labels // {})[$label_key] // "" | test("^[0-9a-f]{40}$"))
+        and ($expected_sha == ""
+          or (.metadata.labels // {})[$label_key] == $expected_sha)
+        and ([.status.conditions[]?
+          | select(.type == "Ready" and .status == "True")] | length) == 1
+    ' <<<"$config" >/dev/null
+}
+
+revision_is_ready() {
+  local config="$1"
+  local revision="$2"
+  jq -e --arg revision "$revision" '
+    .metadata.name == $revision
+      and ([.status.conditions[]?
+        | select(.type == "Ready" and .status == "True")] | length) == 1
+  ' <<<"$config" >/dev/null
+}
+
+bootstrap_revision_is_execution_disabled() {
+  local config="$1"
+  jq -e '
+    def containers: (.spec.containers // .spec.template.spec.containers // []);
+    def values($name):
+      [containers[0].env[]? | select(.name == $name) | .value];
+    def disabled($name):
+      (values($name) == [] or values($name) == ["false"]);
+    disabled("ANALYSIS_V2_TASKS_ENABLED")
+      and disabled("ANALYSIS_V2_WORKER_ENABLED")
+      and disabled("ANALYSIS_V2_RECOVERY_ENABLED")
+      and disabled("PREFLIGHT_TASKS_ENABLED")
+      and disabled("PREFLIGHT_LOCAL_AFTER_ENABLED")
+  ' <<<"$config" >/dev/null
+}
+
+verify_revision_provenance() {
+  local revision="$1"
+  local expected_sha="${2:-}"
+  local config
+  config="$(revision_json "$revision")" \
+    || die "Cloud Run revision was not observable: $revision"
+  revision_is_ready_with_provenance "$config" "$revision" "$expected_sha" \
+    || die "Cloud Run revision is unready or missing exact commit provenance: $revision"
+  log "verified: ready Cloud Run revision provenance: $revision"
 }
 
 worker_endpoint_env_matches() {
@@ -442,6 +533,7 @@ worker_endpoint_env_matches() {
 ensure_worker_endpoint_env() {
   local config
   local origin
+  local -a staging_args=(--no-traffic)
   if ! config="$(service_json)"; then
     [[ "$mode" == "dry-run" ]] \
       || die "Cloud Run worker is unavailable for endpoint configuration"
@@ -453,125 +545,128 @@ ensure_worker_endpoint_env() {
   [[ "$origin" =~ ^https://[a-z0-9.-]+$ ]] \
     || die "Cloud Run worker returned an invalid canonical URL"
 
-  if worker_endpoint_env_matches "$config" "$origin"; then
+  if [[ "$mode" == "check" ]]; then
+    worker_endpoint_env_matches "$config" "$origin" \
+      || die "Cloud Run worker queue, gate, target, or OIDC runtime configuration has drifted"
     log "verified: V2 and preflight tasks target the canonical private worker URL"
     return 0
   fi
-  [[ "$mode" != "check" ]] \
-    || die "Cloud Run worker queue, gate, target, or OIDC runtime configuration has drifted"
+
+  if [[ "$mode" == "apply" ]]; then
+    [[ "$build_revision_image" =~ @sha256:[0-9a-f]{64}$ ]] \
+      || die "source-build revision did not expose an immutable image digest"
+    staging_args+=("--image=$build_revision_image")
+  else
+    log "[dry-run] final revision will pin the immutable image digest from the staged source-build revision"
+  fi
+
   run_mutation gcloud run services update \
     "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE" \
     "--project=$ANALYSIS_V2_TASKS_PROJECT" \
     "--region=$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION" \
+    "${staging_args[@]}" \
+    "--revision-suffix=$final_revision_suffix" \
+    "--update-labels=$PROVENANCE_LABEL_KEY=$source_commit_sha" \
     "--update-env-vars=ANALYSIS_V2_TASKS_ENABLED=true,ANALYSIS_V2_WORKER_ENABLED=$worker_enabled,ANALYSIS_V2_RECOVERY_ENABLED=$recovery_enabled,ANALYSIS_V2_TASKS_PROJECT=$ANALYSIS_V2_TASKS_PROJECT,ANALYSIS_V2_TASKS_LOCATION=$ANALYSIS_V2_TASKS_LOCATION,ANALYSIS_V2_TASKS_QUEUE=$ANALYSIS_V2_TASKS_QUEUE,ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,ANALYSIS_V2_TASKS_CALLER_AUTH_MODE=adc,ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$ANALYSIS_V2_APIFY_API_TOKEN_SLOT,ANALYSIS_V2_TASKS_TARGET_URL=$origin/api/analysis/v2/worker,ANALYSIS_V2_TASKS_OIDC_AUDIENCE=$origin,PREFLIGHT_TASKS_ENABLED=true,PREFLIGHT_TASKS_PROJECT=$ANALYSIS_V2_TASKS_PROJECT,PREFLIGHT_TASKS_LOCATION=$ANALYSIS_V2_TASKS_LOCATION,PREFLIGHT_TASKS_QUEUE=$preflight_queue,PREFLIGHT_TASKS_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_TASKS_SERVICE_ACCOUNT_EMAIL,PREFLIGHT_TASKS_CALLER_AUTH_MODE=adc,PREFLIGHT_TASKS_TARGET_URL=$origin/api/analysis/preflight/worker,PREFLIGHT_TASKS_OIDC_AUDIENCE=$origin,PREFLIGHT_LOCAL_AFTER_ENABLED=false,ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL=$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL,ANALYSIS_V2_MAINTENANCE_OIDC_AUDIENCE=$origin" \
     '--remove-env-vars=ANALYSIS_V2_ADMISSION_ENABLED,ANALYSIS_V2_WORKER_EXECUTION_ENABLED' \
     --quiet
 
   if [[ "$mode" == "apply" ]]; then
     config="$(service_json)" || die "Cloud Run worker was unavailable after endpoint update"
-    service_runtime_matches "$config" \
+    staged_revision="$(jq -er '.status.latestCreatedRevisionName' <<<"$config")" \
+      || die "staged Cloud Run revision name was not observable"
+    [[ "$staged_revision" == "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE-$final_revision_suffix" ]] \
+      || die "Cloud Run staged an unexpected final revision"
+    service_runtime_config_matches "$config" \
       || die "Cloud Run worker became unready after canonical runtime env update"
     worker_endpoint_env_matches "$config" "$origin" \
       || die "canonical Cloud Tasks worker targets were not applied"
+    if [[ -n "$known_good_revision" ]]; then
+      service_traffic_matches_revision "$config" "$known_good_revision" \
+        || die "staging changed live traffic before promotion"
+    fi
+    verify_revision_provenance "$staged_revision" "$source_commit_sha"
+    config="$(revision_json "$staged_revision")" \
+      || die "staged final Cloud Run revision was not observable"
+    [[ "$(jq -er '.spec.containers[0].image' <<<"$config")" \
+      == "$build_revision_image" ]] \
+      || die "staged final revision does not use the verified source-build image digest"
+    log "verified: final worker revision is staged without receiving live traffic"
+  else
+    staged_revision="$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE-$final_revision_suffix"
   fi
 }
 
-runtime_env_file_has_bucket() {
-  local env_file="$1"
+env_json_has_bucket() {
+  local env_json="$1"
   local expected="$ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET"
-  awk -v expected="$expected" '
-    /^[[:space:]]*ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET[[:space:]]*[:=]/ {
-      line = $0
-      sub(/^[^:=]*[:=][[:space:]]*/, "", line)
-      sub(/[[:space:]]*#.*$/, "", line)
-      gsub(/^[[:space:]\047\"]+|[[:space:]\047\"]+$/, "", line)
-      if (line == expected) found = 1
-    }
-    END { exit(found ? 0 : 1) }
-  ' "$env_file"
+  jq -e --arg expected "$expected" \
+    '.ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET == $expected' \
+    <<<"$env_json" >/dev/null
 }
 
-env_file_key_names() {
-  awk '
-    {
-      line = $0
-      sub(/^[[:space:]]*/, "", line)
-      sub(/^export[[:space:]]+/, "", line)
-      if (line ~ /^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*[:=]/) {
-        sub(/[[:space:]]*[:=].*$/, "", line)
-        print line
-      }
-    }
-  ' "$1"
-}
-
-env_file_has_nonempty_value() {
+parse_env_file_json() {
   local env_file="$1"
+  local validator="$script_dir/validate-analysis-v2-env-file.mjs"
+  [[ -f "$validator" ]] || die "structured env manifest validator is missing"
+  node "$validator" "$env_file"
+}
+
+write_env_snapshot() {
+  local env_json="$1"
+  local name="$2"
+  local output_variable="$3"
+  local snapshot
+  if [[ -z "$manifest_snapshot_dir" ]]; then
+    manifest_snapshot_dir="$(mktemp -d "${TMPDIR:-/tmp}/analysis-v2-env-snapshot.XXXXXX")"
+    chmod 700 "$manifest_snapshot_dir"
+  fi
+  snapshot="$manifest_snapshot_dir/$name.yaml"
+  (umask 077 && printf '%s\n' "$env_json" >"$snapshot")
+  chmod 400 "$snapshot"
+  printf -v "$output_variable" '%s' "$snapshot"
+}
+
+env_json_has_nonempty_value() {
+  local env_json="$1"
   local expected_key="$2"
-  awk -v expected_key="$expected_key" '
-    {
-      line = $0
-      sub(/^[[:space:]]*/, "", line)
-      sub(/^export[[:space:]]+/, "", line)
-      if (line ~ ("^" expected_key "[[:space:]]*[:=]")) {
-        sub(/^[^:=]*[:=][[:space:]]*/, "", line)
-        sub(/[[:space:]]*#.*$/, "", line)
-        gsub(/^[[:space:]\047\"]+|[[:space:]\047\"]+$/, "", line)
-        if (length(line) > 0) found++
-      }
-    }
-    END { exit(found == 1 ? 0 : 1) }
-  ' "$env_file"
+  jq -e --arg expected_key "$expected_key" \
+    'has($expected_key) and (.[$expected_key] | length > 0)' \
+    <<<"$env_json" >/dev/null
 }
 
-env_file_value_equals() {
-  local env_file="$1"
+env_json_value_equals() {
+  local env_json="$1"
   local expected_key="$2"
   local expected_value="$3"
-  awk -v expected_key="$expected_key" -v expected_value="$expected_value" '
-    {
-      line = $0
-      sub(/^[[:space:]]*/, "", line)
-      sub(/^export[[:space:]]+/, "", line)
-      if (line ~ ("^" expected_key "[[:space:]]*[:=]")) {
-        sub(/^[^:=]*[:=][[:space:]]*/, "", line)
-        sub(/[[:space:]]*#.*$/, "", line)
-        gsub(/^[[:space:]\047\"]+|[[:space:]\047\"]+$/, "", line)
-        if (line == expected_value) found++
-      }
-    }
-    END { exit(found == 1 ? 0 : 1) }
-  ' "$env_file"
+  jq -e --arg expected_key "$expected_key" --arg expected_value "$expected_value" \
+    '.[$expected_key] == $expected_value' \
+    <<<"$env_json" >/dev/null
 }
 
 validate_runtime_env_keys() {
-  local env_file="$1"
+  local env_json="$1"
   local key
-  local duplicate
-  duplicate="$(env_file_key_names "$env_file" | sort | uniq -d | head -n 1)"
-  [[ -z "$duplicate" ]] || die "runtime env file contains a duplicate key: $duplicate"
   while IFS= read -r key; do
     case "$key" in
-      VERCEL|VERCEL_ENV|GCP_VERCEL_WIF_PROVIDER_RESOURCE|VERCEL_OIDC_TEAM_SLUG|VERCEL_OIDC_TEAM_ID|VERCEL_OIDC_PROJECT_ID|*_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL|ANALYSIS_V2_ADMISSION_ENABLED|ANALYSIS_V2_WORKER_EXECUTION_ENABLED)
+      VERCEL|VERCEL_ENV|GCP_VERCEL_WIF_PROVIDER_RESOURCE|VERCEL_OIDC_TEAM_SLUG|VERCEL_OIDC_TEAM_ID|VERCEL_OIDC_PROJECT_ID|*_TASKS_ENQUEUER_SERVICE_ACCOUNT_EMAIL|ANALYSIS_V2_ADMISSION_ENABLED|ANALYSIS_V2_WORKER_EXECUTION_ENABLED|ANALYSIS_V2_TASKS_ENABLED|ANALYSIS_V2_WORKER_ENABLED|ANALYSIS_V2_RECOVERY_ENABLED|PREFLIGHT_TASKS_ENABLED|PREFLIGHT_LOCAL_AFTER_ENABLED)
         die "runtime env file contains a forbidden placement, gate, or WIF bootstrap key: $key"
         ;;
       SUPABASE_SERVICE_ROLE_KEY|IMAGE_PROXY_SIGNING_SECRET|APIFY_API_TOKEN|APIFY_*_API_TOKEN|GOOGLE_APPLICATION_CREDENTIALS|GOOGLE_SERVICE_ACCOUNT_KEY_BASE64|*_API_KEY|*_SECRET|*_PASSWORD|*_CREDENTIAL|*_CREDENTIALS|*_PRIVATE_KEY|*_KEY_BASE64|*_ACCESS_TOKEN|*_REFRESH_TOKEN|*_OIDC_TOKEN|*_TOKEN)
         die "runtime env file must not contain plaintext provider or credential key: $key"
         ;;
     esac
-  done < <(env_file_key_names "$env_file")
+  done < <(jq -r 'keys[]' <<<"$env_json")
 }
 
 validate_build_env_keys() {
   local env_file="$1"
+  local env_json="$2"
   local key
-  local duplicate
   case "$env_file" in
     *.yaml|*.yml) ;;
     *) die "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE must be a YAML file" ;;
   esac
-  duplicate="$(env_file_key_names "$env_file" | sort | uniq -d | head -n 1)"
-  [[ -z "$duplicate" ]] || die "build env file contains a duplicate key: $duplicate"
   local key_count=0
   while IFS= read -r key; do
     key_count=$((key_count + 1))
@@ -580,12 +675,12 @@ validate_build_env_keys() {
         ;;
       *) die "build env file contains a non-public or unsupported key: $key" ;;
     esac
-  done < <(env_file_key_names "$env_file")
+  done < <(jq -r 'keys[]' <<<"$env_json")
   [[ "$key_count" == "2" ]] \
     || die "build env file must contain exactly the two public Supabase keys"
-  env_file_has_nonempty_value "$env_file" NEXT_PUBLIC_SUPABASE_URL \
+  env_json_has_nonempty_value "$env_json" NEXT_PUBLIC_SUPABASE_URL \
     || die "build env file must set one non-empty NEXT_PUBLIC_SUPABASE_URL"
-  env_file_has_nonempty_value "$env_file" NEXT_PUBLIC_SUPABASE_ANON_KEY \
+  env_json_has_nonempty_value "$env_json" NEXT_PUBLIC_SUPABASE_ANON_KEY \
     || die "build env file must set one non-empty NEXT_PUBLIC_SUPABASE_ANON_KEY"
 }
 
@@ -614,17 +709,21 @@ verify_worker_prerequisites() {
   local identity_script="$script_dir/configure-analysis-v2-worker-identity.sh"
   local secrets_script="$script_dir/configure-analysis-v2-secrets.sh"
   local bucket_script="$script_dir/configure-analysis-v2-media-bucket.sh"
+  local deploy_lock_script="$script_dir/configure-analysis-v2-deploy-lock.sh"
   [[ -f "$identity_script" ]] \
     || die "configure-analysis-v2-worker-identity.sh is missing"
   [[ -f "$secrets_script" ]] \
     || die "configure-analysis-v2-secrets.sh is missing"
   [[ -f "$bucket_script" ]] \
     || die "configure-analysis-v2-media-bucket.sh is missing"
+  [[ -f "$deploy_lock_script" ]] \
+    || die "configure-analysis-v2-deploy-lock.sh is missing"
 
   log "verifying prerequisite order: worker identity -> secrets -> media bucket -> worker deploy"
   bash "$identity_script" --check
   bash "$secrets_script" --check
   bash "$bucket_script" --check
+  log "deploy-lock bucket metadata and IAM are audited separately by an admin; this deploy verifies object access while acquiring the generation-bound lock"
 }
 
 build_deploy_args() {
@@ -653,17 +752,22 @@ build_deploy_args() {
     '--invoker-iam-check'
     '--no-allow-unauthenticated'
     '--deploy-health-check'
+    "--revision-suffix=$build_revision_suffix"
+    "--update-labels=$PROVENANCE_LABEL_KEY=$source_commit_sha"
     '--description=Private durable Analysis V2 Cloud Tasks worker'
     "--set-secrets=SUPABASE_SERVICE_ROLE_KEY=$SUPABASE_SECRET_ID:$supabase_secret_version,$apify_env_key=$apify_secret_id:$apify_secret_version,IMAGE_PROXY_SIGNING_SECRET=$IMAGE_SIGNING_SECRET_ID:$image_signing_secret_version"
     '--quiet'
   )
 
-  if [[ -n "$worker_env_file" ]]; then
-    deploy_args+=("--env-vars-file=$worker_env_file")
+  if [[ -n "$worker_env_deploy_file" ]]; then
+    deploy_args+=("--env-vars-file=$worker_env_deploy_file")
   else
     deploy_args+=("--update-env-vars=ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=$ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET")
   fi
-  deploy_args+=("--build-env-vars-file=$worker_build_env_file")
+  if [[ "$initial_deployment" != "true" ]]; then
+    deploy_args+=('--no-traffic')
+  fi
+  deploy_args+=("--build-env-vars-file=$worker_build_env_deploy_file")
   if [[ -n "$worker_build_service_account" ]]; then
     deploy_args+=("--build-service-account=$worker_build_service_account_resource")
   fi
@@ -672,16 +776,21 @@ build_deploy_args() {
 deploy_or_verify_service() {
   local existing="false"
   local config=""
+  local latest_ready=""
   if config="$(service_json)"; then
     existing="true"
     service_has_forbidden_plaintext_credential "$config" \
       && die "deployed worker contains a forbidden plaintext provider or credential value"
   fi
+  [[ "$existing" != "false" ]] || initial_deployment="true"
 
   if [[ "$mode" == "check" ]]; then
     [[ "$existing" == "true" ]] || die "Cloud Run worker does not exist"
     service_runtime_matches "$config" \
       || die "Cloud Run worker runtime, scaling, egress, or artifact config has drifted"
+    latest_ready="$(jq -er '.status.latestReadyRevisionName' <<<"$config")" \
+      || die "Cloud Run worker has no ready revision"
+    verify_revision_provenance "$latest_ready" "$source_commit_sha"
     log "verified: private worker runtime, bounded scaling, and default dynamic egress"
     if [[ -n "$worker_build_env_file" ]]; then
       log "verified: supplied source-build manifest contains exactly the two public Supabase values"
@@ -694,18 +803,94 @@ deploy_or_verify_service() {
   if [[ "$existing" == "false" && -z "$worker_env_file" ]]; then
     die "ANALYSIS_V2_WORKER_ENV_VARS_FILE is required for the first deployment"
   fi
+  if [[ "$existing" == "false" \
+    && ( "$worker_enabled" != "false" || "$recovery_enabled" != "false" ) ]]; then
+    die "first deployment requires both worker gates false because no known-good rollback revision exists"
+  fi
+
+  if [[ "$existing" == "true" ]]; then
+    known_good_revision="$(jq -er '
+      [.status.traffic[]? | select((.percent // 0) > 0)] as $traffic
+      | if (($traffic | length) == 1
+          and ($traffic[0].percent | tonumber) == 100
+          and ($traffic[0].revisionName // "") != "")
+        then $traffic[0].revisionName
+        else error("ambiguous traffic")
+        end
+    ' <<<"$config")" \
+      || die "existing Cloud Run traffic must be one known-good revision at 100% before deployment"
+    known_good_config="$(revision_json "$known_good_revision")" \
+      || die "known-good Cloud Run revision was not observable"
+    revision_is_ready "$known_good_config" "$known_good_revision" \
+      || die "known-good Cloud Run traffic revision is not Ready"
+    if bootstrap_revision_is_execution_disabled "$known_good_config"; then
+      known_good_is_bootstrap="true"
+      log "active known-good revision is an execution-disabled bootstrap rollback revision"
+    fi
+    known_good_recovery_enabled="$(jq -r '
+      def containers: (.spec.containers // .spec.template.spec.containers // []);
+      [containers[0].env[]?
+        | select(.name == "ANALYSIS_V2_RECOVERY_ENABLED") | .value][0] // "false"
+    ' <<<"$known_good_config")"
+    [[ "$known_good_recovery_enabled" == "true" \
+      || "$known_good_recovery_enabled" == "false" ]] \
+      || die "known-good revision has an invalid recovery gate"
+    log "recorded known-good rollback revision: $known_good_revision"
+    if [[ "$known_good_is_bootstrap" == "true" ]]; then
+      log "manual rollback step 1: pause recovery and retention Scheduler jobs"
+      log "manual rollback step 2: gcloud run services update-traffic $ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE --project=$ANALYSIS_V2_TASKS_PROJECT --region=$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION --to-revisions=$known_good_revision=100"
+    elif [[ "$known_good_recovery_enabled" == "false" ]]; then
+      log "manual rollback step 1: pause the recovery Scheduler job"
+      log "manual rollback step 2: gcloud run services update-traffic $ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE --project=$ANALYSIS_V2_TASKS_PROJECT --region=$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION --to-revisions=$known_good_revision=100"
+    else
+      log "manual rollback step 1: gcloud run services update-traffic $ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE --project=$ANALYSIS_V2_TASKS_PROJECT --region=$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION --to-revisions=$known_good_revision=100"
+      log "manual rollback step 2: resume the recovery Scheduler job"
+    fi
+  else
+    log "first deployment has no prior traffic revision; both execution gates remain closed"
+  fi
 
   build_deploy_args
   run_mutation "${deploy_args[@]}"
 
   if [[ "$mode" == "apply" ]]; then
     config="$(service_json)" || die "Cloud Run worker was not observable after deployment"
-    service_runtime_matches "$config" \
+    build_revision="$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE-$build_revision_suffix"
+    [[ "$(jq -er '.status.latestCreatedRevisionName' <<<"$config")" == "$build_revision" ]] \
+      || die "Cloud Run staged an unexpected source-build revision"
+    service_runtime_config_matches "$config" \
       || die "Cloud Run worker runtime configuration was not applied"
+    if [[ -n "$known_good_revision" ]]; then
+      service_traffic_matches_revision "$config" "$known_good_revision" \
+        || die "source deployment changed live traffic before promotion"
+    fi
+    verify_revision_provenance "$build_revision" "$source_commit_sha"
+    known_good_config="$(revision_json "$build_revision")" \
+      || die "source-build Cloud Run revision was not observable"
+    build_revision_image="$(jq -er '.spec.containers[0].image' \
+      <<<"$known_good_config")" \
+      || die "source-build Cloud Run revision image was not observable"
+    [[ "$build_revision_image" =~ @sha256:[0-9a-f]{64}$ ]] \
+      || die "source-build Cloud Run revision image is not an immutable digest"
+    if [[ -n "$known_good_revision" ]]; then
+      log "verified: source-build revision staged without live traffic"
+    else
+      service_traffic_matches_revision "$config" "$build_revision" \
+        || die "first deployment did not expose a single disabled bootstrap rollback revision"
+      bootstrap_revision_is_execution_disabled "$known_good_config" \
+        || die "first-deployment bootstrap revision is not fully execution-disabled"
+      known_good_revision="$build_revision"
+      known_good_recovery_enabled="false"
+      known_good_is_bootstrap="true"
+      log "recorded execution-disabled bootstrap rollback revision: $known_good_revision"
+      log "manual rollback step 1: pause recovery and retention Scheduler jobs"
+      log "manual rollback step 2: gcloud run services update-traffic $ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE --project=$ANALYSIS_V2_TASKS_PROJECT --region=$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION --to-revisions=$known_good_revision=100"
+    fi
   fi
 }
 
 configure_queue_and_oidc() {
+  local operation_mode="${1:-$mode}"
   local queue_script
   local preflight_script
   queue_script="$(dirname "$0")/configure-analysis-v2-tasks-queue.sh"
@@ -713,16 +898,17 @@ configure_queue_and_oidc() {
   [[ -f "$queue_script" ]] || die "configure-analysis-v2-tasks-queue.sh is missing"
   [[ -f "$preflight_script" ]] || die "configure-preflight-tasks-queue.sh is missing"
 
-  if [[ "$mode" == "dry-run" ]] && ! service_json >/dev/null; then
+  if [[ "$operation_mode" == "dry-run" ]] && ! service_json >/dev/null; then
     print_command bash "$queue_script" --dry-run
     print_command bash "$preflight_script" --dry-run
     log "[dry-run] V2 and preflight queue/OIDC checks will run after the worker service exists"
     return 0
   fi
   queue_mode_args=()
-  [[ "$mode" == "dry-run" ]] && queue_mode_args+=(--dry-run)
-  [[ "$mode" == "check" ]] && queue_mode_args+=(--check)
-  [[ "$reconcile_iam" == "true" ]] && queue_mode_args+=(--reconcile-iam)
+  [[ "$operation_mode" == "dry-run" ]] && queue_mode_args+=(--dry-run)
+  [[ "$operation_mode" == "check" ]] && queue_mode_args+=(--check)
+  [[ "$reconcile_iam" == "true" && "$operation_mode" != "check" ]] \
+    && queue_mode_args+=(--reconcile-iam)
   if ((${#queue_mode_args[@]} == 0)); then
     bash "$queue_script"
   else
@@ -817,6 +1003,252 @@ ensure_exact_invoker() {
   fi
 }
 
+verify_exact_invoker_only() {
+  local policy
+  policy="$(service_iam_policy)" \
+    || die "Cloud Run invoker policy was not observable after promotion"
+  service_iam_matches "$policy" \
+    || die "Cloud Run invoker policy drifted after promotion"
+  log "verified: post-promotion Cloud Run invoker policy remains exact"
+}
+
+configure_maintenance() {
+  local operation_mode="${1:-$mode}"
+  local gate_value="${2:-$recovery_enabled}"
+  local maintenance_script="$script_dir/configure-analysis-v2-maintenance.sh"
+  local -a maintenance_args=()
+  [[ -f "$maintenance_script" ]] \
+    || die "configure-analysis-v2-maintenance.sh is missing"
+  [[ "$operation_mode" == "dry-run" ]] && maintenance_args+=(--dry-run)
+  [[ "$operation_mode" == "check" ]] && maintenance_args+=(--check)
+  [[ "$reconcile_jobs" == "true" && "$operation_mode" != "check" ]] \
+    && maintenance_args+=(--reconcile-jobs)
+  if [[ "$operation_mode" == "dry-run" ]] && ! service_json >/dev/null; then
+    print_command env "ANALYSIS_V2_RECOVERY_ENABLED=$gate_value" \
+      bash "$maintenance_script" "${maintenance_args[@]}"
+    log "[dry-run] maintenance scheduler checks will run after the worker service exists"
+  elif ((${#maintenance_args[@]} == 0)); then
+    env "ANALYSIS_V2_RECOVERY_ENABLED=$gate_value" bash "$maintenance_script"
+  else
+    env "ANALYSIS_V2_RECOVERY_ENABLED=$gate_value" \
+      bash "$maintenance_script" "${maintenance_args[@]}"
+  fi
+}
+
+recovery_scheduler_config_is_exact() {
+  local config="$1"
+  local run_config
+  local origin
+  run_config="$(service_json)" || return 1
+  origin="$(service_origin "$run_config")" || return 1
+  jq -e \
+    --arg uri "$origin/api/analysis/v2/recover" \
+    --arg audience "$origin" \
+    --arg service_account "$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL" '
+      .schedule == "* * * * *"
+        and .timeZone == "Etc/UTC"
+        and .httpTarget.uri == $uri
+        and .httpTarget.httpMethod == "POST"
+        and .httpTarget.oidcToken.serviceAccountEmail == $service_account
+        and .httpTarget.oidcToken.audience == $audience
+        and (.httpTarget.headers["Content-Type"] // "") == "application/json"
+        and (.httpTarget.body // "") == "e30="
+        and .attemptDeadline == "300s"
+        and ((.retryConfig.retryCount // 0) | tonumber) == 3
+        and .retryConfig.maxRetryDuration == "300s"
+        and .retryConfig.minBackoffDuration == "10s"
+        and .retryConfig.maxBackoffDuration == "60s"
+        and ((.retryConfig.maxDoublings // 0) | tonumber) == 3
+    ' <<<"$config" >/dev/null
+}
+
+restore_recovery_scheduler_gate() {
+  local action
+  local config
+  local current_state
+  local desired_state="PAUSED"
+  local job="${ANALYSIS_V2_RECOVERY_SCHEDULER_JOB:-analysis-v2-recovery}"
+  local location="${ANALYSIS_V2_MAINTENANCE_LOCATION:-$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION}"
+  [[ "$known_good_recovery_enabled" != "true" ]] || desired_state="ENABLED"
+  config="$(gcloud scheduler jobs describe "$job" \
+    "--project=$ANALYSIS_V2_TASKS_PROJECT" \
+    "--location=$location" \
+    --format=json)" || return 1
+  current_state="$(jq -r '.state // "ENABLED"' <<<"$config")"
+  if [[ "$desired_state" == "ENABLED" ]] \
+    && ! recovery_scheduler_config_is_exact "$config"; then
+    if [[ "$current_state" == "ENABLED" ]]; then
+      gcloud scheduler jobs pause "$job" \
+        "--project=$ANALYSIS_V2_TASKS_PROJECT" \
+        "--location=$location" \
+        --quiet || return 1
+      config="$(gcloud scheduler jobs describe "$job" \
+        "--project=$ANALYSIS_V2_TASKS_PROJECT" \
+        "--location=$location" \
+        --format=json)" || return 1
+      [[ "$(jq -r '.state // "ENABLED"' <<<"$config")" == "PAUSED" ]] \
+        || return 1
+    elif [[ "$current_state" != "PAUSED" ]]; then
+      return 1
+    fi
+    printf 'critical: refusing to resume a structurally drifted recovery Scheduler job\n' >&2
+    return 1
+  fi
+  if [[ "$current_state" == "$desired_state" ]]; then
+    return 0
+  elif [[ "$current_state" == "ENABLED" && "$desired_state" == "PAUSED" ]]; then
+    action="pause"
+  elif [[ "$current_state" == "PAUSED" && "$desired_state" == "ENABLED" ]]; then
+    action="resume"
+  else
+    return 1
+  fi
+  gcloud scheduler jobs "$action" \
+    "$job" \
+    "--project=$ANALYSIS_V2_TASKS_PROJECT" \
+    "--location=$location" \
+    --quiet || return 1
+  config="$(gcloud scheduler jobs describe "$job" \
+    "--project=$ANALYSIS_V2_TASKS_PROJECT" \
+    "--location=$location" \
+    --format=json)" || return 1
+  [[ "$(jq -r '.state // "ENABLED"' <<<"$config")" == "$desired_state" ]] \
+    && { [[ "$desired_state" != "ENABLED" ]] \
+      || recovery_scheduler_config_is_exact "$config"; }
+}
+
+pause_scheduler_job_if_present() {
+  local job="$1"
+  local config
+  local current_state
+  local location="${ANALYSIS_V2_MAINTENANCE_LOCATION:-$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION}"
+  if ! config="$(gcloud scheduler jobs describe "$job" \
+    "--project=$ANALYSIS_V2_TASKS_PROJECT" \
+    "--location=$location" \
+    --format=json 2>/dev/null)"; then
+    local listed_jobs
+    local listed_job
+    listed_jobs="$(gcloud scheduler jobs list \
+      "--project=$ANALYSIS_V2_TASKS_PROJECT" \
+      "--location=$location" \
+      '--format=value(name)')" || return 1
+    while IFS= read -r listed_job; do
+      [[ -z "$listed_job" || "${listed_job##*/}" != "$job" ]] || return 1
+    done <<<"$listed_jobs"
+    return 0
+  fi
+  current_state="$(jq -r '.state // "ENABLED"' <<<"$config")"
+  if [[ "$current_state" == "PAUSED" ]]; then
+    return 0
+  elif [[ "$current_state" != "ENABLED" ]]; then
+    return 1
+  fi
+  gcloud scheduler jobs pause "$job" \
+    "--project=$ANALYSIS_V2_TASKS_PROJECT" \
+    "--location=$location" \
+    --quiet || return 1
+  config="$(gcloud scheduler jobs describe "$job" \
+    "--project=$ANALYSIS_V2_TASKS_PROJECT" \
+    "--location=$location" \
+    --format=json)" || return 1
+  [[ "$(jq -r '.state // "ENABLED"' <<<"$config")" == "PAUSED" ]]
+}
+
+rollback_live_traffic() {
+  local config
+  if [[ -z "$known_good_revision" ]]; then
+    printf 'rollback unavailable: first deployment has no recorded known-good revision; execution gates were required to remain false\n' >&2
+    return 1
+  fi
+
+  config="$(service_json)" || return 1
+  if ! service_traffic_matches_revision "$config" "$known_good_revision" \
+    && { [[ -z "$staged_revision" ]] \
+      || ! service_traffic_matches_revision "$config" "$staged_revision"; }; then
+    printf 'critical: refusing stale rollback because live traffic is owned by another deployment\n' >&2
+    return 1
+  fi
+
+  if [[ "$known_good_is_bootstrap" == "true" ]]; then
+    printf 'rollback: pausing maintenance Schedulers before restoring the execution-disabled bootstrap revision\n' >&2
+    if ! pause_scheduler_job_if_present \
+      "${ANALYSIS_V2_RECOVERY_SCHEDULER_JOB:-analysis-v2-recovery}" \
+      || ! pause_scheduler_job_if_present \
+        "${ANALYSIS_V2_RETENTION_SCHEDULER_JOB:-analysis-v2-preflight-retention}"; then
+      printf 'critical: maintenance Schedulers could not be paused before bootstrap traffic rollback\n' >&2
+      return 1
+    fi
+  elif [[ "$known_good_recovery_enabled" == "false" ]]; then
+    printf 'rollback: pausing recovery Scheduler before restoring the recovery-disabled revision\n' >&2
+    if ! restore_recovery_scheduler_gate; then
+      printf 'critical: recovery Scheduler could not be paused before traffic rollback\n' >&2
+      return 1
+    fi
+  fi
+
+  printf 'rollback: restoring Cloud Run traffic to %s\n' "$known_good_revision" >&2
+  gcloud run services update-traffic \
+    "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE" \
+    "--project=$ANALYSIS_V2_TASKS_PROJECT" \
+    "--region=$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION" \
+    "--to-revisions=$known_good_revision=100" \
+    --quiet \
+    || return 1
+  config="$(service_json)" || return 1
+  service_traffic_matches_revision "$config" "$known_good_revision" \
+    || return 1
+  if [[ "$known_good_is_bootstrap" != "true" \
+    && "$known_good_recovery_enabled" == "true" ]] \
+    && ! restore_recovery_scheduler_gate; then
+    printf 'critical: traffic rollback succeeded but recovery Scheduler could not be resumed\n' >&2
+    return 1
+  fi
+  printf 'rollback verified: %s serves 100%% of traffic\n' "$known_good_revision" >&2
+}
+
+promote_staged_revision() {
+  local config
+  if [[ "$mode" == "check" ]]; then
+    return 0
+  fi
+  if [[ "$mode" == "dry-run" ]]; then
+    if [[ -n "$staged_revision" ]]; then
+      print_command gcloud run services update-traffic \
+        "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE" \
+        "--project=$ANALYSIS_V2_TASKS_PROJECT" \
+        "--region=$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION" \
+        "--to-revisions=$staged_revision=100" \
+        --quiet
+    else
+      log "[dry-run] the exact ready revision will be resolved and promoted after no-traffic staging"
+    fi
+    return 0
+  fi
+
+  [[ -n "$staged_revision" ]] || die "no staged Cloud Run revision is available for promotion"
+  config="$(service_json)" \
+    || die "Cloud Run service was not observable immediately before promotion"
+  service_traffic_matches_revision "$config" "$known_good_revision" \
+    || die "live traffic changed after staging; refusing a concurrent promotion"
+  rollback_armed="true"
+  gcloud run services update-traffic \
+    "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE" \
+    "--project=$ANALYSIS_V2_TASKS_PROJECT" \
+    "--region=$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION" \
+    "--to-revisions=$staged_revision=100" \
+    --quiet \
+    || die "Cloud Run revision promotion failed"
+  config="$(service_json)" || die "Cloud Run service was not observable after promotion"
+  service_runtime_config_matches "$config" \
+    || die "promoted Cloud Run runtime configuration is not exact"
+  worker_endpoint_env_matches "$config" "$(service_origin "$config")" \
+    || die "promoted Cloud Run endpoint configuration is not exact"
+  service_traffic_matches_revision "$config" "$staged_revision" \
+    || die "promoted Cloud Run revision does not serve exactly 100% of traffic"
+  verify_revision_provenance "$staged_revision" "$source_commit_sha"
+  log "promoted verified revision: $staged_revision (commit $source_commit_sha)"
+}
+
 while (($# > 0)); do
   case "$1" in
     --dry-run)
@@ -861,6 +1293,7 @@ for name in \
   ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE \
   ANALYSIS_V2_TASKS_CLOUD_RUN_REGION \
   ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET \
+  ANALYSIS_V2_DEPLOY_LOCK_BUCKET \
   ANALYSIS_V2_APIFY_API_TOKEN_SLOT \
   ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION \
   ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION \
@@ -880,8 +1313,13 @@ readonly worker_source_dir="$(cd -P "$worker_source_dir_input" && pwd -P)"
 worker_deploy_source_dir="$worker_source_dir"
 readonly worker_env_file="${ANALYSIS_V2_WORKER_ENV_VARS_FILE:-}"
 readonly worker_build_env_file="${ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE:-}"
+manifest_snapshot_dir=""
+worker_env_deploy_file=""
+worker_build_env_deploy_file=""
+trap '[[ -z "${manifest_snapshot_dir:-}" ]] || rm -rf "$manifest_snapshot_dir"' EXIT
 readonly worker_build_service_account="$ANALYSIS_V2_WORKER_BUILD_SERVICE_ACCOUNT"
 readonly worker_build_service_account_resource="projects/$ANALYSIS_V2_TASKS_PROJECT/serviceAccounts/$worker_build_service_account"
+readonly deploy_lock_bucket="$ANALYSIS_V2_DEPLOY_LOCK_BUCKET"
 readonly worker_cpu="${ANALYSIS_V2_WORKER_CPU:-$DEFAULT_CPU}"
 readonly worker_memory="${ANALYSIS_V2_WORKER_MEMORY:-$DEFAULT_MEMORY}"
 readonly worker_concurrency="${ANALYSIS_V2_WORKER_CONCURRENCY:-$DEFAULT_CONCURRENCY}"
@@ -908,7 +1346,9 @@ validate_location "$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION" \
   "ANALYSIS_V2_TASKS_CLOUD_RUN_REGION"
 validate_service "$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE"
 validate_queue "$preflight_queue"
-validate_bucket "$ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET"
+validate_bucket "$ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET" \
+  "ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET"
+validate_deploy_lock_bucket "$ANALYSIS_V2_DEPLOY_LOCK_BUCKET"
 validate_slot "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT"
 validate_numeric_version "$supabase_secret_version" \
   ANALYSIS_V2_SUPABASE_SERVICE_ROLE_SECRET_VERSION
@@ -939,23 +1379,37 @@ validate_runtime_tuning
 
 [[ -d "$worker_source_dir" && -f "$worker_source_dir/package.json" ]] \
   || die "ANALYSIS_V2_WORKER_SOURCE_DIR must contain package.json"
+command -v node >/dev/null 2>&1 || die "node is required for structured env manifest validation"
+command -v jq >/dev/null 2>&1 || die "jq is required"
 if [[ -n "$worker_env_file" ]]; then
+  runtime_env_json=""
   [[ -f "$worker_env_file" ]] || die "ANALYSIS_V2_WORKER_ENV_VARS_FILE does not exist"
   validate_env_file_upload_boundary "$worker_env_file" \
     "ANALYSIS_V2_WORKER_ENV_VARS_FILE"
-  validate_runtime_env_keys "$worker_env_file"
-  runtime_env_file_has_bucket "$worker_env_file" \
+  runtime_env_json="$(parse_env_file_json "$worker_env_file")" \
+    || die "runtime env file must be a valid, duplicate-free YAML or ENV mapping"
+  validate_runtime_env_keys "$runtime_env_json"
+  env_json_has_bucket "$runtime_env_json" \
     || die "runtime env file must set ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET to the configured bucket"
-  env_file_value_equals "$worker_env_file" ANALYSIS_V2_APIFY_API_TOKEN_SLOT \
+  env_json_value_equals "$runtime_env_json" ANALYSIS_V2_APIFY_API_TOKEN_SLOT \
     "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT" \
     || die "runtime env file must set the exact selected ANALYSIS_V2_APIFY_API_TOKEN_SLOT"
+  write_env_snapshot "$runtime_env_json" runtime worker_env_deploy_file
 fi
 if [[ -n "$worker_build_env_file" ]]; then
+  build_env_json=""
   [[ -f "$worker_build_env_file" ]] \
     || die "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE does not exist"
   validate_env_file_upload_boundary "$worker_build_env_file" \
     "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE"
-  validate_build_env_keys "$worker_build_env_file"
+  case "$worker_build_env_file" in
+    *.yaml|*.yml) ;;
+    *) die "ANALYSIS_V2_WORKER_BUILD_ENV_VARS_FILE must be a YAML file" ;;
+  esac
+  build_env_json="$(parse_env_file_json "$worker_build_env_file")" \
+    || die "build env file must be a valid, duplicate-free YAML mapping"
+  validate_build_env_keys "$worker_build_env_file" "$build_env_json"
+  write_env_snapshot "$build_env_json" build worker_build_env_deploy_file
 fi
 validate_service_account_email "$worker_build_service_account" \
   "ANALYSIS_V2_WORKER_BUILD_SERVICE_ACCOUNT"
@@ -963,8 +1417,21 @@ validate_service_account_email "$worker_build_service_account" \
   == "$ANALYSIS_V2_TASKS_PROJECT" ]] \
   || die "worker build service account must belong to ANALYSIS_V2_TASKS_PROJECT"
 
+command -v git >/dev/null 2>&1 || die "git is required to record source provenance"
+readonly source_commit_sha="$(git -C "$worker_source_dir" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)"
+[[ "$source_commit_sha" =~ ^[0-9a-f]{40}$ ]] \
+  || die "ANALYSIS_V2_WORKER_SOURCE_DIR must have a valid Git commit"
+revision_nonce="${ANALYSIS_V2_DEPLOY_REVISION_NONCE:-}"
+if [[ -z "$revision_nonce" ]]; then
+  printf -v revision_nonce '%05d' "$(( (RANDOM * 32768 + RANDOM) % 100000 ))"
+fi
+[[ "$revision_nonce" =~ ^[a-z0-9]{5}$ ]] \
+  || die "ANALYSIS_V2_DEPLOY_REVISION_NONCE must be exactly five lowercase letters or digits"
+readonly revision_nonce
+readonly build_revision_suffix="b${source_commit_sha:0:6}${revision_nonce}"
+readonly final_revision_suffix="f${source_commit_sha:0:6}${revision_nonce}"
+
 command -v gcloud >/dev/null 2>&1 || die "gcloud CLI is required"
-command -v jq >/dev/null 2>&1 || die "jq is required"
 active_account="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' | head -n 1)"
 [[ -n "$active_account" ]] || die "gcloud has no active authenticated account"
 gcloud projects describe "$ANALYSIS_V2_TASKS_PROJECT" \
@@ -980,11 +1447,118 @@ validate_service_account "$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL" \
 
 service_policy_file=""
 source_archive_dir=""
+known_good_revision=""
+known_good_config=""
+known_good_recovery_enabled="false"
+known_good_is_bootstrap="false"
+initial_deployment="false"
+build_revision=""
+build_revision_image=""
+staged_revision=""
+rollback_armed="false"
+deploy_lock_acquired="false"
+deploy_lock_generation=""
+deploy_lock_payload_file=""
+deploy_lock_url=""
+observed_lock_generation=""
+observed_lock_owner=""
+
+observe_deploy_lock_generation_owner() {
+  local attempt
+  local candidate_generation
+  local candidate_owner
+  observed_lock_generation=""
+  observed_lock_owner=""
+  for attempt in 1 2 3; do
+    candidate_generation="$(gcloud storage objects describe "$deploy_lock_url" \
+      '--format=value(generation)' 2>/dev/null)" || candidate_generation=""
+    if [[ "$candidate_generation" =~ ^[1-9][0-9]*$ ]]; then
+      candidate_owner="$(gcloud storage cat \
+        "$deploy_lock_url#$candidate_generation" 2>/dev/null)" \
+        || candidate_owner=""
+      if [[ -n "$candidate_owner" ]]; then
+        observed_lock_generation="$candidate_generation"
+        observed_lock_owner="$candidate_owner"
+        return 0
+      fi
+    fi
+    [[ "$attempt" == "3" ]] || sleep "$attempt"
+  done
+  return 1
+}
+
+acquire_deploy_lock() {
+  local create_reported_success="true"
+  local owner_token
+  deploy_lock_payload_file="$(mktemp "${TMPDIR:-/tmp}/analysis-v2-deploy-lock.XXXXXX")"
+  deploy_lock_url="gs://$deploy_lock_bucket/$ANALYSIS_V2_TASKS_CLOUD_RUN_REGION/$ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE.lock"
+  owner_token="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(16).toString("hex"))')" \
+    || die "could not generate a deploy-lock owner token"
+  [[ "$owner_token" =~ ^[a-f0-9]{32}$ ]] \
+    || die "deploy-lock owner token generation returned an invalid value"
+  printf '%s %s %s\n' "$source_commit_sha" "$revision_nonce" "$owner_token" \
+    >"$deploy_lock_payload_file"
+  if ! gcloud storage cp "$deploy_lock_payload_file" "$deploy_lock_url" \
+    --if-generation-match=0 --quiet >/dev/null; then
+    create_reported_success="false"
+  fi
+  if ! observe_deploy_lock_generation_owner; then
+    if [[ "$create_reported_success" == "true" ]]; then
+      die "deploy lock was created but its generation owner was not observable after bounded retries; inspect before manually removing $deploy_lock_url"
+    fi
+    die "deploy lock creation outcome is ambiguous and no owner was observable after bounded retries; inspect before manually removing $deploy_lock_url"
+  fi
+  if [[ "$observed_lock_owner" != "$(<"$deploy_lock_payload_file")" ]]; then
+    if [[ "$create_reported_success" == "false" ]]; then
+      die "another deployment holds the Cloud Storage deploy lock: $deploy_lock_url"
+    fi
+    die "deploy lock generation owner does not match this deployment"
+  fi
+  deploy_lock_generation="$observed_lock_generation"
+  deploy_lock_acquired="true"
+  if [[ "$create_reported_success" == "false" ]]; then
+    log "adopted this deployment's generation-bound lock after an ambiguous create response"
+  fi
+  log "acquired exclusive deploy lock: $deploy_lock_url (generation $deploy_lock_generation)"
+}
+
+release_deploy_lock() {
+  [[ "$deploy_lock_acquired" == "true" ]] || return 0
+  [[ "$deploy_lock_generation" =~ ^[1-9][0-9]*$ ]] || return 1
+  gcloud storage rm "$deploy_lock_url" \
+    "--if-generation-match=$deploy_lock_generation" --quiet >/dev/null \
+    || return 1
+  deploy_lock_acquired="false"
+  log "released exclusive deploy lock: $deploy_lock_url"
+}
+
 cleanup() {
+  local status=0
+  if ! release_deploy_lock; then
+    printf 'critical: deploy lock release failed; inspect before removing %s manually\n' "$deploy_lock_url" >&2
+    status=1
+  fi
   [[ -z "$service_policy_file" ]] || rm -f "$service_policy_file"
   [[ -z "$source_archive_dir" ]] || rm -rf "$source_archive_dir"
+  [[ -z "$deploy_lock_payload_file" ]] || rm -f "$deploy_lock_payload_file"
+  [[ -z "$manifest_snapshot_dir" ]] || rm -rf "$manifest_snapshot_dir"
+  return "$status"
 }
-trap cleanup EXIT
+on_exit() {
+  local status="$?"
+  local cleanup_status=0
+  trap - EXIT
+  if [[ "$status" != "0" && "$rollback_armed" == "true" ]]; then
+    rollback_live_traffic \
+      || printf 'critical: automatic rollback contract could not be fully verified; use the recorded manual rollback commands\n' >&2
+  fi
+  cleanup || cleanup_status="$?"
+  if [[ "$status" == "0" && "$cleanup_status" != "0" ]]; then
+    status="$cleanup_status"
+  fi
+  exit "$status"
+}
+trap on_exit EXIT
 
 verify_no_project_wide_invoker
 verify_worker_prerequisites
@@ -992,32 +1566,51 @@ ensure_api "$CLOUD_RUN_API"
 ensure_api "$CLOUD_BUILD_API"
 ensure_api "$ARTIFACT_REGISTRY_API"
 if [[ "$mode" == "apply" ]]; then
+  acquire_deploy_lock
   source_archive_dir="$(mktemp -d "${TMPDIR:-/tmp}/analysis-v2-source.XXXXXX")"
   bash "$script_dir/prepare-analysis-v2-source-archive.sh" \
     "$worker_source_dir" "$source_archive_dir" >/dev/null
+  [[ "$(git -C "$worker_source_dir" rev-parse --verify 'HEAD^{commit}')" \
+    == "$source_commit_sha" ]] \
+    || die "source commit changed while the deployment archive was prepared"
   worker_deploy_source_dir="$source_archive_dir"
   log "verified: source deploy uses a clean tracked commit archive"
 fi
 deploy_or_verify_service
 ensure_worker_endpoint_env
-configure_queue_and_oidc
+configure_queue_and_oidc "$mode"
 ensure_exact_invoker
-
-maintenance_script="$script_dir/configure-analysis-v2-maintenance.sh"
-[[ -f "$maintenance_script" ]] || die "configure-analysis-v2-maintenance.sh is missing"
-maintenance_args=()
-[[ "$mode" == "dry-run" ]] && maintenance_args+=(--dry-run)
-[[ "$mode" == "check" ]] && maintenance_args+=(--check)
-[[ "$reconcile_jobs" == "true" ]] && maintenance_args+=(--reconcile-jobs)
-if [[ "$mode" == "dry-run" ]] && ! service_json >/dev/null; then
-  print_command bash "$maintenance_script" "${maintenance_args[@]}"
-  log "[dry-run] maintenance scheduler checks will run after the worker service exists"
-else
-  if ((${#maintenance_args[@]} == 0)); then
-    bash "$maintenance_script"
-  else
-    bash "$maintenance_script" "${maintenance_args[@]}"
+prepromotion_recovery_enabled="$recovery_enabled"
+if [[ "$mode" == "apply" ]]; then
+  prepromotion_recovery_enabled="false"
+  if [[ "$recovery_enabled" == "true" && -n "$known_good_revision" ]]; then
+    prepromotion_recovery_enabled="$known_good_recovery_enabled"
   fi
+fi
+if [[ "$mode" == "apply" && "$known_good_is_bootstrap" == "true" ]]; then
+  log "execution-disabled bootstrap traffic defers Scheduler reconciliation until the final gated revision is promoted"
+else
+  if [[ "$mode" == "apply" ]]; then
+    rollback_armed="true"
+  fi
+  configure_maintenance "$mode" "$prepromotion_recovery_enabled"
+fi
+promote_staged_revision
+
+if [[ "$mode" == "apply" ]]; then
+  configure_maintenance apply "$recovery_enabled"
+  configure_queue_and_oidc check
+  verify_exact_invoker_only
+  configure_maintenance check "$recovery_enabled"
+  final_config="$(service_json)" \
+    || die "Cloud Run service disappeared during post-promotion verification"
+  service_runtime_config_matches "$final_config" \
+    && worker_endpoint_env_matches "$final_config" "$(service_origin "$final_config")" \
+    && service_traffic_matches_revision "$final_config" "$staged_revision" \
+    || die "post-promotion Cloud Run configuration or traffic verification failed"
+  verify_revision_provenance "$staged_revision" "$source_commit_sha"
+  rollback_armed="false"
+  log "verified: post-promotion queue, IAM, Scheduler, runtime, and traffic contracts"
 fi
 
 if [[ "$mode" == "dry-run" ]]; then

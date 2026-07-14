@@ -44,10 +44,10 @@ workload identity pool에는 구성된 provider 하나만 존재해야 한다. `
 1. `.env.example`의 `ANALYSIS_V2_*`, `PREFLIGHT_*`, `GCP_VERCEL_WIF_PROVIDER_RESOURCE`, `VERCEL_OIDC_*` 값을 운영 환경에 맞게 준비한다.
 2. `scripts/configure-analysis-v2-worker-identity.sh`를 실행해 전용 enqueuer를 포함한 키리스 서비스 계정들을 만든다.
 3. `scripts/configure-analysis-v2-vercel-wif.sh`를 실행해 API, pool, provider와 정확한 impersonation 바인딩을 구성한다.
-4. `scripts/configure-analysis-v2-secrets.sh`와 `scripts/configure-analysis-v2-media-bucket.sh`를 실행한다.
+4. `scripts/configure-analysis-v2-secrets.sh`, `scripts/configure-analysis-v2-media-bucket.sh`, `scripts/configure-analysis-v2-deploy-lock.sh`를 실행한다. deploy-lock bucket 이름은 128-bit random suffix로 최초 한 번 생성해 보호된 배포 환경에 영속화하며 deployer만 접근해야 한다. deploy-lock 구성과 `--check`는 bucket metadata/IAM을 읽을 수 있는 운영자 권한으로 실행한다.
 5. tracked/untracked 변경이 없는 커밋을 준비한다. 배포 스크립트는 현재 디렉터리를 올리지 않고 `git archive HEAD`로 만든 일회성 깨끗한 source tree만 업로드한다.
-6. `scripts/deploy-analysis-v2-worker.sh`를 실행한다. 이 스크립트가 V2 및 preflight queue, 정확한 Cloud Run invoker, 유지보수 Scheduler job도 구성한다.
-7. 각 스크립트를 `--check`로 다시 실행해 실제 상태와 선언 상태가 같은지 확인한다.
+6. `scripts/deploy-analysis-v2-worker.sh`를 실행한다. 기존 서비스에서는 새 source와 최종 runtime 설정을 모두 무트래픽 revision으로 만들고, V2/preflight queue, 정확한 Cloud Run invoker, 유지보수 Scheduler를 검증한 뒤 검증된 revision만 100%로 승격한다. 최초 생성의 비활성 bootstrap 예외는 아래 rollback 계약을 따른다.
+7. 각 스크립트를 `--check`로 다시 실행해 실제 상태와 선언 상태가 같은지 확인한다. 최소 권한 deployer의 `roles/storage.objectUser`에는 bucket metadata/IAM 조회 권한이 없으므로, deploy-lock 스크립트 검사는 구성 운영자가 별도로 수행한다.
 
 WIF 단계의 예시는 다음과 같다.
 
@@ -59,12 +59,57 @@ bash scripts/configure-analysis-v2-vercel-wif.sh --check
 
 `GCP_VERCEL_WIF_PROVIDER_RESOURCE`의 `projects/...` 값에는 프로젝트 ID가 아니라 숫자 project number를 사용한다. 스크립트는 `ANALYSIS_V2_TASKS_PROJECT`에서 조회한 숫자와 일치하지 않으면 중단한다.
 
+deploy-lock bucket은 다음처럼 최초 구성 때 한 번만 생성한다. 출력된 literal 전체를 `ANALYSIS_V2_DEPLOY_LOCK_BUCKET`으로 CI/운영자 배포 환경에 저장하고 배포마다 다시 생성하지 않는다. 128-bit suffix는 예측 가능한 전역 GCS 이름 선점을 방지한다.
+
+```bash
+printf 'ANALYSIS_V2_DEPLOY_LOCK_BUCKET=analysis-v2-lock-%s\n' \
+  "$(openssl rand -hex 16)"
+```
+
 일반 apply는 기존 리소스의 예상 밖 IAM이나 Scheduler 설정을 삭제하지 않는다. 검토가 끝난 경우에만 각각 `--reconcile-iam`, `--reconcile-jobs`를 명시한다. 신규 리소스 또는 빈 정책만 선언된 최소 정책으로 초기화된다.
+
+## Cloud Run 배포와 rollback 계약
+
+배포 스크립트는 기존 서비스의 단일 100% traffic revision을 known-good으로 기록하고 다음 순서를 강제한다.
+
+apply는 먼저 `ANALYSIS_V2_DEPLOY_LOCK_BUCKET` coordination bucket에 `REGION/SERVICE.lock` object를 `if-generation-match=0`으로 생성해 서비스별 배포를 직렬화한다. 이 bucket의 IAM은 `ANALYSIS_V2_DEPLOYER_IAM_MEMBER` 하나의 `roles/storage.objectUser`만 허용하고 runtime은 접근할 수 없다. bucket metadata와 IAM의 exact 검사는 구성 스크립트가 운영자 권한으로 담당하며, 배포 스크립트는 최소 권한 deployer로 object 생성/조회/삭제 능력을 실제 lock 획득 과정에서 검증한다. lock payload에는 매 실행 생성한 별도 128-bit owner token이 들어간다. 생성 응답이 유실되어 CLI가 실패를 반환해도 bounded observation으로 generation과 payload가 정확히 자기 것임을 증명하면 해당 generation을 안전하게 인수한다. generation에 귀속된 owner payload를 검증한 다음에만 획득 상태를 확정하고, 종료 시에는 획득한 정확한 generation으로만 삭제한다. 따라서 확인 전에 object가 교체되거나 실제 다른 배포가 보유한 경우 그 generation을 정리하지 않는다. 또한 승격 직전과 rollback 직전에 live traffic 소유 revision을 다시 확인하여, 다른 배포가 승격한 traffic을 stale rollback으로 덮어쓰지 않는다.
+
+1. `git archive HEAD` source를 빌드하고 `analysis-v2-source-commit=<40자리 SHA>` revision label과 Ready 상태, immutable image digest를 검증한다. 기존 서비스에서는 `--no-traffic`을 사용한다. Cloud Run이 신규 서비스 생성에는 이 옵션을 허용하지 않으므로 최초 revision만 모든 실행 설정이 빠진 비활성 bootstrap으로 100% 배포한다.
+2. canonical queue target, OIDC audience, worker/recovery gate를 별도의 `--no-traffic` 최종 revision에 적용하고 같은 SHA provenance를 다시 검증한다. 최종 revision은 동시 배포가 겹쳐도 다른 source image를 상속하지 않도록 1단계에서 검증한 정확한 digest를 `--image`로 고정한다.
+3. 새 revision에 traffic을 보내지 않은 채 queue, IAM, Scheduler 구조를 검증한다. recovery Scheduler의 실행 상태는 이 구간까지 기존 live revision의 gate와 맞춰 둔다.
+4. 정확한 revision 이름으로만 100% traffic을 전환하고 새 recovery gate를 pause/resume한 뒤 모든 계약을 다시 검사한다. `LATEST` 별칭은 승격과 rollback에 사용하지 않는다.
+5. 승격 전 Scheduler 전환, 승격 명령, 또는 사후 검증이 실패하면 기록한 known-good 상태를 자동 복원한다. known-good recovery가 `false`면 recovery job을 먼저 pause하고 검증한 뒤 traffic을 복원한다. bootstrap으로 돌아갈 때는 recovery와 retention을 모두 먼저 pause한다. known-good recovery가 `true`면 traffic을 먼저 복원한 뒤 recovery job을 resume한다.
+
+스크립트는 시작할 때 known-good gate에 맞는 수동 rollback 순서를 출력한다. 자동 rollback까지 실패하면 다음 순서를 지킨다. recovery-disabled 또는 bootstrap revision으로 돌아가는 경우에는 해당 pause 명령을 traffic 명령보다 먼저 실행하고 상태를 확인한다.
+
+```bash
+# known-good recovery가 false일 때 traffic 전환 전에 실행한다.
+gcloud scheduler jobs pause analysis-v2-recovery \
+  --project=PROJECT_ID \
+  --location=asia-northeast3
+# known-good가 execution-disabled bootstrap일 때만 이 pause도 함께 선행한다.
+gcloud scheduler jobs pause analysis-v2-preflight-retention \
+  --project=PROJECT_ID \
+  --location=asia-northeast3
+gcloud run services update-traffic SERVICE \
+  --project=PROJECT_ID \
+  --region=asia-northeast3 \
+  --to-revisions=KNOWN_GOOD_REVISION=100
+# known-good recovery가 true일 때만 traffic 복원 후 실행한다.
+gcloud scheduler jobs resume analysis-v2-recovery \
+  --project=PROJECT_ID \
+  --location=asia-northeast3
+```
+
+최초 서비스 생성은 두 Cloud Run gate가 모두 `false`일 때만 허용한다. 첫 source revision에는 V2 task, worker, recovery, preflight task 실행 gate를 넣지 않고, 실제 비활성 상태와 100% traffic을 검증한 뒤 이를 bootstrap known-good rollback 대상으로 기록한다. Scheduler 생성은 최종 revision 승격 뒤로 미루며, 이후 검증 실패로 bootstrap revision에 rollback하면 인증 설정이 없는 revision에 maintenance 요청이 반복되지 않도록 recovery와 retention job을 모두 pause한다. 이후 정상 배포가 성공하면 retention은 다시 항상 `ENABLED` 상태가 된다. `--deploy-health-check`는 container startup probe와 Ready 상태만 확인하며 기능 E2E를 대신하지 않는다. 무트래픽 private revision의 인증된 tag URL canary는 아직 자동화하지 않았으므로, 공개 admission 전에는 아래 signed canary를 별도로 완료해야 한다.
+
+비정상 종료로 lock object가 남았다면 실행 중인 배포가 없음을 Cloud Run/Cloud Build 기록으로 확인한 후에만 `gcloud storage rm gs://DEPLOY_LOCK_BUCKET/REGION/SERVICE.lock`을 수동 실행한다. `DEPLOY_LOCK_BUCKET`에는 영속화한 `ANALYSIS_V2_DEPLOY_LOCK_BUCKET` 값을 넣는다. 확인 없이 lock을 삭제하면 동시 배포 보장을 무효화한다.
 
 ## 최소 권한 계약
 
 - runtime은 프로젝트에서 `roles/aiplatform.user`만 갖고, media bucket의 custom object create/get/delete 역할과 세 Secret Manager 리소스의 accessor만 갖는다.
 - build는 프로젝트에서 `roles/run.builder`만 갖는다.
+- deployer는 deploy-lock bucket에서 `roles/storage.objectUser`만 갖는다. bucket metadata/IAM exact audit는 별도 구성 운영자가 수행한다.
 - runtime, build, maintenance 서비스 계정 리소스의 `roles/iam.serviceAccountUser`에는 `ANALYSIS_V2_DEPLOYER_IAM_MEMBER` 하나만 존재한다.
 - V2 task OIDC 신원은 사용자 관리 키와 프로젝트 역할이 없고, actAs 멤버는 V2 enqueuer, runtime, Cloud Tasks service agent뿐이다. token creator 역할은 허용하지 않는다.
 - V2 queue의 enqueuer는 V2 enqueuer와 runtime, viewer는 runtime뿐이다. preflight queue의 enqueuer는 V2 enqueuer뿐이다.
@@ -75,12 +120,14 @@ bash scripts/configure-analysis-v2-vercel-wif.sh --check
 
 `configure-analysis-v2-maintenance.sh`는 다음 두 authenticated POST job을 exact configuration으로 관리한다.
 
-| 작업 | 주기 | 경로 | deadline |
-| --- | --- | --- | --- |
-| 멈춘 V2 job 복구 | 매 1분 | `/api/analysis/v2/recover` | 300초 |
-| preflight PII scrub/purge | 매 5분 | `/api/analysis/preflight/retention` | 60초 |
+| 작업 | 주기 | 경로 | gate별 상태 | deadline |
+| --- | --- | --- | --- | --- |
+| 멈춘 V2 job 복구 | 매 1분 | `/api/analysis/v2/recover` | recovery `false`: `PAUSED`, `true`: `ENABLED` | 300초 |
+| preflight PII scrub/purge | 매 5분 | `/api/analysis/preflight/retention` | 항상 `ENABLED` | 60초 |
 
-두 작업은 retry 3회, 최대 retry 기간 300초, 10~60초 backoff를 사용한다. retention route는 한 번에 expired 항목 250개와 terminal 항목 250개만 요청한다. 두 route는 maintenance 서비스 계정 이메일과 Cloud Run origin audience를 모두 검증하며 브라우저 세션과 무관하게 동작한다.
+두 작업은 retry 3회, 최대 retry 기간 300초, 10~60초 backoff를 사용한다. recovery gate가 꺼진 동안 job 정의는 보존하되 pause하여 의도된 503 재시도를 만들지 않는다. gate 전환에 따른 pause/resume은 정상 reconciliation이므로 `--reconcile-jobs`가 필요 없다. schedule·URI·OIDC·retry 같은 구조적 drift가 발견되면 잘못된 작업이 계속 실행되지 않도록 apply가 해당 job을 먼저 pause하고, 명시적 `--reconcile-jobs` 승인 없이는 구조를 바꾸지 않는다. retention route는 한 번에 expired 항목 250개와 terminal 항목 250개만 요청한다. 두 route는 maintenance 서비스 계정 이메일과 Cloud Run origin audience를 모두 검증하며 브라우저 세션과 무관하게 동작한다.
+
+rollback은 known-good recovery가 `true`여도 recovery job의 구조가 exact일 때만 resume한다. URI, audience, schedule 등이 drift된 job은 복구 과정에서도 `PAUSED`로 남겨 잘못된 endpoint를 자동 호출하지 않는다.
 
 ## 런타임 환경변수
 
@@ -137,6 +184,9 @@ PREFLIGHT_TASKS_CALLER_AUTH_MODE=adc
 `ANALYSIS_V2_ADMISSION_ENABLED`는 신규 preflight/분석 생성만 제어한다. 이를 끄더라도 이미 인증된 Cloud Tasks worker와 Scheduler 복구는 계속 실행되도록 `ANALYSIS_V2_WORKER_ENABLED`, `ANALYSIS_V2_RECOVERY_ENABLED`를 별도로 유지한다. worker에는 연결된 서비스 계정 ADC만 사용한다. WIF provider 입력과 Vercel OIDC 값은 넣지 않는다. 배포 스크립트가 이 경계를 검사한다.
 
 두 Cloud Run gate는 배포 입력과 runtime 값이 각각 독립적이며 기본값은 모두 `false`다. 폐기된 `ANALYSIS_V2_WORKER_EXECUTION_ENABLED`를 설정하지 않는다. Vercel intake 전용 `ANALYSIS_V2_ADMISSION_ENABLED`도 Cloud Run revision에 존재하면 안 되며, 배포 스크립트는 두 이름을 기존 revision에서 제거한다.
+
+Cloud Run runtime/build env manifest는 문자열 검색이 아니라 Node ENV parser와 `js-yaml`의 duplicate-엄격 YAML parser로 구조를 읽는다. 인용된 YAML key도 동일한 금지/정확 key 규칙을 적용받고, build manifest는 비어 있지 않은 공개 Supabase 두 key만 허용한다. runtime ENV 형식은 한 줄당 bare key assignment만 허용하며, 복잡한 다중 행 값은 YAML 파일로 표현한다.
+검증이 완료되면 파싱한 JSON 값에서 일회성 0400 YAML snapshot을 생성하고 `gcloud`에는 이 snapshot만 전달한다. 원본 manifest 파일이 배포 중 바뀌거나 symlink target이 교체되어도 업로드 bytes는 바뀌지 않으며, snapshot은 종료 trap에서 삭제된다.
 
 ## 출시 gate 전환 순서
 
@@ -214,8 +264,9 @@ bash scripts/test-analysis-v2-infra-scripts.sh
 - STS의 audience 오류는 `https://...`와 `//...`를 뒤바꾸지 않았는지 확인한다.
 - impersonation 거부는 enqueuer 서비스 계정 IAM의 정확한 subject 바인딩과 Vercel `owner_id`, `project_id`, `environment` 조건을 확인한다.
 - queue 등록 권한 거부는 전용 enqueuer가 대상 queue에만 필요한 권한을 갖는지 확인한다. 문제를 피하려고 프로젝트 전역 `roles/cloudtasks.enqueuer`를 부여하지 않는다.
-- recovery/retention의 401은 Scheduler OIDC service account와 audience가 정확한지 확인한다. 503 `MAINTENANCE_UNAVAILABLE`은 worker runtime env의 maintenance 설정을 확인한다.
-- Scheduler job drift는 먼저 `--check` 출력과 현재 job JSON을 검토한다. 의도된 교정일 때만 `--reconcile-jobs`를 사용한다.
+- recovery/retention의 401은 Scheduler OIDC service account와 audience가 정확한지 확인한다. recovery gate가 `false`인데 호출이나 503 `MAINTENANCE_UNAVAILABLE`이 반복되면 recovery job이 `PAUSED`인지 먼저 확인한다.
+- Scheduler 구조 drift는 먼저 `--check` 출력과 현재 job JSON을 검토한다. 의도된 교정일 때만 `--reconcile-jobs`를 사용하며, recovery gate에 따른 pause/resume에는 사용하지 않는다.
 - IAM drift는 해당 리소스의 현재 policy를 별도 보관하고 principal 소유자를 확인한다. 의도된 교정일 때만 `--reconcile-iam`을 사용한다.
 - source deploy가 중단되면 Git worktree가 clean하고 source dir가 worktree root이며 tracked symlink가 없는지 확인한다. 민감 파일을 `.gcloudignore`로 숨기는 방식에 의존하지 않는다.
+- 배포가 promotion 뒤 실패하면 출력의 `rollback verified`와 실제 traffic revision을 함께 확인한다. 자동 rollback이 불완전하면 기록된 known-good revision과 recovery Scheduler 상태를 위 수동 명령으로 복구한 뒤 admission을 닫아 둔다.
 - `--check`가 사용자 관리 키, 추가 WIF principal, 업로드한 JWK, 삭제 대기 provider 또는 provider drift를 발견하면 자동으로 넓혀서 허용하지 않는다. 원인을 검토하고 선언된 최소 권한 상태로 되돌린다.

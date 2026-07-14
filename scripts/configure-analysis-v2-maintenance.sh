@@ -26,6 +26,7 @@ Required environment variables:
   ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE
   ANALYSIS_V2_TASKS_CLOUD_RUN_REGION
   ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL
+  ANALYSIS_V2_RECOVERY_ENABLED
 
 Optional environment variables:
   ANALYSIS_V2_MAINTENANCE_LOCATION        Defaults to the Cloud Run region.
@@ -180,7 +181,6 @@ job_is_exact() {
     --arg deadline "$deadline" '
       .schedule == $schedule
         and .timeZone == "Etc/UTC"
-        and (.state // "ENABLED") == "ENABLED"
         and .httpTarget.uri == $uri
         and .httpTarget.httpMethod == "POST"
         and .httpTarget.oidcToken.serviceAccountEmail == $service_account
@@ -194,6 +194,41 @@ job_is_exact() {
         and .retryConfig.maxBackoffDuration == "60s"
         and ((.retryConfig.maxDoublings // 0) | tonumber) == 3
     ' <<<"$config" >/dev/null
+}
+
+job_state_is_exact() {
+  local config="$1"
+  local desired_state="$2"
+  jq -e --arg desired_state "$desired_state" \
+    '(.state // "ENABLED") == $desired_state' \
+    <<<"$config" >/dev/null
+}
+
+ensure_job_state() {
+  local job="$1"
+  local desired_state="$2"
+  local config="$3"
+  local action
+  local current_state
+  if job_state_is_exact "$config" "$desired_state"; then
+    log "verified: scheduler job state is exact: $job ($desired_state)"
+    return 0
+  fi
+
+  current_state="$(jq -r '.state // "ENABLED"' <<<"$config")"
+  if [[ "$current_state" == "PAUSED" && "$desired_state" == "ENABLED" ]]; then
+    action="resume"
+  elif [[ "$current_state" == "ENABLED" && "$desired_state" == "PAUSED" ]]; then
+    action="pause"
+  else
+    die "scheduler job has an unsupported state transition: $job ($current_state -> $desired_state)"
+  fi
+  [[ "$mode" != "check" ]] \
+    || die "scheduler job state has drifted: $job ($desired_state required)"
+  run_mutation gcloud scheduler jobs "$action" "$job" \
+    "--project=$ANALYSIS_V2_TASKS_PROJECT" \
+    "--location=$maintenance_location" \
+    --quiet
 }
 
 job_args() {
@@ -228,26 +263,48 @@ ensure_job() {
   local schedule="$2"
   local uri="$3"
   local deadline="$4"
+  local desired_state="$5"
   local config
   if config="$(job_json "$job")"; then
-    if job_is_exact "$config" "$schedule" "$uri" "$deadline"; then
-      log "verified: scheduler job is exact: $job"
-      return 0
+    if ! job_is_exact "$config" "$schedule" "$uri" "$deadline"; then
+      if [[ "$mode" == "apply" ]] \
+        && ! job_state_is_exact "$config" "PAUSED"; then
+        ensure_job_state "$job" "PAUSED" "$config"
+        config="$(job_json "$job")" \
+          || die "scheduler job disappeared after the safety pause: $job"
+        job_state_is_exact "$config" "PAUSED" \
+          || die "scheduler job safety pause was not observable: $job"
+        log "safety pause applied before reporting scheduler configuration drift: $job"
+      fi
+      [[ "$mode" != "check" ]] || die "scheduler job has drifted: $job"
+      [[ "$reconcile_jobs" == "true" ]] \
+        || die "scheduler job has drifted; inspect or use --reconcile-jobs: $job"
+      job_args "$job" "$schedule" "$uri" "$deadline"
+      run_mutation gcloud scheduler jobs update http "${scheduler_args[@]}"
+      if [[ "$mode" == "apply" ]]; then
+        config="$(job_json "$job")" || die "scheduler job was not observable: $job"
+      fi
+    else
+      log "verified: scheduler job configuration is exact: $job"
     fi
-    [[ "$mode" != "check" ]] || die "scheduler job has drifted: $job"
-    [[ "$reconcile_jobs" == "true" ]] \
-      || die "scheduler job has drifted; inspect or use --reconcile-jobs: $job"
-    job_args "$job" "$schedule" "$uri" "$deadline"
-    run_mutation gcloud scheduler jobs update http "${scheduler_args[@]}"
   else
     [[ "$mode" != "check" ]] || die "scheduler job does not exist: $job"
     job_args "$job" "$schedule" "$uri" "$deadline"
     run_mutation gcloud scheduler jobs create http "${scheduler_args[@]}"
+    if [[ "$mode" == "apply" ]]; then
+      config="$(job_json "$job")" || die "scheduler job was not observable: $job"
+    else
+      config='{"state":"ENABLED"}'
+    fi
   fi
+
+  ensure_job_state "$job" "$desired_state" "$config"
   if [[ "$mode" == "apply" ]]; then
     config="$(job_json "$job")" || die "scheduler job was not observable: $job"
     job_is_exact "$config" "$schedule" "$uri" "$deadline" \
       || die "scheduler job configuration is not exact: $job"
+    job_state_is_exact "$config" "$desired_state" \
+      || die "scheduler job state is not exact: $job ($desired_state required)"
   fi
 }
 
@@ -280,7 +337,8 @@ for name in \
   ANALYSIS_V2_TASKS_PROJECT \
   ANALYSIS_V2_TASKS_CLOUD_RUN_SERVICE \
   ANALYSIS_V2_TASKS_CLOUD_RUN_REGION \
-  ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL; do
+  ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL \
+  ANALYSIS_V2_RECOVERY_ENABLED; do
   required_env "$name"
 done
 
@@ -295,6 +353,9 @@ validate_service_account "$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL"
 validate_job "$recovery_job"
 validate_job "$retention_job"
 [[ "$recovery_job" != "$retention_job" ]] || die "maintenance job names must be distinct"
+[[ "$ANALYSIS_V2_RECOVERY_ENABLED" == "true" \
+  || "$ANALYSIS_V2_RECOVERY_ENABLED" == "false" ]] \
+  || die "ANALYSIS_V2_RECOVERY_ENABLED must be true or false"
 [[ "$(service_account_project "$ANALYSIS_V2_MAINTENANCE_SERVICE_ACCOUNT_EMAIL")" \
   == "$ANALYSIS_V2_TASKS_PROJECT" ]] || die "maintenance identity belongs to another project"
 
@@ -310,10 +371,15 @@ readonly service_origin="$(jq -er '.status.url // .status.address.url' <<<"$serv
 verify_maintenance_identity
 verify_run_invoker
 ensure_api
+if [[ "$ANALYSIS_V2_RECOVERY_ENABLED" == "true" ]]; then
+  readonly recovery_job_state="ENABLED"
+else
+  readonly recovery_job_state="PAUSED"
+fi
 ensure_job "$recovery_job" "$RECOVERY_SCHEDULE" \
-  "$service_origin/api/analysis/v2/recover" "300s"
+  "$service_origin/api/analysis/v2/recover" "300s" "$recovery_job_state"
 ensure_job "$retention_job" "$RETENTION_SCHEDULE" \
-  "$service_origin/api/analysis/preflight/retention" "60s"
+  "$service_origin/api/analysis/preflight/retention" "60s" "ENABLED"
 
 if [[ "$mode" == "dry-run" ]]; then
   log "dry-run complete: no mutations were applied"
