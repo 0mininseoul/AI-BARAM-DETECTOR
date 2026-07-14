@@ -5,6 +5,7 @@ vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
 
 import {
     PREFLIGHT_DATABASE_NAMES,
+    PreflightImmutableError,
     PreflightLeaseBusyError,
     buildReadyPreflightSnapshot,
     createSupabasePreflightStore,
@@ -261,6 +262,26 @@ describe('preflight persistence adapter', () => {
             p_decision: 'exclude',
             p_excluded_instagram_id: 'owner.name',
         });
+    });
+
+    it('maps a conflicting write-once exclusion decision to an immutable error', async () => {
+        const store = createSupabasePreflightStore({
+            rpc: vi.fn(async () => ({
+                data: null,
+                error: { code: 'P0001', message: 'PREFLIGHT_IMMUTABLE' },
+            })),
+            from: vi.fn() as never,
+        });
+
+        const update = store.setExclusion({
+            preflightId,
+            userId,
+            decision: 'skip',
+            excludedInstagramId: null,
+        });
+
+        await expect(update).rejects.toBeInstanceOf(PreflightImmutableError);
+        await expect(update).rejects.toMatchObject({ message: 'PREFLIGHT_IMMUTABLE' });
     });
 
     it('reserves and marks one durable dispatch generation', async () => {

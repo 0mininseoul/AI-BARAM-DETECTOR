@@ -65,6 +65,7 @@ import {
 } from '@/app/api/analysis/preflight/[preflightId]/route';
 import {
     InvalidPreflightExclusionError,
+    PreflightImmutableError,
     PreflightRateLimitedError,
 } from './preflight';
 import { PreflightTaskEnqueueError } from './preflight-tasks';
@@ -434,5 +435,14 @@ describe('preflight owner routes', () => {
         }), context());
         expect(rejected.status).toBe(400);
         await expect(rejected.json()).resolves.toMatchObject({ code: 'INVALID_EXCLUSION' });
+
+        mocks.store.setExclusion.mockRejectedValueOnce(new PreflightImmutableError());
+        const conflict = await patchPreflight(new Request('https://example.com', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ decision: 'skip' }),
+        }), context());
+        expect(conflict.status).toBe(409);
+        await expect(conflict.json()).resolves.toMatchObject({ code: 'PREFLIGHT_IMMUTABLE' });
     });
 });
