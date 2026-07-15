@@ -295,6 +295,10 @@ function providerStore(callOrder: string[] = []) {
         return {
             stored: null,
             checkpoint: {
+                logicalProvider: input.logicalProvider,
+                actorId: input.actorId,
+                credentialSlot: input.credentialSlot,
+                maxChargeUsd: input.maxChargeUsd,
                 onBeforeRunStart: vi.fn(),
                 onRunStarted: vi.fn(),
             },
@@ -382,11 +386,13 @@ describe('analysis V2 concrete collection executors', () => {
             provider: 'apify',
             fallback: false,
             expectedResultCount: 2,
+            providerRun: expect.objectContaining({ credentialSlot: 'tertiary' }),
         }));
         expect(getFollowingMock).toHaveBeenCalledWith('target', 2, expect.objectContaining({
             provider: 'apify',
             fallback: false,
             expectedResultCount: 2,
+            providerRun: expect.objectContaining({ credentialSlot: 'tertiary' }),
         }));
         expect(checkpointRelationshipSide).toHaveBeenCalledTimes(2);
         expect(providers.bindAdapterCheckpoint).toHaveBeenCalledWith(
@@ -394,7 +400,16 @@ describe('analysis V2 concrete collection executors', () => {
         );
         expect(result.checkpoint.manifest.profileBatches).toHaveLength(1);
         expect(result.checkpoint.manifest.privateNameBatches).toHaveLength(1);
-        expect(JSON.stringify(getFollowersMock.mock.calls)).not.toContain('cookie');
+        const followerOptions = (
+            getFollowersMock.mock.calls as unknown as Array<[
+                string,
+                number,
+                Record<string, unknown>,
+            ]>
+        )[0]?.[2];
+        expect(followerOptions).not.toHaveProperty('cookie');
+        expect(followerOptions).not.toHaveProperty('cookies');
+        expect(followerOptions).not.toHaveProperty('session');
     });
 
     it('freezes exact zero relationship sides without reserving or starting Actors', async () => {
