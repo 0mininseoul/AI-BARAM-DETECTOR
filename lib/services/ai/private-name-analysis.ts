@@ -77,9 +77,16 @@ const privateNameResultSchema = z.object({
 
 /** Build a response contract tied to one chunk, including exact id order and item count. */
 export function createPrivateNameBatchResponseSchema(expectedIds: readonly string[]) {
+    // Vertex rejects large structured-output minItems/maxItems constraints, so enforce
+    // cardinality only in the runtime refinement that validates the generated payload.
     return z.array(privateNameResultSchema)
-        .length(expectedIds.length)
         .superRefine((results, context) => {
+            if (results.length !== expectedIds.length) {
+                context.addIssue({
+                    code: 'custom',
+                    message: 'Private-name responses must preserve the exact input count.',
+                });
+            }
             results.forEach((result, index) => {
                 if (result.id !== expectedIds[index]) {
                     context.addIssue({
