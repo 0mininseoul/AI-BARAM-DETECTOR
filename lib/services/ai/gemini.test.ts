@@ -741,6 +741,16 @@ describe('Gemini response JSON Schema mapping', () => {
         expect(() => deepRiskNarrativeResponseSchema.parse({ lines: ['invalid', 'invalid'] }))
             .toThrow();
     });
+
+    it('keeps large private-name batch cardinality out of the Vertex response schema', () => {
+        const expectedIds = Array.from({ length: 100 }, (_, index) => `account-${index}`);
+        const schema = createPrivateNameBatchResponseSchema(expectedIds);
+        const mapped = zodToGeminiResponseJsonSchema(schema);
+
+        expect(mapped).not.toHaveProperty('minItems');
+        expect(mapped).not.toHaveProperty('maxItems');
+        expect(() => schema.parse([])).toThrow('exact input count');
+    });
 });
 
 describe('analyzeWithGemini process concurrency', () => {
