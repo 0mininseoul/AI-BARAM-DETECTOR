@@ -166,6 +166,27 @@ describe('analysis V2 provider run store', () => {
         );
     });
 
+    it('exposes the selected provider identity before a new Actor start', async () => {
+        const { rpc, client } = clientWithRpc();
+        rpc.mockResolvedValueOnce({ data: null, error: null });
+        const store = createAnalysisV2ProviderRunStore(client);
+
+        const binding = await store.bindAdapterCheckpoint({
+            ...identity,
+            credentialSlot: 'quinary',
+        });
+
+        expect(binding.stored).toBeNull();
+        expect(binding.checkpoint).toMatchObject({
+            logicalProvider: 'apify',
+            actorId: identity.actorId,
+            credentialSlot: 'quinary',
+            maxChargeUsd: 0.40205,
+        });
+        expect(binding.checkpoint.onBeforeRunStart).toEqual(expect.any(Function));
+        expect(rpc).toHaveBeenCalledTimes(1);
+    });
+
     it('rejects a created reservation that does not echo the proposed token', async () => {
         const { rpc, client } = clientWithRpc();
         rpc.mockResolvedValueOnce({

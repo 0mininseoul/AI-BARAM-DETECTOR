@@ -1038,6 +1038,10 @@ export function createAnalysisV2ProviderRunStore(
                 stored: null,
                 checkpoint: {
                     ...costCallbacks,
+                    logicalProvider: expectedProvider.logicalProvider,
+                    actorId: expectedProvider.actorId,
+                    credentialSlot: expectedProvider.credentialSlot,
+                    maxChargeUsd: expectedProvider.maxChargeUsd,
                     onBeforeRunStart: async (providerIdentity) => {
                         const actual = canonicalProviderIdentity(providerIdentity);
                         if (
