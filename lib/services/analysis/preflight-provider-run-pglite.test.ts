@@ -10,6 +10,13 @@ const migration = readFileSync(
     ),
     'utf8'
 );
+const freshAdmissionFenceMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260715001843_allow_fresh_admission_preflight_provider_run_fence.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 const INPUT_HASH = 'a'.repeat(64);
 const OTHER_INPUT_HASH = 'b'.repeat(64);
@@ -40,6 +47,10 @@ CREATE TABLE public.analysis_preflights (
     lease_token UUID,
     lease_expires_at TIMESTAMP WITH TIME ZONE,
     expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    consumed_request_id UUID,
+    admission_status TEXT,
+    admission_claim_token UUID,
+    admission_lease_expires_at TIMESTAMP WITH TIME ZONE,
     target_instagram_id TEXT,
     target_full_name TEXT,
     target_bio TEXT,
@@ -112,6 +123,24 @@ async function seedPreflight(
     );
 }
 
+async function seedFreshAdmission(
+    preflightId: string,
+    claimToken = CLAIM_TOKEN,
+    leaseInterval = '5 minutes'
+): Promise<void> {
+    await db.query(
+        `INSERT INTO public.analysis_preflights (
+            id, status, expires_at, admission_status,
+            admission_claim_token, admission_lease_expires_at
+        ) VALUES (
+            $1, 'ready', pg_catalog.clock_timestamp() + INTERVAL '30 minutes',
+            'processing', $2,
+            pg_catalog.clock_timestamp() + $3::INTERVAL
+        )`,
+        [preflightId, claimToken, leaseInterval]
+    );
+}
+
 async function reserve(
     preflightId: string,
     credentialSlot = 'primary',
@@ -161,6 +190,7 @@ describe('preflight Apify provider-run PGlite contract', () => {
         db = await PGlite.create();
         await db.exec(bootstrap);
         await db.exec(migration);
+        await db.exec(freshAdmissionFenceMigration);
     }, 30_000);
 
     beforeEach(async () => {
@@ -277,6 +307,181 @@ describe('preflight Apify provider-run PGlite contract', () => {
             'SELECT pg_catalog.count(*)::INTEGER AS count FROM public.analysis_preflight_provider_runs'
         );
         expect(count.rows[0].count).toBe(1);
+    });
+
+    it('permits the exact live fresh-admission lease to reserve the only provider run', async () => {
+        const preflightId = '11000000-0000-4000-8000-000000000001';
+        await seedFreshAdmission(preflightId);
+
+        const reservation = await reserve(preflightId, 'quinary');
+        expect(reservation).toMatchObject({
+            created: true,
+            run: { status: 'starting', credentialSlot: 'quinary', runId: null },
+        });
+        expect((await reserve(preflightId, 'quinary')).created).toBe(false);
+
+        const count = await db.query<{ count: number }>(
+            'SELECT pg_catalog.count(*)::INTEGER AS count FROM public.analysis_preflight_provider_runs'
+        );
+        expect(count.rows[0].count).toBe(1);
+    });
+
+    it('rereads the original successful run under a later live fresh-admission lease', async () => {
+        const preflightId = '12000000-0000-4000-8000-000000000001';
+        await seedPreflight(preflightId);
+        await reserve(preflightId, 'quinary');
+        await serviceQuery(
+            `SELECT public.checkpoint_analysis_preflight_provider_run_started(
+                $1, $2, $3, $4, $5, $6
+            )`,
+            [preflightId, CLAIM_TOKEN, INPUT_HASH, 'quinary', '0.0026', RUN_ID]
+        );
+        await serviceQuery(
+            `SELECT public.checkpoint_analysis_preflight_provider_run_terminal(
+                $1, $2, $3, $4, $5, $6, $7, $8
+            )`,
+            [
+                preflightId,
+                CLAIM_TOKEN,
+                INPUT_HASH,
+                'quinary',
+                '0.0026',
+                RUN_ID,
+                'succeeded',
+                '0.0026',
+            ]
+        );
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET status = 'ready', lease_token = NULL, lease_expires_at = NULL,
+                 admission_status = 'processing',
+                 admission_claim_token = $2,
+                 admission_lease_expires_at = pg_catalog.clock_timestamp()
+                    + INTERVAL '5 minutes'
+             WHERE id = $1`,
+            [preflightId, OTHER_CLAIM_TOKEN]
+        );
+
+        const loaded = await serviceQuery<JsonRow<ProviderRunJson>>(
+            'SELECT public.load_analysis_preflight_provider_run($1, $2, $3) AS result',
+            [preflightId, OTHER_CLAIM_TOKEN, INPUT_HASH]
+        );
+        expect(loaded.rows[0].result).toMatchObject({
+            status: 'succeeded',
+            runId: RUN_ID,
+            credentialSlot: 'quinary',
+        });
+        const replay = await serviceQuery<JsonRow<ProviderRunJson>>(
+            `SELECT public.checkpoint_analysis_preflight_provider_run_terminal(
+                $1, $2, $3, $4, $5, $6, $7, $8
+            ) AS result`,
+            [
+                preflightId,
+                OTHER_CLAIM_TOKEN,
+                INPUT_HASH,
+                'quinary',
+                '0.0026',
+                RUN_ID,
+                'succeeded',
+                null,
+            ]
+        );
+        expect(replay.rows[0].result).toMatchObject({
+            status: 'succeeded',
+            runId: RUN_ID,
+        });
+
+        const count = await db.query<{ count: number }>(
+            'SELECT pg_catalog.count(*)::INTEGER AS count FROM public.analysis_preflight_provider_runs'
+        );
+        expect(count.rows[0].count).toBe(1);
+    });
+
+    it('rejects stale or mismatched fresh-admission claims across every run RPC', async () => {
+        const stalePreflightId = '13000000-0000-4000-8000-000000000001';
+        await seedFreshAdmission(stalePreflightId, CLAIM_TOKEN, '-1 second');
+
+        const staleCalls = [
+            () => reserve(stalePreflightId),
+            () => serviceQuery(
+                'SELECT public.load_analysis_preflight_provider_run($1, $2, $3)',
+                [stalePreflightId, CLAIM_TOKEN, INPUT_HASH]
+            ),
+            () => serviceQuery(
+                'SELECT public.checkpoint_analysis_preflight_provider_run_started($1, $2, $3, $4, $5, $6)',
+                [stalePreflightId, CLAIM_TOKEN, INPUT_HASH, 'primary', '0.0026', RUN_ID]
+            ),
+            () => serviceQuery(
+                'SELECT public.checkpoint_analysis_preflight_provider_run_terminal($1, $2, $3, $4, $5, $6, $7, $8)',
+                [
+                    stalePreflightId,
+                    CLAIM_TOKEN,
+                    INPUT_HASH,
+                    'primary',
+                    '0.0026',
+                    RUN_ID,
+                    'failed',
+                    null,
+                ]
+            ),
+        ];
+
+        for (const call of staleCalls) {
+            await expect(call()).rejects.toThrow(
+                /ANALYSIS_PREFLIGHT_PROVIDER_RUN_FENCE_MISMATCH/
+            );
+        }
+
+        const livePreflightId = '13000000-0000-4000-8000-000000000002';
+        await seedFreshAdmission(livePreflightId);
+        const wrongTokenCalls = [
+            () => reserve(livePreflightId, 'primary', INPUT_HASH, OTHER_CLAIM_TOKEN),
+            () => serviceQuery(
+                'SELECT public.load_analysis_preflight_provider_run($1, $2, $3)',
+                [livePreflightId, OTHER_CLAIM_TOKEN, INPUT_HASH]
+            ),
+            () => serviceQuery(
+                'SELECT public.checkpoint_analysis_preflight_provider_run_started($1, $2, $3, $4, $5, $6)',
+                [livePreflightId, OTHER_CLAIM_TOKEN, INPUT_HASH, 'primary', '0.0026', RUN_ID]
+            ),
+            () => serviceQuery(
+                'SELECT public.checkpoint_analysis_preflight_provider_run_terminal($1, $2, $3, $4, $5, $6, $7, $8)',
+                [
+                    livePreflightId,
+                    OTHER_CLAIM_TOKEN,
+                    INPUT_HASH,
+                    'primary',
+                    '0.0026',
+                    RUN_ID,
+                    'failed',
+                    null,
+                ]
+            ),
+        ];
+        for (const call of wrongTokenCalls) {
+            await expect(call()).rejects.toThrow(
+                /ANALYSIS_PREFLIGHT_PROVIDER_RUN_FENCE_MISMATCH/
+            );
+        }
+    });
+
+    it('rejects a consumed ready preflight even when its fresh lease is otherwise live', async () => {
+        const preflightId = '14000000-0000-4000-8000-000000000001';
+        await seedFreshAdmission(preflightId);
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET consumed_request_id = '99999999-9999-4999-8999-999999999999'
+             WHERE id = $1`,
+            [preflightId]
+        );
+
+        await expect(reserve(preflightId)).rejects.toThrow(
+            /ANALYSIS_PREFLIGHT_PROVIDER_RUN_FENCE_MISMATCH/
+        );
+        await expect(serviceQuery(
+            'SELECT public.load_analysis_preflight_provider_run($1, $2, $3)',
+            [preflightId, CLAIM_TOKEN, INPUT_HASH]
+        )).rejects.toThrow(/ANALYSIS_PREFLIGHT_PROVIDER_RUN_FENCE_MISMATCH/);
     });
 
     it('rejects replay identity drift without changing the original row', async () => {

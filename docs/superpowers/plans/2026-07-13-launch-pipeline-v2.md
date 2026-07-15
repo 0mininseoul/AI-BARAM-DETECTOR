@@ -239,6 +239,7 @@ type PreflightStatusV1 =
 - `POST` persists the preflight, enqueues a target-profile job, and returns `PreflightAcceptedV1` immediately. `GET /api/analysis/preflight/:id` returns `PreflightStatusV1`.
 - The Cloud Run worker tries the logged-out selfhosted summary first. Only a classified selfhosted provider failure may enter one Apify profile-summary fallback per preflight; explicit selfhosted not-found does not fallback.
 - The fallback is reserved before Actor start, capped by `maxTotalChargeUsd=$0.0026`, and retried only by resuming the stored run ID. Settled usage is reconciled by an authenticated read no earlier than 30 seconds later, including for expired or abandoned preflights.
+- Checkout-time fresh admission is also selfhosted-first and binds the same provider-run ledger. It may reserve the preflight's first and only fallback when no row exists, or reread the existing run without a second paid Actor start. A reused successful run carries the preflight-time count snapshot; plan-capacity checks and the downstream 99% relationship completeness gate remain fail-closed.
 - Preflight creates no relationship, interaction, or Gemini usage. It creates a paid-provider ledger row only when the bounded fallback is reserved, and neither provider receives an Instagram login cookie or session.
 - Owner scoped, idempotent, 30-minute TTL, signed image proxy only.
 

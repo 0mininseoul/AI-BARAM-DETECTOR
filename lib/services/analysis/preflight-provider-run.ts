@@ -13,6 +13,11 @@ import {
 import { getApifyClient } from '@/lib/services/instagram/providers/apify-relationship';
 import type { ClaimedPreflight } from './preflight';
 
+export type PreflightProviderRunClaim = Pick<
+    ClaimedPreflight,
+    'preflightId' | 'claimToken'
+>;
+
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const RUN_ID_PATTERN = /^[A-Za-z0-9]{8,64}$/;
@@ -627,7 +632,7 @@ export function preflightProviderIdentity(
 
 export async function bindPreflightProviderRunCheckpoint(input: {
     store: PreflightProviderRunStore;
-    claim: ClaimedPreflight;
+    claim: PreflightProviderRunClaim;
     inputHash: string;
     identity: ProviderIdentity;
 }): Promise<{

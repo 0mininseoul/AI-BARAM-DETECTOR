@@ -211,7 +211,7 @@ type PreflightAcceptedV1 = {
 };
 ```
 
-worker는 로그인 없는 자체 summary를 먼저 시도한다. 명시적 대상 없음은 fallback하지 않고, 분류된 자체 provider 실패일 때만 preflight당 Apify profile-summary fallback 1회를 허용한다. fallback은 Actor 시작 전 예약하고 `maxTotalChargeUsd=$0.0026`을 고정하며, retry에서는 저장된 같은 run ID만 재개한다. 안정된 실제액은 최소 30초 후 인증 재조회로 정산하고, 만료·이탈 preflight도 정산 전 원장을 유지한다. 사전 점검은 관계·상호작용·Gemini를 실행하지 않으며, 두 provider 모두 Instagram 로그인 쿠키/세션을 사용하지 않는다. 소유자 범위, 멱등성, 30분 TTL, 서명된 이미지 proxy를 적용한다.
+worker는 로그인 없는 자체 summary를 먼저 시도한다. 명시적 대상 없음은 fallback하지 않고, 분류된 자체 provider 실패일 때만 preflight당 Apify profile-summary fallback 1회를 허용한다. fallback은 Actor 시작 전 예약하고 `maxTotalChargeUsd=$0.0026`을 고정하며, retry에서는 저장된 같은 run ID만 재개한다. 결제 직전 fresh admission도 자체 수집을 먼저 시도하고 같은 provider-run 원장에 bind한다. 기존 원장이 없을 때만 이 preflight의 최초이자 유일한 fallback을 예약하며, 기존 성공 run이 있으면 두 번째 Actor를 시작하지 않고 그 dataset을 다시 읽는다. 이 경우 관계 수는 preflight 시점 provider snapshot일 수 있지만, 선택 플랜의 수용량 검사와 후속 팔로워/팔로잉별 99% 완전성 gate는 계속 fail-closed다. 안정된 실제액은 최소 30초 후 인증 재조회로 정산하고, 만료·이탈 preflight도 정산 전 원장을 유지한다. 사전 점검은 관계·상호작용·Gemini를 실행하지 않으며, 두 provider 모두 Instagram 로그인 쿠키/세션을 사용하지 않는다. 소유자 범위, 멱등성, 30분 TTL, 서명된 이미지 proxy를 적용한다.
 
 `PATCH /api/analysis/preflight/:id`는 정규화된 `excludedInstagramId` 하나 또는 명시적 skip을 저장한다. 대상 username, 잘못된 username, 다른 소유자, 이용권 소비 후 변경은 거부한다.
 

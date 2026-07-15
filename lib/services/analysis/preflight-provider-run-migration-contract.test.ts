@@ -8,6 +8,13 @@ const migration = readFileSync(
     ),
     'utf8'
 );
+const freshAdmissionFenceMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260715001843_allow_fresh_admission_preflight_provider_run_fence.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 function functionDefinition(name: string): string {
     const start = migration.indexOf(`CREATE OR REPLACE FUNCTION public.${name}(`);
@@ -15,6 +22,16 @@ function functionDefinition(name: string): string {
     const end = migration.indexOf('\n$$;', start);
     expect(end, `${name} must have a bounded body`).toBeGreaterThan(start);
     return migration.slice(start, end);
+}
+
+function freshAdmissionFenceDefinition(name: string): string {
+    const start = freshAdmissionFenceMigration.indexOf(
+        `CREATE OR REPLACE FUNCTION public.${name}(`
+    );
+    expect(start, `${name} fresh-admission fence must exist`).toBeGreaterThanOrEqual(0);
+    const end = freshAdmissionFenceMigration.indexOf('\n$$;', start);
+    expect(end, `${name} fresh-admission fence must have a bounded body`).toBeGreaterThan(start);
+    return freshAdmissionFenceMigration.slice(start, end);
 }
 
 function tableDefinition(): string {
@@ -78,29 +95,50 @@ describe('preflight Apify provider-run migration contract', () => {
         );
     });
 
-    it('fences load, reserve, started, and terminal RPCs with a live preflight claim', () => {
+    it('fences every run RPC with either the original or fresh-admission live claim', () => {
         for (const rpc of [
             'load_analysis_preflight_provider_run',
             'reserve_analysis_preflight_provider_run',
             'checkpoint_analysis_preflight_provider_run_started',
             'checkpoint_analysis_preflight_provider_run_terminal',
         ]) {
-            const definition = functionDefinition(rpc);
-            expect(definition).toContain("v_preflight.status <> 'processing'");
+            const definition = freshAdmissionFenceDefinition(rpc);
+            expect(definition).toContain("v_preflight.status = 'processing'");
             expect(definition).toContain(
-                'v_preflight.lease_token IS DISTINCT FROM p_claim_token'
+                'v_preflight.lease_token IS NOT DISTINCT FROM p_claim_token'
             );
-            expect(definition).toContain('v_preflight.lease_expires_at <= v_now');
+            expect(definition).toContain('v_preflight.lease_expires_at > v_now');
+            expect(definition).toContain("v_preflight.status = 'ready'");
+            expect(definition).toContain('v_preflight.consumed_request_id IS NULL');
+            expect(definition).toContain(
+                "v_preflight.admission_status = 'processing'"
+            );
+            expect(definition).toContain(
+                'v_preflight.admission_claim_token IS NOT DISTINCT FROM p_claim_token'
+            );
+            expect(definition).toContain(
+                'v_preflight.admission_lease_expires_at > v_now'
+            );
             expect(definition).toContain('v_preflight.expires_at <= v_now');
             expect(definition).toContain(
                 "MESSAGE = 'ANALYSIS_PREFLIGHT_PROVIDER_RUN_FENCE_MISMATCH'"
             );
             expect(definition).toContain('SECURITY DEFINER');
             expect(definition).toContain("SET search_path = ''");
-            expect(migration).toMatch(new RegExp(
+            expect(freshAdmissionFenceMigration).toMatch(new RegExp(
                 `GRANT EXECUTE ON FUNCTION public\\.${rpc}\\(`
             ));
         }
+    });
+
+    it('does not broaden the provider-run RPC grants while adding the fresh fence', () => {
+        expect(freshAdmissionFenceMigration).not.toMatch(
+            /GRANT EXECUTE[\s\S]*TO (?:PUBLIC|anon|authenticated)/
+        );
+        expect(freshAdmissionFenceMigration).not.toMatch(
+            /GRANT .* ON TABLE public\.analysis_preflight_provider_runs/
+        );
+        expect(freshAdmissionFenceMigration).not.toContain('CREATE POLICY');
     });
 
     it('commits one immutable intent before a caller may start an Actor', () => {
