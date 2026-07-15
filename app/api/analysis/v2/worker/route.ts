@@ -12,10 +12,10 @@ import {
     verifyAnalysisV2TaskAuthorization,
 } from '@/lib/services/analysis/v2-tasks';
 import { processAnalysisV2TaskDelivery } from '@/lib/services/analysis/v2-worker';
+import { isAnalysisV2WorkerErrorCode } from '@/lib/services/analysis/v2-worker-error-codes';
 
 export const maxDuration = 300;
 
-const SAFE_ERROR_CODE_PATTERN = /^(?=.{3,64}$)[A-Z][A-Z0-9_]*(?:_ERROR|_FAILED|_UNAVAILABLE|_INVALID|_MISSING|_CONFLICT|_MISMATCH|_NOT_READY|_NOT_RETRYABLE|_TRANSIENT|_RETRYABLE_OUTCOME|_RESERVED|_REQUIRED|_NOT_VISIBLE|_UNKNOWN|_LOST|_EXHAUSTED|_RATE_LIMITED)$/;
 const OBSERVABLE_JOB_KEY_PATTERN = /^(?:coordinator:(?:bootstrap|candidate-screening|finalize|join:(?:primary-evidence|final-score))|track:(?:relationships:collect|target-evidence:collect|profiles:batch:[0-9]+|profile-ai:batch:[0-9]+|private-names:batch:[0-9]+|reverse-likes:collect|partner-safety:batch:0|narratives:batch:0))$/;
 
 type WorkerLogDisposition = 'success' | 'transient' | 'permanent' | 'fence';
@@ -29,7 +29,7 @@ type WorkerLogOutcome =
     | 'stale_delivery';
 
 function safeErrorCode(value: unknown, fallback: string): string {
-    return typeof value === 'string' && SAFE_ERROR_CODE_PATTERN.test(value)
+    return isAnalysisV2WorkerErrorCode(value)
         ? value
         : fallback;
 }

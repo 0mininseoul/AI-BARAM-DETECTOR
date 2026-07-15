@@ -132,7 +132,7 @@ describe('analysis V2 worker route', () => {
         const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
         mocks.process.mockResolvedValueOnce({
             status: 'retry',
-            errorCode: 'APIFY_TOKEN_SECRET',
+            errorCode: 'APIFY_TOKEN_PROVIDER_SECRET_ERROR',
         });
 
         const response = await POST(request());
@@ -142,8 +142,28 @@ describe('analysis V2 worker route', () => {
         await expect(response.json()).resolves.toEqual({
             code: 'ANALYSIS_V2_JOB_HANDLER_FAILED',
         });
-        expect(serialized).not.toContain('APIFY_TOKEN_SECRET');
+        expect(serialized).not.toContain('APIFY_TOKEN_PROVIDER_SECRET_ERROR');
         warning.mockRestore();
+    });
+
+    it.each([
+        'ANALYSIS_V2_PROFILE_AI_BATCH_DRIFT',
+        'ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE',
+        'ANALYSIS_V2_REVERSE_LIKE_RESULT_LIMIT_EXCEEDED',
+    ])('preserves the canonical executor code in logs and responses: %s', async errorCode => {
+        const failure = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+        mocks.process.mockResolvedValueOnce({ status: 'failed', errorCode });
+
+        const response = await POST(request());
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual({ status: 'failed', errorCode });
+        expect(JSON.parse(String(failure.mock.calls[0]?.[0]))).toMatchObject({
+            outcome: 'failed',
+            disposition: 'permanent',
+            errorCode,
+        });
+        failure.mockRestore();
     });
 
     it('logs provider quota exhaustion as a permanent failed outcome', async () => {
