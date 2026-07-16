@@ -45,6 +45,23 @@ function rawUser(username: string) {
     };
 }
 
+function rpcBuilder(result: { data: unknown; error: unknown }) {
+    const request = Promise.resolve(result);
+    return Object.assign(request, {
+        abortSignal: () => request,
+    });
+}
+
+function neverSettlingRpcBuilder(onSignal: (signal: AbortSignal) => void) {
+    const request = new Promise<{ data: unknown; error: unknown }>(() => undefined);
+    return Object.assign(request, {
+        abortSignal: (signal: AbortSignal) => {
+            onSignal(signal);
+            return request;
+        },
+    });
+}
+
 describe('selfhosted web profile client', () => {
     it('keeps the default cold-profile start schedule within two minutes', () => {
         const config = getWebProfileConfig({});
@@ -216,23 +233,26 @@ describe('selfhosted web profile client', () => {
 
     it('reserves globally and waits before usage accounting or the network request', async () => {
         const order: string[] = [];
+        let clock = 0;
         const client: SelfHostedProfileGlobalGateRpcClient = {
-            rpc: vi.fn(async (_name, params) => {
+            rpc: vi.fn((_name, params) => {
                 order.push(`reserve:${params.p_min_interval_ms}`);
-                return {
+                return rpcBuilder({
                     data: {
                         schemaVersion: 1,
                         waitMs: 40,
                         reservedAt: '2026-07-16T12:34:56.789+00:00',
                     },
                     error: null,
-                };
+                });
             }),
         };
         const globalGate = createSelfHostedProfileGlobalGate({
             client,
+            now: () => clock,
             sleep: async ms => {
                 order.push(`wait:${ms}`);
+                clock += ms;
             },
         });
         const fetchProfile = makeWebProfileFetcher({
@@ -241,6 +261,7 @@ describe('selfhosted web profile client', () => {
                 SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS: '750',
             }),
             globalGate,
+            now: () => clock,
             fetchFn: vi.fn<typeof fetch>(async () => {
                 order.push('fetch');
                 return response({ data: { user: rawUser('target') } });
@@ -303,6 +324,219 @@ describe('selfhosted web profile client', () => {
             httpStatus: null,
         });
         expect((error as Error).message).not.toContain('database endpoint');
+        expect(onRequest).not.toHaveBeenCalled();
+        expect(fetchFn).not.toHaveBeenCalled();
+    });
+
+    it('bounds the full gate wait to the caller deadline after request headroom', async () => {
+        const clock = 10_000;
+        const globalGate: SelfHostedProfileGlobalGate = {
+            reserveAndWait: vi.fn(async () => ({
+                schemaVersion: 1 as const,
+                waitMs: 0,
+                reservedAt: '2026-07-16T12:34:56.789+00:00',
+            })),
+        };
+        const fetchProfile = makeWebProfileFetcher({
+            env: env({ SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: 'true' }),
+            globalGate,
+            fetchFn: vi.fn<typeof fetch>(async () =>
+                response({ data: { user: rawUser('target') } })
+            ),
+            now: () => clock,
+        });
+
+        await fetchProfile('target', undefined, {
+            invocationDeadlineAtMs: clock + 5_000,
+        });
+
+        expect(globalGate.reserveAndWait).toHaveBeenCalledWith(750, {
+            deadlineAtMs: clock + 3_750,
+            maxWaitMs: 3_000,
+            responseGuardMs: 100,
+            rpcTimeoutMs: 750,
+        });
+    });
+
+    it('keeps successful independent-client network starts at least one interval apart', async () => {
+        let nextStartMs = 0;
+        let firstClock = 0;
+        let secondClock = 0;
+        const client = (advanceRpc: () => void): SelfHostedProfileGlobalGateRpcClient => ({
+            rpc: vi.fn((_name, params) => {
+                const waitMs = nextStartMs;
+                nextStartMs += params.p_min_interval_ms + params.p_response_guard_ms;
+                advanceRpc();
+                return rpcBuilder({
+                    data: {
+                        schemaVersion: 1,
+                        waitMs,
+                        reservedAt: '2026-07-16T12:34:56.789+00:00',
+                    },
+                    error: null,
+                });
+            }),
+        });
+        const starts: number[] = [];
+        const first = makeWebProfileFetcher({
+            env: env({ SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: 'true' }),
+            globalGate: createSelfHostedProfileGlobalGate({
+                client: client(() => { firstClock += 50; }),
+                now: () => firstClock,
+                sleep: async ms => { firstClock += ms; },
+            }),
+            now: () => firstClock,
+            sleep: async ms => { firstClock += ms; },
+            fetchFn: vi.fn<typeof fetch>(async () => {
+                starts.push(firstClock);
+                return response({ data: { user: rawUser('first') } });
+            }),
+        });
+        const second = makeWebProfileFetcher({
+            env: env({ SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: 'true' }),
+            globalGate: createSelfHostedProfileGlobalGate({
+                client: client(() => undefined),
+                now: () => secondClock,
+                sleep: async ms => { secondClock += ms; },
+            }),
+            now: () => secondClock,
+            sleep: async ms => { secondClock += ms; },
+            fetchFn: vi.fn<typeof fetch>(async () => {
+                starts.push(secondClock);
+                return response({ data: { user: rawUser('second') } });
+            }),
+        });
+
+        await Promise.all([first('first'), second('second')]);
+
+        expect(starts).toEqual([50, 850]);
+        expect(starts[1] - starts[0]).toBeGreaterThanOrEqual(750);
+    });
+
+    it('rejects a late 600ms reservation before Instagram while the next client starts safely', async () => {
+        let nextStartMs = 0;
+        let slowClock = 0;
+        let nextClock = 0;
+        const client = (advanceRpc: () => void): SelfHostedProfileGlobalGateRpcClient => ({
+            rpc: vi.fn((_name, params) => {
+                const waitMs = nextStartMs;
+                nextStartMs += params.p_min_interval_ms + params.p_response_guard_ms;
+                advanceRpc();
+                return rpcBuilder({
+                    data: {
+                        schemaVersion: 1,
+                        waitMs,
+                        reservedAt: '2026-07-16T12:34:56.789+00:00',
+                    },
+                    error: null,
+                });
+            }),
+        });
+        const slowFetch = vi.fn<typeof fetch>();
+        const slowOnRequest = vi.fn();
+        const nextStarts: number[] = [];
+        const slow = makeWebProfileFetcher({
+            env: env({ SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: 'true' }),
+            globalGate: createSelfHostedProfileGlobalGate({
+                client: client(() => { slowClock += 600; }),
+                now: () => slowClock,
+                sleep: async ms => { slowClock += ms; },
+            }),
+            now: () => slowClock,
+            sleep: async ms => { slowClock += ms; },
+            fetchFn: slowFetch,
+        });
+        const next = makeWebProfileFetcher({
+            env: env({ SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: 'true' }),
+            globalGate: createSelfHostedProfileGlobalGate({
+                client: client(() => undefined),
+                now: () => nextClock,
+                sleep: async ms => { nextClock += ms; },
+            }),
+            now: () => nextClock,
+            sleep: async ms => { nextClock += ms; },
+            fetchFn: vi.fn<typeof fetch>(async () => {
+                nextStarts.push(nextClock);
+                return response({ data: { user: rawUser('next') } });
+            }),
+        });
+
+        const [slowResult, nextResult] = await Promise.allSettled([
+            slow('slow', undefined, { onRequest: slowOnRequest }),
+            next('next'),
+        ]);
+
+        expect(slowResult.status).toBe('rejected');
+        expect(nextResult.status).toBe('fulfilled');
+        expect(slowOnRequest).not.toHaveBeenCalled();
+        expect(slowFetch).not.toHaveBeenCalled();
+        expect(nextStarts).toEqual([850]);
+    });
+
+    it('hard-times out a never-settling reservation before usage or Instagram starts', async () => {
+        vi.useFakeTimers();
+        try {
+            let abortSignal: AbortSignal | undefined;
+            const client: SelfHostedProfileGlobalGateRpcClient = {
+                rpc: vi.fn(() => neverSettlingRpcBuilder(signal => {
+                    abortSignal = signal;
+                })),
+            };
+            const fetchFn = vi.fn<typeof fetch>();
+            const onRequest = vi.fn();
+            const fetchProfile = makeWebProfileFetcher({
+                env: env({ SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: 'true' }),
+                globalGate: createSelfHostedProfileGlobalGate({ client }),
+                fetchFn,
+            });
+
+            const pending = fetchProfile('target', undefined, { onRequest })
+                .catch(caught => caught);
+            await vi.advanceTimersByTimeAsync(750);
+            const error = await pending;
+
+            expect(classifyWebProfileFailure(error)).toEqual({
+                kind: 'transport',
+                retryable: true,
+                httpStatus: null,
+            });
+            expect(abortSignal?.aborted).toBe(true);
+            expect(onRequest).not.toHaveBeenCalled();
+            expect(fetchFn).not.toHaveBeenCalled();
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('fails before the global RPC when the caller deadline cannot cover gate and request work', async () => {
+        const clock = 10_000;
+        const globalGate: SelfHostedProfileGlobalGate = {
+            reserveAndWait: vi.fn(async () => ({
+                schemaVersion: 1 as const,
+                waitMs: 0,
+                reservedAt: '2026-07-16T12:34:56.789+00:00',
+            })),
+        };
+        const fetchFn = vi.fn<typeof fetch>();
+        const onRequest = vi.fn();
+        const fetchProfile = makeWebProfileFetcher({
+            env: env({ SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: 'true' }),
+            globalGate,
+            fetchFn,
+            now: () => clock,
+        });
+
+        const error = await fetchProfile('target', undefined, {
+            invocationDeadlineAtMs: clock + 1_900,
+            onRequest,
+        }).catch(caught => caught);
+
+        expect(classifyWebProfileFailure(error)).toEqual({
+            kind: 'transport',
+            retryable: true,
+            httpStatus: null,
+        });
+        expect(globalGate.reserveAndWait).not.toHaveBeenCalled();
         expect(onRequest).not.toHaveBeenCalled();
         expect(fetchFn).not.toHaveBeenCalled();
     });
@@ -438,7 +672,16 @@ describe('selfhosted web profile client', () => {
         await fetchers.full('target');
         await fetchers.admission('target');
 
-        expect(globalGate.reserveAndWait).toHaveBeenCalledTimes(2);
+        expect(globalGate.reserveAndWait).toHaveBeenNthCalledWith(1, 750, {
+            maxWaitMs: 60_000,
+            responseGuardMs: 100,
+            rpcTimeoutMs: 750,
+        });
+        expect(globalGate.reserveAndWait).toHaveBeenNthCalledWith(2, 750, {
+            maxWaitMs: 500,
+            responseGuardMs: 100,
+            rpcTimeoutMs: 750,
+        });
         expect(fetchFn).toHaveBeenCalledTimes(2);
     });
 });

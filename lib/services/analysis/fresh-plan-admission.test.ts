@@ -16,6 +16,7 @@ import type {
     PreflightProviderRunStore,
     StoredPreflightProviderRun,
 } from './preflight-provider-run';
+import { PREFLIGHT_PROVIDER_DEADLINE_MS } from './preflight-runtime-policy';
 
 const PREFLIGHT_ID = '123e4567-e89b-42d3-a456-426614174000';
 const USER_ID = '123e4567-e89b-42d3-b456-426614174001';
@@ -410,13 +411,23 @@ describe('durable fresh V2 admission worker', () => {
             // No latestPosts: count admission is independent from media completeness.
             postsCount: 50,
         }));
+        const workerStartedAt = Date.now();
 
         await expect(processAnalysisV2FreshAdmission(client, workerInput(), {
             getProfile,
             createClaimToken: () => CLAIM_TOKEN,
         })).resolves.toBe('ready');
 
-        expect(getProfile).toHaveBeenCalledWith('target.account');
+        expect(getProfile).toHaveBeenCalledWith('target.account', {
+            invocationDeadlineAtMs: expect.any(Number),
+        });
+        const invocationDeadlineAtMs = getProfile.mock.calls[0][1]?.invocationDeadlineAtMs;
+        expect(invocationDeadlineAtMs).toBeGreaterThanOrEqual(
+            workerStartedAt + PREFLIGHT_PROVIDER_DEADLINE_MS
+        );
+        expect(invocationDeadlineAtMs).toBeLessThanOrEqual(
+            Date.now() + PREFLIGHT_PROVIDER_DEADLINE_MS
+        );
         expect(rpc).toHaveBeenNthCalledWith(
             1,
             ANALYSIS_V2_FRESH_ADMISSION_DATABASE_NAMES.claimRpc,

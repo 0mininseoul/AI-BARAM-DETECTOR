@@ -38,7 +38,7 @@ The worker must have Secret Manager references for every slot named by the polic
 4. Confirm all five Apify slots resolve to distinct intended test accounts without displaying token values.
 5. In the browser session, confirm the Supabase user email is exactly `ym1113@kakao.com` and record its UUID.
 6. Confirm the preflight target is exactly `0_min._.00`, the selected plan is eligible, and the girlfriend exclusion decision is explicit.
-7. Confirm both Vercel and Cloud Run use `SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED=true` with `SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS=750`. A coordination failure must stop the direct Instagram request; it must not be bypassed for an E2E.
+7. Confirm both Vercel and Cloud Run use `SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED=true`, `SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS=750`, and `SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS=100`. A coordination failure or guard overrun must stop the direct Instagram request; it must not be bypassed for an E2E.
 
 ### Free Actor API quota
 
@@ -119,9 +119,11 @@ profiles reached Instagram and returned HTTP 429 (ten network requests including
 HTTP 200; that probe did not validate aggregate multi-instance behavior.
 
 The default full-profile and admission paths now reserve every network start through one PII-free
-Supabase singleton before `onRequest` accounting or `fetch`. At the 750ms production default, 237
-starts span 177 seconds from first to last, so operators should budget about 178 seconds plus
-response tail latency. The local concurrency-four scheduler, 300ms interval, and circuit remain
+Supabase singleton before `onRequest` accounting or `fetch`. The 750ms interval plus 100ms response
+guard produces an 850ms reservation slot. Therefore, 237 starts span 200.6 seconds from first to
+last, so operators should budget about 201 seconds plus response tail latency. Admission calls wait
+at most 500ms, full-profile calls wait at most 60 seconds, and the RPC itself hard-times out at
+750ms. The local concurrency-four scheduler, 300ms interval, and circuit remain
 defense in depth. Database/RPC errors and malformed reservation payloads fail closed as sanitized,
 retryable transport-style profile failures, allowing only the existing bounded fallback policy to
 decide the next step. This aggregate pacing reduces burst risk; it does not guarantee Instagram

@@ -29,7 +29,7 @@
 6. 역방향 대상 계정이 반환 목록에 있으면 양의 관측이다. 대상이 없더라도 게시물 전체 liker 수가 100 이하이고 고유 반환 수가 그 전체 수를 덮을 때만 부재를 확정한다. 예를 들어 `100/114`나 `109/114`는 부재가 아니라 `not_collected`다.
 7. Gemini는 성별 triage, 라우팅된 여성 feature 분석, shortlist partner-safety, 대표 고위험 narrative로 나뉜다. 영구 미디어 부분 실패나 구조적 snapshot 누락은 부정 근거로 쓰지 않는다.
 
-자체 프로필 시작은 production에서 Supabase singleton RPC를 통해 Vercel과 모든 Cloud Run instance를 합쳐 기본 750ms당 1건으로 예약한다. 237건은 첫 시작부터 마지막 시작까지 177초, 운영 예산상 약 178초가 필요하며 response tail은 별도다. 300ms process-local gate와 circuit은 defense in depth로 유지한다. coordination 실패는 Instagram 요청 전에 fail-closed 되고 기존 fallback 정책이 다음 경로를 결정하므로, 직접 수집 요청 수는 늘지 않지만 fallback 비용 가능성은 남는다. 이 제한은 burst를 줄일 뿐 Instagram의 로그인 없는 요청 수락을 보장하지 않는다.
+자체 프로필 시작은 production에서 Supabase singleton RPC를 통해 Vercel과 모든 Cloud Run instance를 합쳐 예약한다. 기본 750ms 간격에 100ms response guard를 더한 유효 slot은 850ms다. 237건은 첫 시작부터 마지막 시작까지 200.6초, 운영 예산상 약 201초가 필요하며 response tail은 별도다. admission 예약은 최대 500ms, full-profile 예약은 최대 60초만 기다리고 RPC 자체는 750ms에 hard timeout된다. 300ms process-local gate와 circuit은 defense in depth로 유지한다. coordination 실패나 response guard 초과는 Instagram 요청 전에 fail-closed 되고 기존 fallback 정책이 다음 경로를 결정하므로, 직접 수집 요청 수는 늘지 않지만 fallback 비용 가능성은 남는다. 이 제한은 burst를 줄일 뿐 Instagram의 로그인 없는 요청 수락을 보장하지 않는다.
 
 FlashAPI, CoderX, Stable RapidAPI는 V2 production DAG에 포함하지 않는다.
 

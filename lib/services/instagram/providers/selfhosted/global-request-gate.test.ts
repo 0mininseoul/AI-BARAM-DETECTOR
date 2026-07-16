@@ -5,6 +5,7 @@ import {
     createSelfHostedProfileGlobalGate,
     getSelfHostedProfileGlobalGateConfig,
     reserveSelfHostedProfileRequestStart,
+    type SelfHostedProfileGlobalGateRpcBuilder,
     type SelfHostedProfileGlobalGateRpcClient,
 } from './global-request-gate';
 
@@ -14,8 +15,17 @@ const validReservation = {
     reservedAt: '2026-07-16T12:34:56.789+00:00',
 };
 
+function rpcBuilder(
+    result: { data: unknown; error: unknown } | Promise<{ data: unknown; error: unknown }>
+): SelfHostedProfileGlobalGateRpcBuilder {
+    const promise = Promise.resolve(result);
+    return Object.assign(promise, {
+        abortSignal: vi.fn(() => promise),
+    });
+}
+
 function fakeClient(result: { data: unknown; error: unknown }) {
-    const rpc = vi.fn(async () => result);
+    const rpc = vi.fn(() => rpcBuilder(result));
     return {
         client: { rpc } as SelfHostedProfileGlobalGateRpcClient,
         rpc,
@@ -23,18 +33,30 @@ function fakeClient(result: { data: unknown; error: unknown }) {
 }
 
 describe('selfhosted production-wide profile request gate config', () => {
-    it('defaults on only in production with a 750ms aggregate interval', () => {
+    it('defaults on only in production with bounded aggregate timing budgets', () => {
         expect(getSelfHostedProfileGlobalGateConfig({ NODE_ENV: 'production' })).toEqual({
+            admissionMaxWaitMs: 500,
             enabled: true,
+            fullMaxWaitMs: 60_000,
             minIntervalMs: 750,
+            responseGuardMs: 100,
+            rpcTimeoutMs: 750,
         });
         expect(getSelfHostedProfileGlobalGateConfig({ NODE_ENV: 'development' })).toEqual({
+            admissionMaxWaitMs: 500,
             enabled: false,
+            fullMaxWaitMs: 60_000,
             minIntervalMs: 750,
+            responseGuardMs: 100,
+            rpcTimeoutMs: 750,
         });
         expect(getSelfHostedProfileGlobalGateConfig({})).toEqual({
+            admissionMaxWaitMs: 500,
             enabled: false,
+            fullMaxWaitMs: 60_000,
             minIntervalMs: 750,
+            responseGuardMs: 100,
+            rpcTimeoutMs: 750,
         });
     });
 
@@ -65,16 +87,36 @@ describe('selfhosted production-wide profile request gate config', () => {
             SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS: '60000',
         }).minIntervalMs).toBe(60_000);
     });
+
+    it.each([
+        ['SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS', '49'],
+        ['SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS', '1001'],
+        ['SELFHOSTED_PROFILE_GLOBAL_RPC_TIMEOUT_MS', '99'],
+        ['SELFHOSTED_PROFILE_GLOBAL_RPC_TIMEOUT_MS', '5001'],
+        ['SELFHOSTED_PROFILE_GLOBAL_ADMISSION_MAX_WAIT_MS', '-1'],
+        ['SELFHOSTED_PROFILE_GLOBAL_ADMISSION_MAX_WAIT_MS', '300001'],
+        ['SELFHOSTED_PROFILE_GLOBAL_FULL_MAX_WAIT_MS', '-1'],
+        ['SELFHOSTED_PROFILE_GLOBAL_FULL_MAX_WAIT_MS', '1.5'],
+    ])('rejects invalid bounded timing setting %s=%s', (key, value) => {
+        expect(() => getSelfHostedProfileGlobalGateConfig({ [key]: value }))
+            .toThrow('SCRAPING_CONFIG_ERROR');
+    });
 });
 
 describe('selfhosted production-wide profile request reservation', () => {
     it('calls the exact RPC and accepts only its strict versioned result', async () => {
         const { client, rpc } = fakeClient({ data: validReservation, error: null });
 
-        await expect(reserveSelfHostedProfileRequestStart(client, 750))
+        await expect(reserveSelfHostedProfileRequestStart(client, 750, {
+            maxWaitMs: 500,
+            responseGuardMs: 100,
+            rpcTimeoutMs: 750,
+        }))
             .resolves.toEqual(validReservation);
         expect(rpc).toHaveBeenCalledWith(SELFHOSTED_PROFILE_GLOBAL_GATE_RPC, {
             p_min_interval_ms: 750,
+            p_response_guard_ms: 100,
+            p_max_wait_ms: 500,
         });
     });
 
@@ -112,9 +154,9 @@ describe('selfhosted production-wide profile request reservation', () => {
             );
 
         const thrown: SelfHostedProfileGlobalGateRpcClient = {
-            rpc: vi.fn(async () => {
-                throw new Error('raw connection string');
-            }),
+            rpc: vi.fn(() => rpcBuilder(Promise.reject(
+                new Error('raw connection string')
+            ))),
         };
         const error = await reserveSelfHostedProfileRequestStart(thrown, 750)
             .catch(caught => caught);
@@ -124,20 +166,167 @@ describe('selfhosted production-wide profile request reservation', () => {
 
     it('reserves first and waits exactly the returned delay', async () => {
         const order: string[] = [];
+        let clock = 0;
         const client: SelfHostedProfileGlobalGateRpcClient = {
-            rpc: vi.fn(async () => {
+            rpc: vi.fn(() => {
                 order.push('reserve');
-                return { data: validReservation, error: null };
+                return rpcBuilder({ data: validReservation, error: null });
             }),
         };
         const gate = createSelfHostedProfileGlobalGate({
             client,
+            now: () => clock,
             sleep: async (ms) => {
                 order.push(`wait:${ms}`);
+                clock += ms;
             },
         });
 
         await expect(gate.reserveAndWait(750)).resolves.toEqual(validReservation);
         expect(order).toEqual(['reserve', 'wait:125']);
+    });
+
+    it('rejects a reservation when total RPC latency exceeds the response guard', async () => {
+        let clock = 0;
+        const client: SelfHostedProfileGlobalGateRpcClient = {
+            rpc: vi.fn(() => {
+                clock += 600;
+                return rpcBuilder({
+                    data: { ...validReservation, waitMs: 0 },
+                    error: null,
+                });
+            }),
+        };
+        const gate = createSelfHostedProfileGlobalGate({
+            client,
+            now: () => clock,
+            sleep: async () => undefined,
+        });
+
+        await expect(gate.reserveAndWait(750, {
+            maxWaitMs: 60_000,
+            responseGuardMs: 100,
+            rpcTimeoutMs: 750,
+        })).rejects.toThrow('SELFHOSTED_PROFILE_COORDINATION_ERROR');
+    });
+
+    it('waits again when sleep resolves before the reserved relative delay', async () => {
+        let clock = 0;
+        const sleeps: number[] = [];
+        const client: SelfHostedProfileGlobalGateRpcClient = {
+            rpc: vi.fn(() => {
+                clock += 20;
+                return rpcBuilder({
+                    data: { ...validReservation, waitMs: 100 },
+                    error: null,
+                });
+            }),
+        };
+        const gate = createSelfHostedProfileGlobalGate({
+            client,
+            now: () => clock,
+            sleep: async (ms) => {
+                sleeps.push(ms);
+                clock += sleeps.length === 1 ? 40 : ms;
+            },
+        });
+
+        await expect(gate.reserveAndWait(750, {
+            maxWaitMs: 60_000,
+            responseGuardMs: 100,
+            rpcTimeoutMs: 750,
+        })).resolves.toMatchObject({ waitMs: 100 });
+        expect(sleeps).toEqual([100, 60]);
+        expect(clock).toBe(120);
+    });
+
+    it('rejects when RPC latency plus positive sleep overshoot exceeds the guard', async () => {
+        let clock = 0;
+        const client: SelfHostedProfileGlobalGateRpcClient = {
+            rpc: vi.fn(() => {
+                clock += 20;
+                return rpcBuilder({
+                    data: { ...validReservation, waitMs: 100 },
+                    error: null,
+                });
+            }),
+        };
+        const gate = createSelfHostedProfileGlobalGate({
+            client,
+            now: () => clock,
+            sleep: async () => {
+                clock += 190;
+            },
+        });
+
+        await expect(gate.reserveAndWait(750, {
+            maxWaitMs: 60_000,
+            responseGuardMs: 100,
+            rpcTimeoutMs: 750,
+        })).rejects.toThrow('SELFHOSTED_PROFILE_COORDINATION_ERROR');
+    });
+
+    it('aborts and rejects a never-settling RPC at the hard timeout', async () => {
+        vi.useFakeTimers();
+        try {
+            const never = new Promise<{ data: unknown; error: unknown }>(() => undefined);
+            const abortSignal = vi.fn<(
+                signal: AbortSignal
+            ) => PromiseLike<{ data: unknown; error: unknown }>>(() => never);
+            const builder = Object.assign(never, { abortSignal });
+            const client = {
+                rpc: vi.fn(() => builder),
+            } as unknown as SelfHostedProfileGlobalGateRpcClient;
+            let rejection: unknown;
+
+            void reserveSelfHostedProfileRequestStart(client, 750, {
+                maxWaitMs: 500,
+                responseGuardMs: 100,
+                rpcTimeoutMs: 750,
+            }).catch(error => {
+                rejection = error;
+            });
+            await vi.advanceTimersByTimeAsync(750);
+
+            expect(rejection).toBeInstanceOf(Error);
+            expect((rejection as Error).message).toBe(
+                'SELFHOSTED_PROFILE_COORDINATION_ERROR: global request-start reservation failed.'
+            );
+            expect(abortSignal).toHaveBeenCalledTimes(1);
+            expect(abortSignal.mock.calls[0][0].aborted).toBe(true);
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it('shortens the never-settling RPC timeout to the caller deadline', async () => {
+        vi.useFakeTimers();
+        try {
+            const never = new Promise<{ data: unknown; error: unknown }>(() => undefined);
+            const abortSignal = vi.fn<(
+                signal: AbortSignal
+            ) => PromiseLike<{ data: unknown; error: unknown }>>(() => never);
+            const client = {
+                rpc: vi.fn(() => Object.assign(never, { abortSignal })),
+            } as unknown as SelfHostedProfileGlobalGateRpcClient;
+            let rejection: unknown;
+
+            void reserveSelfHostedProfileRequestStart(client, 750, {
+                deadlineAtMs: 10_100,
+                maxWaitMs: 500,
+                responseGuardMs: 100,
+                rpcTimeoutMs: 750,
+            }, () => 10_000).catch(error => {
+                rejection = error;
+            });
+            await vi.advanceTimersByTimeAsync(99);
+            expect(rejection).toBeUndefined();
+            await vi.advanceTimersByTimeAsync(1);
+
+            expect(rejection).toBeInstanceOf(Error);
+            expect(abortSignal.mock.calls[0][0].aborted).toBe(true);
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });

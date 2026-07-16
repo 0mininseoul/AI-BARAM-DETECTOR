@@ -13,7 +13,13 @@ const identityEnv = {
 };
 
 describe('preflight runtime policy', () => {
+    it('keeps the test process defaults inside the worker budget', () => {
+        expect(maximumSelfHostedProfileRuntimeMs(process.env)).toBe(79_100);
+        expect(() => assertPreflightRuntimePolicy(process.env)).not.toThrow();
+    });
+
     it('keeps the default self-hosted profile policy inside the worker budget', () => {
+        expect(maximumSelfHostedProfileRuntimeMs(identityEnv)).toBe(79_100);
         expect(maximumSelfHostedProfileRuntimeMs(identityEnv))
             .toBeLessThanOrEqual(PREFLIGHT_PROFILE_RUNTIME_BUDGET_MS);
         expect(fallbackStartWindowMs(identityEnv))
@@ -26,7 +32,7 @@ describe('preflight runtime policy', () => {
             ...identityEnv,
             SELFHOSTED_PROFILE_TIMEOUT_MS: '60000',
             SELFHOSTED_PROFILE_RETRIES: '0',
-            SELFHOSTED_PROFILE_MIN_INTERVAL_MS: '20000',
+            SELFHOSTED_PROFILE_MIN_INTERVAL_MS: '18750',
         };
 
         expect(maximumSelfHostedProfileRuntimeMs(env)).toBe(

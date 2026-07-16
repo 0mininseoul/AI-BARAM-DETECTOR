@@ -25,6 +25,7 @@ import type {
     StoredPreflightProviderRun,
 } from './preflight-provider-run';
 import { preflightTargetInputHash } from './preflight-identity';
+import { PREFLIGHT_PROVIDER_DEADLINE_MS } from './preflight-runtime-policy';
 
 const preflightId = '123e4567-e89b-42d3-a456-426614174000';
 const userId = '223e4567-e89b-42d3-a456-426614174000';
@@ -472,7 +473,11 @@ describe('preflight persistence adapter', () => {
 describe('preflight worker domain', () => {
     it('uses only the self-hosted profile provider without fallback and stores a ready quote', async () => {
         const store = workerStore();
-        const getProfile = vi.fn(async () => profile());
+        const getProfile = vi.fn<(
+            username: string,
+            options?: { invocationDeadlineAtMs?: number }
+        ) => Promise<InstagramProfile>>(async () => profile());
+        const workerStartedAt = Date.now();
 
         await expect(processPreflight(preflightId, {
             store,
@@ -480,7 +485,16 @@ describe('preflight worker domain', () => {
             providerRunStore: providerRunStore(),
         }))
             .resolves.toBe('ready');
-        expect(getProfile).toHaveBeenCalledWith('target.name');
+        expect(getProfile).toHaveBeenCalledWith('target.name', {
+            invocationDeadlineAtMs: expect.any(Number),
+        });
+        const invocationDeadlineAtMs = getProfile.mock.calls[0][1]?.invocationDeadlineAtMs;
+        expect(invocationDeadlineAtMs).toBeGreaterThanOrEqual(
+            workerStartedAt + PREFLIGHT_PROVIDER_DEADLINE_MS
+        );
+        expect(invocationDeadlineAtMs).toBeLessThanOrEqual(
+            Date.now() + PREFLIGHT_PROVIDER_DEADLINE_MS
+        );
         expect(store.finalizeReady).toHaveBeenCalledWith(
             expect.objectContaining({ preflightId, claimToken }),
             expect.objectContaining({

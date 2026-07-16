@@ -79,10 +79,10 @@ describe('selfhosted profile global request-start gate migration', () => {
         expect(definition).toContain("SET search_path = ''");
 
         const revoke = migration.indexOf(
-            'REVOKE ALL ON FUNCTION public.reserve_selfhosted_profile_request_start(INTEGER)'
+            'REVOKE ALL ON FUNCTION public.reserve_selfhosted_profile_request_start(INTEGER, INTEGER, INTEGER)'
         );
         const grant = migration.indexOf(
-            'GRANT EXECUTE ON FUNCTION public.reserve_selfhosted_profile_request_start(INTEGER)'
+            'GRANT EXECUTE ON FUNCTION public.reserve_selfhosted_profile_request_start(INTEGER, INTEGER, INTEGER)'
         );
         expect(revoke).toBeGreaterThan(-1);
         expect(grant).toBeGreaterThan(revoke);
@@ -92,10 +92,16 @@ describe('selfhosted profile global request-start gate migration', () => {
         expect(migration.slice(grant)).toMatch(/TO service_role;/);
     });
 
-    it('validates the interval and locks the singleton before an atomic timestamp advance', () => {
+    it('validates timing inputs and locks before a guarded atomic timestamp advance', () => {
         const definition = functionDefinition();
         expect(definition).toMatch(
             /p_min_interval_ms IS NULL\s+OR p_min_interval_ms NOT BETWEEN 250 AND 60000/
+        );
+        expect(definition).toMatch(
+            /p_response_guard_ms IS NULL\s+OR p_response_guard_ms NOT BETWEEN 50 AND 1000/
+        );
+        expect(definition).toMatch(
+            /p_max_wait_ms IS NULL\s+OR p_max_wait_ms NOT BETWEEN 0 AND 300000/
         );
         expect(definition).toMatch(
             /FROM public\.selfhosted_profile_request_start_gate AS gate[\s\S]*?WHERE gate\.singleton IS TRUE[\s\S]*?FOR UPDATE;/
@@ -105,8 +111,14 @@ describe('selfhosted profile global request-start gate migration', () => {
             'v_reserved_at := GREATEST(v_now, v_next_start_at);'
         );
         expect(definition).toMatch(
-            /UPDATE public\.selfhosted_profile_request_start_gate AS gate[\s\S]*?SET next_start_at = v_reserved_at \+ pg_catalog\.make_interval\([\s\S]*?p_min_interval_ms::DOUBLE PRECISION \/ 1000\.0[\s\S]*?WHERE gate\.singleton IS TRUE/
+            /UPDATE public\.selfhosted_profile_request_start_gate AS gate[\s\S]*?SET next_start_at = v_reserved_at \+ pg_catalog\.make_interval\([\s\S]*?\(p_min_interval_ms \+ p_response_guard_ms\)::DOUBLE PRECISION \/ 1000\.0[\s\S]*?WHERE gate\.singleton IS TRUE/
         );
+        const maxWaitCheck = definition.indexOf('IF v_wait_ms > p_max_wait_ms THEN');
+        const update = definition.indexOf(
+            'UPDATE public.selfhosted_profile_request_start_gate AS gate'
+        );
+        expect(maxWaitCheck).toBeGreaterThan(-1);
+        expect(maxWaitCheck).toBeLessThan(update);
         expect(definition).not.toMatch(/pg_sleep/i);
     });
 

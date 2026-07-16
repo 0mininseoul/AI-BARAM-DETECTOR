@@ -39,11 +39,15 @@ async function asRole<T>(
     }
 }
 
-async function reserve(intervalMs: number): Promise<Reservation> {
+async function reserve(
+    intervalMs: number,
+    responseGuardMs = 100,
+    maxWaitMs = 300_000
+): Promise<Reservation> {
     const result = await asRole<ReservationRow>(
         'service_role',
-        'SELECT public.reserve_selfhosted_profile_request_start($1) AS result',
-        [intervalMs]
+        'SELECT public.reserve_selfhosted_profile_request_start($1, $2, $3) AS result',
+        [intervalMs, responseGuardMs, maxWaitMs]
     );
     return result.rows[0].result;
 }
@@ -93,27 +97,53 @@ describe('selfhosted profile global request-start gate PGlite contract', () => {
         ]);
         expect(reservations.map(reservation => reservation.schemaVersion)).toEqual([1, 1, 1]);
         expect(new Set(reservedTimes)).toHaveLength(3);
-        expect(reservedTimes[1] - reservedTimes[0]).toBe(750);
-        expect(reservedTimes[2] - reservedTimes[1]).toBe(750);
+        expect(reservedTimes[1] - reservedTimes[0]).toBe(850);
+        expect(reservedTimes[2] - reservedTimes[1]).toBe(850);
         expect(Math.max(...reservations.map(reservation => reservation.waitMs)))
             .toBeLessThanOrEqual(300_000);
-        expect(Date.parse(gateState.rows[0].nextStartAt) - reservedTimes[2]).toBe(750);
+        expect(Date.parse(gateState.rows[0].nextStartAt) - reservedTimes[2]).toBe(850);
     });
 
-    it('rejects invalid intervals and direct table access for service_role', async () => {
+    it('rejects invalid timing inputs and direct table access for service_role', async () => {
         await expect(reserve(249)).rejects.toThrow();
         await expect(reserve(60_001)).rejects.toThrow();
+        await expect(reserve(750, 49)).rejects.toThrow();
+        await expect(reserve(750, 1_001)).rejects.toThrow();
+        await expect(reserve(750, 100, -1)).rejects.toThrow();
+        await expect(reserve(750, 100, 300_001)).rejects.toThrow();
         await expect(asRole(
             'service_role',
             'SELECT * FROM public.selfhosted_profile_request_start_gate'
         )).rejects.toThrow(/permission denied/i);
     });
 
+    it('rejects an over-budget reservation without advancing the singleton', async () => {
+        await db.exec(`
+            UPDATE public.selfhosted_profile_request_start_gate
+            SET next_start_at = pg_catalog.clock_timestamp() + INTERVAL '10 seconds'
+            WHERE singleton IS TRUE;
+        `);
+        const before = await db.query<GateStateRow>(`
+            SELECT next_start_at::TEXT AS "nextStartAt"
+            FROM public.selfhosted_profile_request_start_gate
+            WHERE singleton IS TRUE
+        `);
+
+        await expect(reserve(750, 100, 100)).rejects.toThrow();
+
+        const after = await db.query<GateStateRow>(`
+            SELECT next_start_at::TEXT AS "nextStartAt"
+            FROM public.selfhosted_profile_request_start_gate
+            WHERE singleton IS TRUE
+        `);
+        expect(after.rows[0].nextStartAt).toBe(before.rows[0].nextStartAt);
+    });
+
     it('denies the reservation RPC to anon and authenticated roles', async () => {
         for (const role of ['anon', 'authenticated'] as const) {
             await expect(asRole(
                 role,
-                'SELECT public.reserve_selfhosted_profile_request_start(750)'
+                'SELECT public.reserve_selfhosted_profile_request_start(750, 100, 300000)'
             )).rejects.toThrow(/permission denied/i);
         }
     });

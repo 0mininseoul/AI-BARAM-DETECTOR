@@ -4,7 +4,10 @@ import { PLAN_IDS, type PlanId } from '@/lib/domain/analysis/plan-catalog';
 import { getSelfHostedAdmissionProfileSummary } from '@/lib/services/instagram/providers/selfhosted';
 import { getApifyProfileSummary } from '@/lib/services/instagram/providers/apify';
 import { selectAnalysisV2ApifyCredentialSlot } from '@/lib/services/instagram/providers/apify-relationship';
-import { assertPreflightRuntimePolicy } from './preflight-runtime-policy';
+import {
+    PREFLIGHT_PROVIDER_DEADLINE_MS,
+    assertPreflightRuntimePolicy,
+} from './preflight-runtime-policy';
 import {
     PreflightWorkerRetryError,
     classifyPreflightError,
@@ -644,7 +647,9 @@ export async function processAnalysisV2FreshAdmission(
             assertPreflightRuntimePolicy(dependencies.env);
             profile = await (
                 dependencies.getProfile ?? getSelfHostedAdmissionProfileSummary
-            )(claim.targetInstagramId);
+            )(claim.targetInstagramId, {
+                invocationDeadlineAtMs: workerStartedAt + PREFLIGHT_PROVIDER_DEADLINE_MS,
+            });
             if (
                 profile
                 && profile.username.trim().toLowerCase() !== claim.targetInstagramId

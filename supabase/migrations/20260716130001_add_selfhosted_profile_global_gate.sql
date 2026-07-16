@@ -13,7 +13,9 @@ REVOKE ALL ON TABLE public.selfhosted_profile_request_start_gate
     FROM PUBLIC, anon, authenticated, service_role;
 
 CREATE OR REPLACE FUNCTION public.reserve_selfhosted_profile_request_start(
-    p_min_interval_ms INTEGER
+    p_min_interval_ms INTEGER,
+    p_response_guard_ms INTEGER,
+    p_max_wait_ms INTEGER
 )
 RETURNS JSONB
 LANGUAGE plpgsql
@@ -31,6 +33,18 @@ BEGIN
        OR p_min_interval_ms NOT BETWEEN 250 AND 60000 THEN
         RAISE EXCEPTION USING
             MESSAGE = 'SELFHOSTED_PROFILE_GLOBAL_GATE_INVALID_INTERVAL',
+            ERRCODE = 'P0001';
+    END IF;
+    IF p_response_guard_ms IS NULL
+       OR p_response_guard_ms NOT BETWEEN 50 AND 1000 THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'SELFHOSTED_PROFILE_GLOBAL_GATE_INVALID_RESPONSE_GUARD',
+            ERRCODE = 'P0001';
+    END IF;
+    IF p_max_wait_ms IS NULL
+       OR p_max_wait_ms NOT BETWEEN 0 AND 300000 THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'SELFHOSTED_PROFILE_GLOBAL_GATE_INVALID_MAX_WAIT',
             ERRCODE = 'P0001';
     END IF;
 
@@ -63,10 +77,15 @@ BEGIN
             MESSAGE = 'SELFHOSTED_PROFILE_GLOBAL_GATE_WAIT_OUT_OF_RANGE',
             ERRCODE = 'P0001';
     END IF;
+    IF v_wait_ms > p_max_wait_ms THEN
+        RAISE EXCEPTION USING
+            MESSAGE = 'SELFHOSTED_PROFILE_GLOBAL_GATE_CALLER_WAIT_EXCEEDED',
+            ERRCODE = 'P0001';
+    END IF;
 
     UPDATE public.selfhosted_profile_request_start_gate AS gate
     SET next_start_at = v_reserved_at + pg_catalog.make_interval(
-        secs => p_min_interval_ms::DOUBLE PRECISION / 1000.0
+        secs => (p_min_interval_ms + p_response_guard_ms)::DOUBLE PRECISION / 1000.0
     )
     WHERE gate.singleton IS TRUE
     RETURNING gate.next_start_at INTO v_advanced_next_start_at;
@@ -87,12 +106,12 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.reserve_selfhosted_profile_request_start(INTEGER)
+REVOKE ALL ON FUNCTION public.reserve_selfhosted_profile_request_start(INTEGER, INTEGER, INTEGER)
     FROM PUBLIC, anon, authenticated, service_role;
-GRANT EXECUTE ON FUNCTION public.reserve_selfhosted_profile_request_start(INTEGER)
+GRANT EXECUTE ON FUNCTION public.reserve_selfhosted_profile_request_start(INTEGER, INTEGER, INTEGER)
     TO service_role;
 
 COMMENT ON TABLE public.selfhosted_profile_request_start_gate IS
     'PII-free singleton coordinating aggregate unauthenticated public-profile request starts.';
-COMMENT ON FUNCTION public.reserve_selfhosted_profile_request_start(INTEGER) IS
+COMMENT ON FUNCTION public.reserve_selfhosted_profile_request_start(INTEGER, INTEGER, INTEGER) IS
     'Atomically reserves one bounded aggregate request-start time without sleeping.';

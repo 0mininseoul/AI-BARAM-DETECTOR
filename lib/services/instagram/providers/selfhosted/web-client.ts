@@ -14,6 +14,7 @@ import { isInstagramUsername } from '../../username';
 export const IG_APP_ID = '936619743392459';
 export const USER_AGENT =
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+export const SELFHOSTED_PROFILE_DEADLINE_COMPLETION_MARGIN_MS = 250;
 
 export interface WebProfileRuntimeConfig {
     timeoutMs: number;
@@ -26,7 +27,9 @@ export interface WebProfileRuntimeConfig {
     maxRetryAfterMs: number;
 }
 
-interface FetchOptions {
+export interface WebProfileFetchOptions {
+    globalGateWaitMode?: ProfileValidationMode;
+    invocationDeadlineAtMs?: number;
     onRequest?(): void;
 }
 
@@ -108,6 +111,44 @@ type SharedWebProfileFetcherDeps = Omit<WebProfileFetcherDeps, 'circuit'> & {
     profileCircuit?: WebProfileCircuitBreaker;
     admissionCircuit?: WebProfileCircuitBreaker;
 };
+
+function globalGateAttemptOptions(input: {
+    deadlineAtMs?: number;
+    gateConfig: ReturnType<typeof getSelfHostedProfileGlobalGateConfig>;
+    mode: ProfileValidationMode;
+    now: () => number;
+    requestTimeoutMs: number;
+}) {
+    const configuredMaxWaitMs = input.mode === 'admission'
+        ? input.gateConfig.admissionMaxWaitMs
+        : input.gateConfig.fullMaxWaitMs;
+    const common = {
+        responseGuardMs: input.gateConfig.responseGuardMs,
+        rpcTimeoutMs: input.gateConfig.rpcTimeoutMs,
+    };
+    if (input.deadlineAtMs === undefined) {
+        return { ...common, maxWaitMs: configuredMaxWaitMs };
+    }
+
+    const gateDeadlineAtMs = input.deadlineAtMs
+        - input.requestTimeoutMs
+        - SELFHOSTED_PROFILE_DEADLINE_COMPLETION_MARGIN_MS;
+    const waitBudgetMs = Math.floor(
+        gateDeadlineAtMs - input.now() - input.gateConfig.rpcTimeoutMs
+    );
+    if (!Number.isSafeInteger(waitBudgetMs) || waitBudgetMs < 0) {
+        throw new WebProfileRequestError(
+            'SELFHOSTED_PROFILE_COORDINATION_ERROR: caller deadline exhausted.',
+            'transport',
+            true
+        );
+    }
+    return {
+        ...common,
+        deadlineAtMs: gateDeadlineAtMs,
+        maxWaitMs: Math.min(configuredMaxWaitMs, waitBudgetMs),
+    };
+}
 
 function integerSetting(
     env: Record<string, string | undefined>,
@@ -472,7 +513,7 @@ function makeWebProfileFetcherForMode(
     return async function fetchProfile(
         username: string,
         transport: TransportConfig = getTransportConfig(deps.env ?? process.env),
-        options: FetchOptions = {}
+        options: WebProfileFetchOptions = {}
     ): Promise<Record<string, unknown> | null> {
         if (!isInstagramUsername(username)) {
             throw new Error('SCRAPING_CONFIG_ERROR: Instagram username 형식이 올바르지 않습니다.');
@@ -493,7 +534,16 @@ function makeWebProfileFetcherForMode(
                 const result = await gate.schedule(async () => {
                     circuit.assertAvailable(attemptPermit);
                     if (globalGateConfig.enabled) {
-                        await globalGate.reserveAndWait(globalGateConfig.minIntervalMs);
+                        const gateOptions = globalGateAttemptOptions({
+                            deadlineAtMs: options.invocationDeadlineAtMs,
+                            gateConfig: globalGateConfig,
+                            mode: options.globalGateWaitMode ?? validationMode,
+                            now,
+                            requestTimeoutMs: config.timeoutMs,
+                        });
+                        await globalGate.reserveAndWait(globalGateConfig.minIntervalMs, {
+                            ...gateOptions,
+                        });
                         circuit.assertAvailable(attemptPermit);
                     }
                     options.onRequest?.();
@@ -599,7 +649,7 @@ const sharedDefaultFetchers = createSharedWebProfileFetchers();
 export async function fetchWebProfileUser(
     username: string,
     transport?: TransportConfig,
-    options?: FetchOptions
+    options?: WebProfileFetchOptions
 ): Promise<Record<string, unknown> | null> {
     return sharedDefaultFetchers.full(username, transport, options);
 }
@@ -607,7 +657,7 @@ export async function fetchWebProfileUser(
 export async function fetchWebProfileAdmissionUser(
     username: string,
     transport?: TransportConfig,
-    options?: FetchOptions
+    options?: WebProfileFetchOptions
 ): Promise<Record<string, unknown> | null> {
     return sharedDefaultFetchers.admission(username, transport, options);
 }

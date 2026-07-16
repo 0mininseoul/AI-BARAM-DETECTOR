@@ -100,7 +100,9 @@ describe('preflight free-provider boundary', () => {
             },
         }))
             .resolves.toBe('ready');
-        expect(getProfile).toHaveBeenCalledWith('target.name');
+        expect(getProfile).toHaveBeenCalledWith('target.name', {
+            invocationDeadlineAtMs: expect.any(Number),
+        });
         expect(getFallbackProfile).not.toHaveBeenCalled();
         expect(preflightStore.finalizeReady).toHaveBeenCalledOnce();
     });
