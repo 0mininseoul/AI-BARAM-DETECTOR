@@ -95,6 +95,25 @@ describe('selfhosted web profile client', () => {
         expect(waits).toContain(500);
     });
 
+    it('keeps a bounded retry after a 429 probe gets a below-threshold schema failure', async () => {
+        const fetchFn = vi.fn<typeof fetch>()
+            .mockResolvedValueOnce(response({}, 429))
+            .mockResolvedValueOnce(response({ data: {} }))
+            .mockResolvedValueOnce(response({ data: { user: rawUser('target') } }));
+        const fetchProfile = makeWebProfileFetcher({
+            env: env({
+                SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: 'false',
+                SELFHOSTED_PROFILE_RETRIES: '2',
+            }),
+            fetchFn,
+            now: () => 0,
+            sleep: async () => undefined,
+        });
+
+        await expect(fetchProfile('target')).resolves.toMatchObject({ username: 'target' });
+        expect(fetchFn).toHaveBeenCalledTimes(3);
+    });
+
     it('opens immediately after a terminal 429 and fails the next call before fetch', async () => {
         const fetchFn = vi.fn<typeof fetch>(async () => response({}, 429));
         const fetchProfile = makeWebProfileFetcher({ env: env(), fetchFn });
@@ -324,7 +343,7 @@ describe('selfhosted web profile client', () => {
         expect(fetchFn).not.toHaveBeenCalled();
     });
 
-    it('invalidates a retry probe when another request reopens the circuit during the global wait', async () => {
+    it('invalidates a reissued retry probe when another request reopens during the global wait', async () => {
         const circuit = createWebProfileCircuitBreaker(() => 0);
         let reservationCount = 0;
         let releaseLaterResponse!: () => void;
@@ -342,7 +361,7 @@ describe('selfhosted web profile client', () => {
         const globalGate: SelfHostedProfileGlobalGate = {
             reserveAndWait: vi.fn(async () => {
                 reservationCount++;
-                if (reservationCount === 3) {
+                if (reservationCount === 4) {
                     releaseLaterResponse();
                     await laterFinished;
                 }
@@ -362,9 +381,9 @@ describe('selfhosted web profile client', () => {
                 return response({}, 429);
             }
             targetFetches++;
-            return targetFetches === 1
-                ? response({}, 429)
-                : response({ data: { user: rawUser('target') } });
+            if (targetFetches === 1) return response({}, 429);
+            if (targetFetches === 2) return response({ data: {} });
+            return response({ data: { user: rawUser('target') } });
         });
         const sharedDeps = {
             globalGate,
@@ -384,7 +403,7 @@ describe('selfhosted web profile client', () => {
             ...sharedDeps,
             env: env({
                 SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: 'true',
-                SELFHOSTED_PROFILE_RETRIES: '1',
+                SELFHOSTED_PROFILE_RETRIES: '2',
             }),
         });
 
@@ -395,8 +414,8 @@ describe('selfhosted web profile client', () => {
 
         await expect(fetchTarget('target')).rejects.toThrow('circuit is open');
         await laterCall;
-        expect(fetchFn).toHaveBeenCalledTimes(2);
-        expect(targetFetches).toBe(1);
+        expect(fetchFn).toHaveBeenCalledTimes(3);
+        expect(targetFetches).toBe(2);
     });
 
     it('builds the default full and admission fetchers around one shared global gate', async () => {

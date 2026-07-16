@@ -206,19 +206,23 @@ export function createWebProfileCircuitBreaker(
         }
     };
 
+    const issueRetryPermit = (): WebProfileCircuitRetryPermit => {
+        const retryPermit = { generation } as RetryPermitState;
+        pendingRetryPermit = retryPermit;
+        return retryPermit;
+    };
+
     const openCircuit = (
         durationMs: number,
-        issueRetryPermit: boolean
+        shouldIssueRetryPermit: boolean
     ): WebProfileCircuitRetryPermit | undefined => {
         generation++;
         openUntil = Math.max(openUntil, now() + durationMs);
         pendingRetryPermit = undefined;
         activeProbePermit = undefined;
-        if (!issueRetryPermit) return undefined;
+        if (!shouldIssueRetryPermit) return undefined;
 
-        const retryPermit = { generation } as RetryPermitState;
-        pendingRetryPermit = retryPermit;
-        return retryPermit;
+        return issueRetryPermit();
     };
 
     return {
@@ -264,7 +268,10 @@ export function createWebProfileCircuitBreaker(
             activeProbePermit = undefined;
         },
         recordFailure(error, config, attemptPermit): WebProfileCircuitRetryPermit | undefined {
-            if (attemptPermit === activeProbePermit) activeProbePermit = undefined;
+            const permit = attemptPermit as AttemptPermitState;
+            const wasCurrentProbe = attemptPermit === activeProbePermit
+                && permit.generation === generation;
+            if (wasCurrentProbe) activeProbePermit = undefined;
             if (error.kind === 'rate_limit' || error.kind === 'auth') {
                 return openCircuit(
                     Math.max(config.circuitCooldownMs, error.retryAfterMs ?? 0),
@@ -275,6 +282,14 @@ export function createWebProfileCircuitBreaker(
                 schemaFailures++;
                 if (schemaFailures >= config.schemaFailureThreshold) {
                     return openCircuit(config.circuitCooldownMs, true);
+                }
+                if (
+                    error.retryable
+                    && wasCurrentProbe
+                    && permit.generation === generation
+                    && openUntil > now()
+                ) {
+                    return issueRetryPermit();
                 }
                 return undefined;
             }
