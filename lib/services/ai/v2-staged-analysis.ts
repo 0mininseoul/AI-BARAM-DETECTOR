@@ -858,12 +858,11 @@ function normalizeFeatureResponse(
     const hasMarriageSignal = marriageEvidence === 'possible' || marriageEvidence === 'strong';
     const hasPartnerSignal = partnerEvidence === 'weak' || partnerEvidence === 'strong';
     if (evidenceSelectionIds.marriagePartner.length === 0) {
-        if (hasMarriageSignal) marriageEvidence = 'none';
-        if (hasPartnerSignal) partnerEvidence = 'none';
-        partnerExclusionContext = 'none';
-    } else if (partnerExclusionContext !== 'none' && (hasMarriageSignal || hasPartnerSignal)) {
         marriageEvidence = 'none';
         partnerEvidence = 'none';
+        partnerExclusionContext = 'none';
+    } else if (partnerExclusionContext !== 'none' && (hasMarriageSignal || hasPartnerSignal)) {
+        partnerExclusionContext = 'none';
     }
     const hasNormalizedRelationshipSignal = marriageEvidence === 'possible'
         || marriageEvidence === 'strong'
@@ -873,19 +872,15 @@ function normalizeFeatureResponse(
     if (!hasNormalizedRelationshipSignal) evidenceSelectionIds.marriagePartner = [];
 
     const safeOverview = safeOverviewSchema.safeParse(value.oneLineOverview);
-    const reportedSamePersonHighGender = value.genderConfidence === 'high'
-        && value.ownerConsistency === 'same_person';
     return {
         ...value,
         gender,
         genderConfidence,
         ownerConsistency,
-        appearanceGrade: reportedSamePersonHighGender
-            && evidenceSelectionIds.appearance.length === 0
+        appearanceGrade: evidenceSelectionIds.appearance.length === 0
             ? 1
             : value.appearanceGrade,
-        exposureScore: reportedSamePersonHighGender
-            && evidenceSelectionIds.exposure.length === 0
+        exposureScore: evidenceSelectionIds.exposure.length === 0
             ? 0
             : value.exposureScore,
         businessClassification: evidenceSelectionIds.business.length === 0
@@ -921,21 +916,16 @@ function featureResponseSchemaFor(media: readonly NormalizedAiMediaSelection[]) 
                 message: 'High-confidence gender requires at least two distinct visual evidence items.',
             });
         }
-        if (
-            value.ownerConsistency === 'same_person'
-            && value.genderConfidence === 'high'
-        ) {
-            for (const key of ['appearance', 'exposure'] as const) {
-                const isNeutralWithoutEvidence = key === 'appearance'
-                    ? value.appearanceGrade === 1
-                    : value.exposureScore === 0;
-                if (value.evidenceSelectionIds[key].length === 0 && !isNeutralWithoutEvidence) {
-                    context.addIssue({
-                        code: 'custom',
-                        path: ['evidenceSelectionIds', key],
-                        message: `Verified ${key} classification requires attached visual evidence.`,
-                    });
-                }
+        for (const key of ['appearance', 'exposure'] as const) {
+            const isNeutralWithoutEvidence = key === 'appearance'
+                ? value.appearanceGrade === 1
+                : value.exposureScore === 0;
+            if (value.evidenceSelectionIds[key].length === 0 && !isNeutralWithoutEvidence) {
+                context.addIssue({
+                    code: 'custom',
+                    path: ['evidenceSelectionIds', key],
+                    message: `${key} classification without evidence must be neutral.`,
+                });
             }
         }
         if (
@@ -1052,9 +1042,9 @@ appearanceGrade는 보이는 사진 연출과 스타일을 1~5, exposureScore는
 각 분류에 실제 근거가 없으면 보수적인 중립값을 사용하고 해당 evidenceSelectionIds는 비워 두세요.
 성별 근거가 없으면 gender=unknown, genderConfidence=low, ownerConsistency=not_visible로 반환하세요.
 사업 근거가 없으면 businessClassification=uncertain, businessConfidence=low로 반환하세요.
-관계 근거가 없으면 marriageEvidence=none, partnerEvidence=none, partnerExclusionContext=none으로 반환하세요.
+관계 근거가 없으면 uncertain을 포함해 marriageEvidence=none, partnerEvidence=none, partnerExclusionContext=none으로 반환하세요.
 성별 high는 서로 다른 이미지 근거가 둘 이상일 때만 사용하고, 외모·노출 점수에는 각각 직접 근거를 붙이세요.
-같은 소유자의 high 성별이지만 외모·노출 근거가 없다면 각각 appearanceGrade=1, exposureScore=0을 사용하세요.
+성별 신뢰도와 소유자 일관성에 관계없이 외모·노출 근거가 없다면 각각 appearanceGrade=1, exposureScore=0을 사용하세요.
 oneLineOverview는 구체적인 한국어 한 문장으로 쓰되 계정명, URL, 수치, 점수, 순위, 위험 분류를 쓰지 마세요.
 안전한 문장을 만들 수 없으면 "${CONSERVATIVE_FEATURE_OVERVIEW}"를 반환하세요.
 실제 사용한 selectionId만 중복 없이 근거로 넣고 JSON 이외의 텍스트를 반환하지 마세요.

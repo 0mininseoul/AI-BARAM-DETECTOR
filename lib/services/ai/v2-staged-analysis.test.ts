@@ -636,9 +636,9 @@ describe('V2 staged AI services', () => {
             exposureScore: 0,
             businessClassification: 'uncertain',
             businessConfidence: 'low',
-            marriageEvidence: 'none',
-            partnerEvidence: 'none',
-            partnerExclusionContext: 'older_relative',
+            marriageEvidence: 'strong',
+            partnerEvidence: 'strong',
+            partnerExclusionContext: 'none',
             evidenceSelectionIds: {
                 gender: ['profile:candidate', 'post:1:thumbnail'],
                 appearance: [],
@@ -651,6 +651,88 @@ describe('V2 staged AI services', () => {
         expect(() => featureAnalysisModelResponseSchema.parse(result.features)).not.toThrow();
         expect(result.finalGenderDecision).toBe('verified_female');
         expect(mocks.analyzeWithGemini).toHaveBeenCalledOnce();
+    });
+
+    it('preserves grounded relationship signals and drops a contradictory exclusion', async () => {
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse(featureResponse({
+            marriageEvidence: 'possible',
+            partnerEvidence: 'weak',
+            partnerExclusionContext: 'group_or_unclear',
+            evidenceSelectionIds: {
+                ...featureResponse().evidenceSelectionIds,
+                marriagePartner: ['post:2:thumbnail'],
+            },
+        })));
+
+        const result = await featureAnalysis(featureInput(), audit('featureAnalysis'));
+
+        expect(result.features).toMatchObject({
+            marriageEvidence: 'possible',
+            partnerEvidence: 'weak',
+            partnerExclusionContext: 'none',
+            evidenceSelectionIds: {
+                marriagePartner: ['post:2:thumbnail'],
+            },
+        });
+        expect(() => featureAnalysisModelResponseSchema.parse(result.features)).not.toThrow();
+    });
+
+    it('neutralizes missing appearance and exposure evidence for uncertain owners', async () => {
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse(featureResponse({
+            genderConfidence: 'medium',
+            ownerConsistency: 'multiple_or_unclear',
+            appearanceGrade: 5,
+            exposureScore: 5,
+            evidenceSelectionIds: {
+                ...featureResponse().evidenceSelectionIds,
+                appearance: ['post:not-supplied'],
+                exposure: [],
+            },
+        })));
+
+        const result = await featureAnalysis(featureInput(), audit('featureAnalysis'));
+
+        expect(result.features).toMatchObject({
+            genderConfidence: 'medium',
+            ownerConsistency: 'multiple_or_unclear',
+            appearanceGrade: 1,
+            exposureScore: 0,
+            evidenceSelectionIds: { appearance: [], exposure: [] },
+        });
+        expect(result.finalGenderDecision).toBe('unresolved');
+    });
+
+    it('neutralizes uncertain relationship fields when no valid evidence remains', async () => {
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => options.schema.parse(featureResponse({
+            marriageEvidence: 'uncertain',
+            partnerEvidence: 'uncertain',
+            partnerExclusionContext: 'older_relative',
+            evidenceSelectionIds: {
+                ...featureResponse().evidenceSelectionIds,
+                marriagePartner: ['post:not-supplied'],
+            },
+        })));
+
+        const result = await featureAnalysis(featureInput(), audit('featureAnalysis'));
+
+        expect(result.features).toMatchObject({
+            marriageEvidence: 'none',
+            partnerEvidence: 'none',
+            partnerExclusionContext: 'none',
+            evidenceSelectionIds: { marriagePartner: [] },
+        });
     });
 
     it('neutralizes unsupported relationship and gender signals without fabricating evidence', async () => {
