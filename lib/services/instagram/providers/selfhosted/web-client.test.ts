@@ -413,6 +413,42 @@ describe('selfhosted web profile client', () => {
         );
     });
 
+    it('reserves deadline headroom for the larger response guard when it exceeds the RPC timeout', async () => {
+        const clock = 10_000;
+        const globalGate = immediateGlobalGate();
+        const reserveWaitAndStart = vi.spyOn(globalGate, 'reserveWaitAndStart');
+        const fetchProfile = makeWebProfileFetcher({
+            env: env({
+                SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: 'true',
+                SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS: '1000',
+                SELFHOSTED_PROFILE_GLOBAL_RPC_TIMEOUT_MS: '100',
+            }),
+            globalGate,
+            fetchFn: vi.fn<typeof fetch>(async () =>
+                response({ data: { user: rawUser('target') } })
+            ),
+            now: () => clock,
+        });
+
+        await fetchProfile('target', undefined, {
+            invocationDeadlineAtMs: clock + 5_000,
+        });
+
+        expect(reserveWaitAndStart).toHaveBeenCalledWith(
+            750,
+            {
+                deadlineAtMs: clock + 3_750,
+                maxWaitMs: 2_750,
+                responseGuardMs: 1_000,
+                rpcTimeoutMs: 100,
+            },
+            {
+                beforeStart: expect.any(Function),
+                start: expect.any(Function),
+            }
+        );
+    });
+
     it('keeps successful independent-client network starts at least one interval apart', async () => {
         let nextStartMs = 0;
         let firstClock = 0;

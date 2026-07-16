@@ -33,6 +33,17 @@ describe('preflight runtime policy', () => {
         expect(() => assertPreflightRuntimePolicy(env)).not.toThrow();
     });
 
+    it('charges the larger response guard when it exceeds the RPC timeout', () => {
+        const env = {
+            ...identityEnv,
+            SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: 'true',
+            SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS: '1000',
+            SELFHOSTED_PROFILE_GLOBAL_RPC_TIMEOUT_MS: '100',
+        };
+
+        expect(maximumSelfHostedProfileRuntimeMs(env)).toBe(79_600);
+    });
+
     it('accepts the runtime boundary only when a positive fallback start window remains', () => {
         const env = {
             ...identityEnv,

@@ -35,8 +35,12 @@ export function maximumSelfHostedProfileRuntimeMs(
 
     // The interval term is conservative: a slow response normally consumes the interval,
     // but counting both keeps configuration changes safely inside the worker fence.
+    const coordinationOverheadMs = Math.max(
+        globalGateConfig.responseGuardMs,
+        globalGateConfig.rpcTimeoutMs
+    );
     const admissionGateAttemptMs = globalGateConfig.enabled
-        ? globalGateConfig.admissionMaxWaitMs + globalGateConfig.rpcTimeoutMs
+        ? globalGateConfig.admissionMaxWaitMs + coordinationOverheadMs
         : 0;
     return attempts * (
         config.timeoutMs

@@ -133,8 +133,12 @@ function globalGateAttemptOptions(input: {
     const gateDeadlineAtMs = input.deadlineAtMs
         - input.requestTimeoutMs
         - SELFHOSTED_PROFILE_DEADLINE_COMPLETION_MARGIN_MS;
+    const coordinationOverheadMs = Math.max(
+        input.gateConfig.responseGuardMs,
+        input.gateConfig.rpcTimeoutMs
+    );
     const waitBudgetMs = Math.floor(
-        gateDeadlineAtMs - input.now() - input.gateConfig.rpcTimeoutMs
+        gateDeadlineAtMs - input.now() - coordinationOverheadMs
     );
     if (!Number.isSafeInteger(waitBudgetMs) || waitBudgetMs < 0) {
         throw new WebProfileRequestError(
