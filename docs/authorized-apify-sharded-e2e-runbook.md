@@ -32,11 +32,13 @@ The worker must have Secret Manager references for every slot named by the polic
 
 ## Pre-run checks
 
-1. Confirm the deployed Vercel and Cloud Run commit SHAs match the reviewed main commit.
-2. Confirm the database migration is applied and the worker can load `accessMode` plus the optional request-bound policy.
-3. Confirm all five Apify slots resolve to distinct intended test accounts without displaying token values.
-4. In the browser session, confirm the Supabase user email is exactly `ym1113@kakao.com` and record its UUID.
-5. Confirm the preflight target is exactly `0_min._.00`, the selected plan is eligible, and the girlfriend exclusion decision is explicit.
+1. Apply `20260716130001_add_selfhosted_profile_global_gate.sql` through the normal ordered migration path. Do not use `--include-all`.
+2. Only after that migration succeeds, deploy and enable the reviewed commit on Vercel and Cloud Run, then confirm both deployed SHAs match it.
+3. Confirm the worker can load `accessMode` plus the optional request-bound policy.
+4. Confirm all five Apify slots resolve to distinct intended test accounts without displaying token values.
+5. In the browser session, confirm the Supabase user email is exactly `ym1113@kakao.com` and record its UUID.
+6. Confirm the preflight target is exactly `0_min._.00`, the selected plan is eligible, and the girlfriend exclusion decision is explicit.
+7. Confirm both Vercel and Cloud Run use `SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED=true`, `SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS=750`, and `SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS=100`. A coordination failure or guard overrun must stop the direct Instagram request; it must not be bypassed for an E2E.
 
 ### Free Actor API quota
 
@@ -107,3 +109,22 @@ The next authorized canary still must prove full relationship coverage, mutual-p
 Gemini latency, result rendering, and the five-minute success target. The target profile's observed
 logged-out HTTP 429 also remains a separate self-hosted crawler reliability issue; this recovery
 change does not classify the fallback as proof that logged-out collection is production-ready.
+
+### Production-wide self-hosted start coordination
+
+A later profile fanout started seven batches across about five Cloud Run instances. The old gate
+and circuit were process-local, so 210 self-hosted profile attempts produced no successes: five
+profiles reached Instagram and returned HTTP 429 (ten network requests including retries), while
+205 were skipped by local circuits. An earlier single-request Cloud Run egress probe had returned
+HTTP 200; that probe did not validate aggregate multi-instance behavior.
+
+The default full-profile and admission paths now reserve every network start through one PII-free
+Supabase singleton before `onRequest` accounting or `fetch`. The 750ms interval plus 100ms response
+guard produces an 850ms reservation slot. Therefore, 237 starts span 200.6 seconds from first to
+last, so operators should budget about 201 seconds plus response tail latency. Admission calls wait
+at most 500ms, full-profile calls wait at most 60 seconds, and the RPC itself hard-times out at
+750ms. The local concurrency-four scheduler, 300ms interval, and circuit remain
+defense in depth. Database/RPC errors and malformed reservation payloads fail closed as sanitized,
+retryable transport-style profile failures, allowing only the existing bounded fallback policy to
+decide the next step. This aggregate pacing reduces burst risk; it does not guarantee Instagram
+will accept logged-out requests, and a successful single egress probe is not production evidence.

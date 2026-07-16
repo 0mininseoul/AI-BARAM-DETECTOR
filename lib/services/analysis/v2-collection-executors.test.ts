@@ -212,6 +212,21 @@ function failure(username: string, source: 'selfhosted' | 'apify' = 'selfhosted'
     };
 }
 
+function incompleteFailure(username: string, source: 'selfhosted' | 'apify' = 'apify') {
+    return {
+        outcome: {
+            requestedUsername: username,
+            source,
+            status: 'failed' as const,
+            failureCategory: 'incomplete' as const,
+            httpStatus: null,
+            requestCount: 1,
+            latencyMs: 10,
+            capturedAt,
+        },
+    };
+}
+
 function unavailable(username: string) {
     return {
         outcome: {
@@ -241,6 +256,21 @@ function completedResume(
         fallbackResults: [],
         primaryCapturedAt: capturedAt,
         fallbackCapturedAt: null,
+    };
+}
+
+function completedFallbackResume(
+    usernames: readonly string[],
+    finalFailures: readonly AnalysisV2ProfileFetchResume['fallbackResults'][number][]
+): AnalysisV2ProfileFetchResume {
+    const failedUsernames = new Set(finalFailures.map(result => result.outcome.requestedUsername));
+    return {
+        ...completedResume(usernames, usernames.map(username => (
+            failedUsernames.has(username) ? failure(username) : success(username)
+        ))),
+        frozenUnresolvedUsernames: usernames.filter(username => failedUsernames.has(username)),
+        fallbackResults: [...finalFailures],
+        fallbackCapturedAt: capturedAt,
     };
 }
 
@@ -1202,6 +1232,103 @@ describe('analysis V2 concrete collection executors', () => {
         expect(reportActiveProfile.mock.calls).toEqual([['bob']]);
         expect(profileStore.store.checkpointPrimary).not.toHaveBeenCalled();
         expect(profileStore.store.checkpointFallback).toHaveBeenCalledOnce();
+    });
+
+    it('accepts exactly 90 percent candidate coverage with three incomplete failures in 30', async () => {
+        const usernames = Array.from({ length: 30 }, (_, index) => `user${index}`);
+        const failures = usernames.slice(-3).map(username => incompleteFailure(username));
+        const topology = createAnalysisV2CollectionTopology('profiles', usernames);
+
+        await expect(createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext()),
+            evidenceStore: relationshipEvidence(usernames),
+            profileCheckpointStore: inMemoryProfileStore(
+                completedFallbackResume(usernames, failures)
+            ).store,
+        })(stageContext(
+            'profile_fetch',
+            state({ relationships: relationshipManifest(topology) }),
+            0
+        ))).resolves.toMatchObject({
+            checkpoint: { manifest: { itemCount: 30 } },
+        });
+    });
+
+    it('accepts the rounded 90 percent boundary with two incomplete failures in 27', async () => {
+        const usernames = Array.from({ length: 27 }, (_, index) => `user${index}`);
+        const failures = usernames.slice(-2).map(username => incompleteFailure(username));
+        const topology = createAnalysisV2CollectionTopology('profiles', usernames);
+
+        await expect(createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext()),
+            evidenceStore: relationshipEvidence(usernames),
+            profileCheckpointStore: inMemoryProfileStore(
+                completedFallbackResume(usernames, failures)
+            ).store,
+        })(stageContext(
+            'profile_fetch',
+            state({ relationships: relationshipManifest(topology) }),
+            0
+        ))).resolves.toMatchObject({
+            checkpoint: { manifest: { itemCount: 27 } },
+        });
+    });
+
+    it('rejects candidate coverage below 90 percent', async () => {
+        const usernames = Array.from({ length: 30 }, (_, index) => `user${index}`);
+        const failures = usernames.slice(-4).map(username => incompleteFailure(username));
+        const topology = createAnalysisV2CollectionTopology('profiles', usernames);
+
+        await expect(createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext()),
+            evidenceStore: relationshipEvidence(usernames),
+            profileCheckpointStore: inMemoryProfileStore(
+                completedFallbackResume(usernames, failures)
+            ).store,
+        })(stageContext(
+            'profile_fetch',
+            state({ relationships: relationshipManifest(topology) }),
+            0
+        ))).rejects.toThrow('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
+    });
+
+    it('rejects a non-incomplete candidate profile failure within the numeric bound', async () => {
+        const usernames = Array.from({ length: 30 }, (_, index) => `user${index}`);
+        const failedUsername = usernames.at(-1)!;
+        const resume = completedFallbackResume(usernames, [
+            failure(failedUsername, 'apify') as AnalysisV2ProfileFetchResume['fallbackResults'][number],
+        ]);
+        const topology = createAnalysisV2CollectionTopology('profiles', usernames);
+
+        await expect(createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext()),
+            evidenceStore: relationshipEvidence(usernames),
+            profileCheckpointStore: inMemoryProfileStore(resume).store,
+        })(stageContext(
+            'profile_fetch',
+            state({ relationships: relationshipManifest(topology) }),
+            0
+        ))).rejects.toThrow('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
+    });
+
+    it('keeps target profile evidence strict for a terminal incomplete outcome', async () => {
+        const profileStore = inMemoryProfileStore({
+            ...completedFallbackResume(['target'], [incompleteFailure('target')]),
+            jobKey: 'track:target-evidence:collect',
+        });
+        const getPostLikers = vi.fn();
+        const getPostComments = vi.fn();
+
+        await expect(createAnalysisV2TargetEvidenceExecutor({
+            requestContextStore: contextStore(requestContext()),
+            profileCheckpointStore: profileStore.store,
+            interactionAdapter: { getPostLikers, getPostComments },
+        })(stageContext('target_evidence', state()))).rejects.toThrow(
+            'ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE'
+        );
+
+        expect(getPostLikers).not.toHaveBeenCalled();
+        expect(getPostComments).not.toHaveBeenCalled();
     });
 
     it('rejects wrong batches, girlfriend leakage, ambiguous failures, and ambiguous starts', async () => {

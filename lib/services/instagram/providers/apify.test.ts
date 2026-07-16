@@ -1146,6 +1146,25 @@ describe('apifyProvider', () => {
         ]);
     });
 
+    it('classifies an attributed public row without its declared posts as incomplete', async () => {
+        const { client } = mockClient([
+            profileItem('alice'),
+            { ...profileItem('bob'), postsCount: 43, latestPosts: [] },
+        ]);
+        const provider = makeApifyProvider({ client, env: {} });
+
+        const results = await provider.getProfilesBatchOutcomes!(['alice', 'bob'], 2);
+
+        expect(results.map(result => [
+            result.outcome.requestedUsername,
+            result.outcome.status,
+            result.outcome.failureCategory,
+        ])).toEqual([
+            ['alice', 'success', null],
+            ['bob', 'failed', 'incomplete'],
+        ]);
+    });
+
     it('classifies mass profile omissions as incomplete instead of account-not-found', async () => {
         const usernames = Array.from({ length: 30 }, (_, index) => `user${index}`);
         const { client } = mockClient([profileItem('user0')]);
@@ -1160,6 +1179,33 @@ describe('apifyProvider', () => {
             result.outcome.status === 'failed'
             && result.outcome.failureCategory === 'incomplete'
         ))).toBe(true);
+    });
+
+    it('settles a durable outcome omission as failed incomplete after a succeeded Actor Dataset read', async () => {
+        const { client, call, listItems } = mockClient([profileItem('alice')]);
+        const provider = makeApifyProvider({ client, env: {} });
+
+        await expect(provider.getProfilesBatchOutcomes!(['alice', 'bob'], 2, {
+            resumeRunId: 'StoredRun12345678',
+            logicalProvider: 'apify',
+            actorId: APIFY_PROFILE_ACTOR_ID,
+            credentialSlot: 'primary',
+            maxChargeUsd: 0.0052,
+            recordUsage: vi.fn(),
+        })).resolves.toMatchObject([
+            { outcome: { requestedUsername: 'alice', status: 'success' } },
+            {
+                outcome: {
+                    requestedUsername: 'bob',
+                    status: 'failed',
+                    failureCategory: 'incomplete',
+                },
+            },
+        ]);
+
+        expect(call).not.toHaveBeenCalled();
+        expect(client.run).toHaveBeenCalledWith('StoredRun12345678');
+        expect(listItems).toHaveBeenCalledOnce();
     });
 
     it('keeps a durable one-account omission open for exact-run retry', async () => {
@@ -1797,15 +1843,12 @@ describe('apifyProvider', () => {
         expect(listItems).toHaveBeenCalledTimes(2);
     });
 
-    it('rereads an unexplained profile omission through the exact paid run id', async () => {
+    it('settles an unexplained profile omission without reopening the paid run', async () => {
         const { client, call, listItems } = mockClient([]);
         listItems
             .mockReset()
             .mockResolvedValueOnce({
                 items: [], total: 0, offset: 0, count: 0, limit: 2,
-            })
-            .mockResolvedValueOnce({
-                items: [profileItem('target')], total: 1, offset: 0, count: 1, limit: 2,
             });
         const provider = makeApifyProvider({
             client,
@@ -1819,20 +1862,18 @@ describe('apifyProvider', () => {
             onBeforeRunStart: vi.fn().mockResolvedValue(undefined),
             onRunStarted: vi.fn().mockResolvedValue(undefined),
             recordUsage: vi.fn(),
-        })).rejects.toThrow('SCRAPING_RUN_PENDING_ERROR');
-
-        await expect(provider.getProfilesBatchOutcomes!(['target'], 1, {
-            resumeRunId: 'RunAbcd1234567890',
-            logicalProvider: 'apify',
-            credentialSlot: 'primary',
-            maxChargeUsd: 0.0026,
-            recordUsage: vi.fn(),
         })).resolves.toMatchObject([{
-            outcome: { requestedUsername: 'target', status: 'success' },
+            outcome: {
+                requestedUsername: 'target',
+                status: 'failed',
+                failureCategory: 'incomplete',
+            },
         }]);
 
         expect(call).toHaveBeenCalledOnce();
-        expect(listItems).toHaveBeenCalledTimes(2);
+        expect(client.run).toHaveBeenCalledOnce();
+        expect(client.run).toHaveBeenCalledWith('RunAbcd1234567890');
+        expect(listItems).toHaveBeenCalledOnce();
     });
 
     it('keeps latest posts on the single-profile fallback path', async () => {

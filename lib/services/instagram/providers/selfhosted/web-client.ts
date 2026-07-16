@@ -1,13 +1,20 @@
+import { supabaseAdmin } from '@/lib/supabase/admin';
 import { getTransportConfig, buildRequest, type TransportConfig } from './transport';
 import {
     createRequestStartGate,
     type RequestStartGate,
 } from './rate-limit';
+import {
+    createSelfHostedProfileGlobalGate,
+    getSelfHostedProfileGlobalGateConfig,
+    type SelfHostedProfileGlobalGate,
+} from './global-request-gate';
 import { isInstagramUsername } from '../../username';
 
 export const IG_APP_ID = '936619743392459';
 export const USER_AGENT =
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+export const SELFHOSTED_PROFILE_DEADLINE_COMPLETION_MARGIN_MS = 250;
 
 export interface WebProfileRuntimeConfig {
     timeoutMs: number;
@@ -20,7 +27,9 @@ export interface WebProfileRuntimeConfig {
     maxRetryAfterMs: number;
 }
 
-interface FetchOptions {
+export interface WebProfileFetchOptions {
+    globalGateWaitMode?: ProfileValidationMode;
+    invocationDeadlineAtMs?: number;
     onRequest?(): void;
 }
 
@@ -66,10 +75,26 @@ export function classifyWebProfileFailure(
     });
 }
 
+declare const webProfileCircuitRetryPermitBrand: unique symbol;
+declare const webProfileCircuitAttemptPermitBrand: unique symbol;
+
+export interface WebProfileCircuitRetryPermit {
+    readonly [webProfileCircuitRetryPermitBrand]: true;
+}
+
+export interface WebProfileCircuitAttemptPermit {
+    readonly [webProfileCircuitAttemptPermitBrand]: true;
+}
+
 export interface WebProfileCircuitBreaker {
-    assertAvailable(allowProbe: boolean): void;
-    recordSuccess(): void;
-    recordFailure(error: WebProfileRequestError, config: WebProfileRuntimeConfig): void;
+    acquireAttempt(retryPermit?: WebProfileCircuitRetryPermit): WebProfileCircuitAttemptPermit;
+    assertAvailable(attemptPermit: WebProfileCircuitAttemptPermit): void;
+    recordSuccess(attemptPermit: WebProfileCircuitAttemptPermit): void;
+    recordFailure(
+        error: WebProfileRequestError,
+        config: WebProfileRuntimeConfig,
+        attemptPermit: WebProfileCircuitAttemptPermit
+    ): WebProfileCircuitRetryPermit | undefined;
 }
 
 interface WebProfileFetcherDeps {
@@ -78,7 +103,55 @@ interface WebProfileFetcherDeps {
     now?: () => number;
     sleep?: (ms: number) => Promise<void>;
     gate?: RequestStartGate;
+    globalGate?: SelfHostedProfileGlobalGate;
     circuit?: WebProfileCircuitBreaker;
+}
+
+type SharedWebProfileFetcherDeps = Omit<WebProfileFetcherDeps, 'circuit'> & {
+    profileCircuit?: WebProfileCircuitBreaker;
+    admissionCircuit?: WebProfileCircuitBreaker;
+};
+
+function globalGateAttemptOptions(input: {
+    deadlineAtMs?: number;
+    gateConfig: ReturnType<typeof getSelfHostedProfileGlobalGateConfig>;
+    mode: ProfileValidationMode;
+    now: () => number;
+    requestTimeoutMs: number;
+}) {
+    const configuredMaxWaitMs = input.mode === 'admission'
+        ? input.gateConfig.admissionMaxWaitMs
+        : input.gateConfig.fullMaxWaitMs;
+    const common = {
+        responseGuardMs: input.gateConfig.responseGuardMs,
+        rpcTimeoutMs: input.gateConfig.rpcTimeoutMs,
+    };
+    if (input.deadlineAtMs === undefined) {
+        return { ...common, maxWaitMs: configuredMaxWaitMs };
+    }
+
+    const gateDeadlineAtMs = input.deadlineAtMs
+        - input.requestTimeoutMs
+        - SELFHOSTED_PROFILE_DEADLINE_COMPLETION_MARGIN_MS;
+    const coordinationOverheadMs = Math.max(
+        input.gateConfig.responseGuardMs,
+        input.gateConfig.rpcTimeoutMs
+    );
+    const waitBudgetMs = Math.floor(
+        gateDeadlineAtMs - input.now() - coordinationOverheadMs
+    );
+    if (!Number.isSafeInteger(waitBudgetMs) || waitBudgetMs < 0) {
+        throw new WebProfileRequestError(
+            'SELFHOSTED_PROFILE_COORDINATION_ERROR: caller deadline exhausted.',
+            'transport',
+            true
+        );
+    }
+    return {
+        ...common,
+        deadlineAtMs: gateDeadlineAtMs,
+        maxWaitMs: Math.min(configuredMaxWaitMs, waitBudgetMs),
+    };
 }
 
 function integerSetting(
@@ -151,39 +224,119 @@ export function getWebProfileConfig(
 export function createWebProfileCircuitBreaker(
     now: () => number = Date.now
 ): WebProfileCircuitBreaker {
+    type RetryPermitState = WebProfileCircuitRetryPermit & { generation: number };
+    type AttemptPermitState = WebProfileCircuitAttemptPermit & {
+        generation: number;
+        probe: boolean;
+    };
+
     let openUntil = 0;
     let schemaFailures = 0;
     let transientFailures = 0;
+    let generation = 0;
+    let pendingRetryPermit: RetryPermitState | undefined;
+    let activeProbePermit: AttemptPermitState | undefined;
+
+    const circuitError = () => new WebProfileRequestError(
+        'SCRAPING_ERROR: selfhosted profile circuit is open.',
+        'circuit',
+        false
+    );
+
+    const expireOpenCircuit = (): void => {
+        if (openUntil !== 0 && openUntil <= now()) {
+            openUntil = 0;
+            pendingRetryPermit = undefined;
+            activeProbePermit = undefined;
+        }
+    };
+
+    const issueRetryPermit = (): WebProfileCircuitRetryPermit => {
+        const retryPermit = { generation } as RetryPermitState;
+        pendingRetryPermit = retryPermit;
+        return retryPermit;
+    };
+
+    const openCircuit = (
+        durationMs: number,
+        shouldIssueRetryPermit: boolean
+    ): WebProfileCircuitRetryPermit | undefined => {
+        generation++;
+        openUntil = Math.max(openUntil, now() + durationMs);
+        pendingRetryPermit = undefined;
+        activeProbePermit = undefined;
+        if (!shouldIssueRetryPermit) return undefined;
+
+        return issueRetryPermit();
+    };
 
     return {
-        assertAvailable(allowProbe: boolean): void {
-            if (!allowProbe && openUntil > now()) {
-                throw new WebProfileRequestError(
-                    'SCRAPING_ERROR: selfhosted profile circuit is open.',
-                    'circuit',
-                    false
-                );
+        acquireAttempt(retryPermit): WebProfileCircuitAttemptPermit {
+            expireOpenCircuit();
+            if (openUntil > now()) {
+                const permit = retryPermit as RetryPermitState | undefined;
+                if (
+                    permit === undefined
+                    || permit !== pendingRetryPermit
+                    || permit.generation !== generation
+                ) {
+                    throw circuitError();
+                }
+                pendingRetryPermit = undefined;
+                const attemptPermit = {
+                    generation,
+                    probe: true,
+                } as AttemptPermitState;
+                activeProbePermit = attemptPermit;
+                return attemptPermit;
+            }
+
+            return { generation, probe: false } as AttemptPermitState;
+        },
+        assertAvailable(attemptPermit): void {
+            expireOpenCircuit();
+            const permit = attemptPermit as AttemptPermitState;
+            if (
+                permit.generation !== generation
+                || (openUntil > now() && permit !== activeProbePermit)
+            ) {
+                throw circuitError();
             }
         },
-        recordSuccess(): void {
+        recordSuccess(attemptPermit): void {
+            const permit = attemptPermit as AttemptPermitState;
+            if (permit.generation !== generation) return;
             openUntil = 0;
             schemaFailures = 0;
             transientFailures = 0;
+            pendingRetryPermit = undefined;
+            activeProbePermit = undefined;
         },
-        recordFailure(error, config): void {
+        recordFailure(error, config, attemptPermit): WebProfileCircuitRetryPermit | undefined {
+            const permit = attemptPermit as AttemptPermitState;
+            const wasCurrentProbe = attemptPermit === activeProbePermit
+                && permit.generation === generation;
+            if (wasCurrentProbe) activeProbePermit = undefined;
             if (error.kind === 'rate_limit' || error.kind === 'auth') {
-                openUntil = Math.max(
-                    openUntil,
-                    now() + Math.max(config.circuitCooldownMs, error.retryAfterMs ?? 0)
+                return openCircuit(
+                    Math.max(config.circuitCooldownMs, error.retryAfterMs ?? 0),
+                    error.kind === 'rate_limit'
                 );
-                return;
             }
             if (error.kind === 'schema') {
                 schemaFailures++;
                 if (schemaFailures >= config.schemaFailureThreshold) {
-                    openUntil = Math.max(openUntil, now() + config.circuitCooldownMs);
+                    return openCircuit(config.circuitCooldownMs, true);
                 }
-                return;
+                if (
+                    error.retryable
+                    && wasCurrentProbe
+                    && permit.generation === generation
+                    && openUntil > now()
+                ) {
+                    return issueRetryPermit();
+                }
+                return undefined;
             }
             if (
                 error.kind === 'timeout' ||
@@ -192,9 +345,10 @@ export function createWebProfileCircuitBreaker(
             ) {
                 transientFailures++;
                 if (transientFailures >= config.transientFailureThreshold) {
-                    openUntil = Math.max(openUntil, now() + config.circuitCooldownMs);
+                    return openCircuit(config.circuitCooldownMs, false);
                 }
             }
+            return undefined;
         },
     };
 }
@@ -354,40 +508,95 @@ function makeWebProfileFetcherForMode(
     const now = deps.now ?? Date.now;
     const wait = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     const gate = deps.gate ?? createRequestStartGate(now, wait);
+    const globalGate = deps.globalGate ?? createSelfHostedProfileGlobalGate({
+        client: supabaseAdmin,
+        sleep: wait,
+    });
     const circuit = deps.circuit ?? createWebProfileCircuitBreaker(now);
 
     return async function fetchProfile(
         username: string,
         transport: TransportConfig = getTransportConfig(deps.env ?? process.env),
-        options: FetchOptions = {}
+        options: WebProfileFetchOptions = {}
     ): Promise<Record<string, unknown> | null> {
         if (!isInstagramUsername(username)) {
             throw new Error('SCRAPING_CONFIG_ERROR: Instagram username 형식이 올바르지 않습니다.');
         }
         const config = getWebProfileConfig(deps.env ?? process.env);
+        const globalGateConfig = getSelfHostedProfileGlobalGateConfig(
+            deps.env ?? process.env
+        );
         const { url } = buildRequest(profileUrl(username), transport);
         let lastError: unknown;
-        let allowCircuitProbe = false;
+        let retryPermit: WebProfileCircuitRetryPermit | undefined;
 
         for (let attempt = 0; attempt <= config.retries; attempt++) {
+            const attemptPermit = circuit.acquireAttempt(retryPermit);
+            retryPermit = undefined;
             try {
-                circuit.assertAvailable(allowCircuitProbe);
+                circuit.assertAvailable(attemptPermit);
                 const result = await gate.schedule(async () => {
-                    circuit.assertAvailable(allowCircuitProbe);
-                    options.onRequest?.();
+                    circuit.assertAvailable(attemptPermit);
                     const controller = new AbortController();
-                    const timer = setTimeout(() => controller.abort(), config.timeoutMs);
-                    try {
-                        const response = await fetchFn(url, {
-                            headers: {
-                                'x-ig-app-id': IG_APP_ID,
-                                'User-Agent': USER_AGENT,
-                                Accept: '*/*',
-                                'X-Requested-With': 'XMLHttpRequest',
-                                Referer: `https://www.instagram.com/${encodeURIComponent(username)}/`,
-                            },
-                            signal: controller.signal,
+                    const requestInit: RequestInit = {
+                        headers: {
+                            'x-ig-app-id': IG_APP_ID,
+                            'User-Agent': USER_AGENT,
+                            Accept: '*/*',
+                            'X-Requested-With': 'XMLHttpRequest',
+                            Referer: `https://www.instagram.com/${encodeURIComponent(username)}/`,
+                        },
+                        signal: controller.signal,
+                    };
+                    let timer: ReturnType<typeof setTimeout> | undefined;
+                    const startRequest = (): Promise<Response> => {
+                        timer = setTimeout(() => controller.abort(), config.timeoutMs);
+                        try {
+                            return fetchFn(url, requestInit);
+                        } catch (error) {
+                            clearTimeout(timer);
+                            timer = undefined;
+                            throw error;
+                        }
+                    };
+                    let request: Promise<Response>;
+                    if (globalGateConfig.enabled) {
+                        const gateOptions = globalGateAttemptOptions({
+                            deadlineAtMs: options.invocationDeadlineAtMs,
+                            gateConfig: globalGateConfig,
+                            mode: options.globalGateWaitMode ?? validationMode,
+                            now,
+                            requestTimeoutMs: config.timeoutMs,
                         });
+                        const handoff = await globalGate.reserveWaitAndStart(
+                            globalGateConfig.minIntervalMs,
+                            { ...gateOptions },
+                            {
+                                beforeStart: () => circuit.assertAvailable(attemptPermit),
+                                start: () => {
+                                    const startedRequest = startRequest();
+                                    try {
+                                        options.onRequest?.();
+                                    } catch (error) {
+                                        controller.abort();
+                                        if (timer !== undefined) {
+                                            clearTimeout(timer);
+                                            timer = undefined;
+                                        }
+                                        void startedRequest.catch(() => undefined);
+                                        throw error;
+                                    }
+                                    return startedRequest;
+                                },
+                            }
+                        );
+                        request = handoff.started;
+                    } else {
+                        options.onRequest?.();
+                        request = startRequest();
+                    }
+                    try {
+                        const response = await request;
                         if (response.status === 404) return null;
                         if (!response.ok) {
                             throw responseError(response, now, config.maxRetryAfterMs);
@@ -405,10 +614,10 @@ function makeWebProfileFetcherForMode(
                         }
                         return parseUser(payload, username, validationMode);
                     } finally {
-                        clearTimeout(timer);
+                        if (timer !== undefined) clearTimeout(timer);
                     }
                 }, config.minIntervalMs);
-                circuit.recordSuccess();
+                circuit.recordSuccess(attemptPermit);
                 return result;
             } catch (error) {
                 const classified = error instanceof WebProfileRequestError
@@ -425,9 +634,8 @@ function makeWebProfileFetcherForMode(
                           true
                       );
                 lastError = classified;
-                circuit.recordFailure(classified, config);
+                retryPermit = circuit.recordFailure(classified, config, attemptPermit);
                 if (!classified.retryable || attempt >= config.retries) break;
-                allowCircuitProbe = classified.kind === 'rate_limit' || classified.kind === 'schema';
                 const backoffMs = config.retryBaseDelayMs * 2 ** attempt;
                 await wait(Math.max(backoffMs, classified.retryAfterMs ?? 0));
             }
@@ -444,30 +652,49 @@ export function makeWebProfileAdmissionFetcher(deps: WebProfileFetcherDeps = {})
     return makeWebProfileFetcherForMode('admission', deps);
 }
 
-const sharedStartGate = createRequestStartGate();
-const sharedProfileCircuit = createWebProfileCircuitBreaker();
-const sharedAdmissionCircuit = createWebProfileCircuitBreaker();
-const defaultFetcher = makeWebProfileFetcher({
-    gate: sharedStartGate,
-    circuit: sharedProfileCircuit,
-});
-const defaultAdmissionFetcher = makeWebProfileAdmissionFetcher({
-    gate: sharedStartGate,
-    circuit: sharedAdmissionCircuit,
-});
+export function createSharedWebProfileFetchers(deps: SharedWebProfileFetcherDeps = {}) {
+    const now = deps.now ?? Date.now;
+    const wait = deps.sleep
+        ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    const sharedStartGate = deps.gate ?? createRequestStartGate(now, wait);
+    const sharedGlobalGate = deps.globalGate ?? createSelfHostedProfileGlobalGate({
+        client: supabaseAdmin,
+        sleep: wait,
+    });
+    const commonDeps = {
+        env: deps.env,
+        fetchFn: deps.fetchFn,
+        now,
+        sleep: wait,
+        gate: sharedStartGate,
+        globalGate: sharedGlobalGate,
+    };
+    return {
+        full: makeWebProfileFetcher({
+            ...commonDeps,
+            circuit: deps.profileCircuit ?? createWebProfileCircuitBreaker(now),
+        }),
+        admission: makeWebProfileAdmissionFetcher({
+            ...commonDeps,
+            circuit: deps.admissionCircuit ?? createWebProfileCircuitBreaker(now),
+        }),
+    };
+}
+
+const sharedDefaultFetchers = createSharedWebProfileFetchers();
 
 export async function fetchWebProfileUser(
     username: string,
     transport?: TransportConfig,
-    options?: FetchOptions
+    options?: WebProfileFetchOptions
 ): Promise<Record<string, unknown> | null> {
-    return defaultFetcher(username, transport, options);
+    return sharedDefaultFetchers.full(username, transport, options);
 }
 
 export async function fetchWebProfileAdmissionUser(
     username: string,
     transport?: TransportConfig,
-    options?: FetchOptions
+    options?: WebProfileFetchOptions
 ): Promise<Record<string, unknown> | null> {
-    return defaultAdmissionFetcher(username, transport, options);
+    return sharedDefaultFetchers.admission(username, transport, options);
 }

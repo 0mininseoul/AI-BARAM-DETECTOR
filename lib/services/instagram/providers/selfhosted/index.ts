@@ -18,11 +18,18 @@ import {
     type SelfHostedAdmissionProfileSummary,
 } from './mappers';
 import { pLimit, withRetry } from './rate-limit';
-import { fetchWebProfileAdmissionUser, fetchWebProfileUser } from './web-client';
+import {
+    fetchWebProfileAdmissionUser,
+    fetchWebProfileUser,
+    type WebProfileFetchOptions,
+} from './web-client';
 import { isInstagramUsername } from '../../username';
 
 interface SelfHostedDeps {
-    fetchUser?: (username: string) => Promise<Record<string, unknown> | null>;
+    fetchUser?: (
+        username: string,
+        options?: Pick<WebProfileFetchOptions, 'invocationDeadlineAtMs'>
+    ) => Promise<Record<string, unknown> | null>;
     concurrency?: number;
     retries?: number;
     env?: Record<string, string | undefined>;
@@ -86,10 +93,16 @@ export function makeSelfHostedProvider(deps: SelfHostedDeps = {}): ScraperProvid
         if (deps.fetchUser) {
             return withRetry(() => {
                 context?.recordUsage({ request_count: 1 });
-                return deps.fetchUser!(username);
+                if (context?.invocationDeadlineAtMs === undefined) {
+                    return deps.fetchUser!(username);
+                }
+                return deps.fetchUser!(username, {
+                    invocationDeadlineAtMs: context.invocationDeadlineAtMs,
+                });
             }, { retries: injectedRetries });
         }
         return fetchWebProfileUser(username, undefined, {
+            invocationDeadlineAtMs: context?.invocationDeadlineAtMs,
             onRequest: () => context?.recordUsage({ request_count: 1 }),
         });
     }
@@ -235,23 +248,39 @@ export function makeSelfHostedProvider(deps: SelfHostedDeps = {}): ScraperProvid
 
 export const selfHostedProvider: ScraperProvider = makeSelfHostedProvider();
 
+export interface SelfHostedProfileSummaryOptions {
+    invocationDeadlineAtMs?: number;
+}
+
 export async function getSelfHostedProfileSummary(
-    username: string
+    username: string,
+    options: SelfHostedProfileSummaryOptions = {}
 ): Promise<InstagramProfile | null> {
-    if (!selfHostedProvider.getProfileSummary) {
-        throw new Error('SCRAPING_CONFIG_ERROR: selfhosted summary capability is unavailable.');
+    if (!isInstagramUsername(username)) {
+        throw new Error('SCRAPING_CONFIG_ERROR: selfhosted summary username is invalid.');
     }
-    return selfHostedProvider.getProfileSummary(username);
+    const user = await fetchWebProfileUser(username, undefined, {
+        globalGateWaitMode: 'admission',
+        invocationDeadlineAtMs: options.invocationDeadlineAtMs,
+    });
+    const result = user ? mapUserToProfileSummary(user) : null;
+    if (result && result.username.toLowerCase() !== username.toLowerCase()) {
+        throw new Error('SCRAPING_SCHEMA_ERROR: selfhosted summary username mismatch.');
+    }
+    return result;
 }
 
 
 export async function getSelfHostedAdmissionProfileSummary(
-    username: string
+    username: string,
+    options: SelfHostedProfileSummaryOptions = {}
 ): Promise<SelfHostedAdmissionProfileSummary | null> {
     if (!isInstagramUsername(username)) {
         throw new Error('SCRAPING_CONFIG_ERROR: selfhosted admission username is invalid.');
     }
-    const user = await fetchWebProfileAdmissionUser(username);
+    const user = await fetchWebProfileAdmissionUser(username, undefined, {
+        invocationDeadlineAtMs: options.invocationDeadlineAtMs,
+    });
     const result = user ? mapUserToAdmissionProfileSummary(user) : null;
     if (result && result.username.toLowerCase() !== username.toLowerCase()) {
         throw new Error('SCRAPING_SCHEMA_ERROR: selfhosted admission username mismatch.');

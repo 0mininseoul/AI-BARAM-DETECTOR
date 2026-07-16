@@ -63,6 +63,19 @@ function outcome(
     };
 }
 
+function incompleteOutcome(username: string, source: 'selfhosted' | 'apify') {
+    return {
+        requestedUsername: username,
+        source,
+        status: 'failed' as const,
+        failureCategory: 'incomplete' as const,
+        httpStatus: null,
+        requestCount: 1,
+        latencyMs: 25,
+        capturedAt,
+    };
+}
+
 function profile(username: string) {
     return {
         username,
@@ -74,7 +87,9 @@ function profile(username: string) {
     };
 }
 
-function resume(finalStatus: 'unavailable' | 'failed'): AnalysisV2ProfileFetchResume {
+function resume(
+    finalStatus: 'unavailable' | 'failed' | 'incomplete'
+): AnalysisV2ProfileFetchResume {
     return analysisV2ProfileFetchResumeSchema.parse({
         requestId,
         jobKey: 'track:profiles:batch:0',
@@ -87,7 +102,11 @@ function resume(finalStatus: 'unavailable' | 'failed'): AnalysisV2ProfileFetchRe
             },
             { outcome: outcome('terminal.one', 'selfhosted', 'failed') },
         ],
-        fallbackResults: [{ outcome: outcome('terminal.one', 'apify', finalStatus) }],
+        fallbackResults: [{
+            outcome: finalStatus === 'incomplete'
+                ? incompleteOutcome('terminal.one', 'apify')
+                : outcome('terminal.one', 'apify', finalStatus),
+        }],
         primaryCapturedAt: capturedAt,
         fallbackCapturedAt: capturedAt,
     });
@@ -155,6 +174,28 @@ describe('analysis V2 production profile consumer', () => {
                 p_expected_item_count: 2,
             })
         );
+    });
+
+    it('projects a tolerated final incomplete failure as unavailable', async () => {
+        const reader = createAnalysisV2ProfileBatchReadModel(
+            profileClient(resume('incomplete')).client
+        );
+
+        const loaded = await reader.loadExactBatch({
+            requestId,
+            consumerJobKey: 'track:profile-ai:batch:0',
+            consumerClaimToken: claimToken,
+            consumerInputHash,
+            producerJobKey: 'track:profiles:batch:0',
+            batch: 0,
+            expectedItemCount: 2,
+            expectedProducerInputHash: producerInputHash,
+        });
+
+        expect(loaded?.results).toEqual([
+            expect.objectContaining({ username: 'success.one', status: 'success' }),
+            { username: 'terminal.one', status: 'unavailable' },
+        ]);
     });
 
     it('rejects a final retryable failure instead of silently shrinking analysis scope', async () => {

@@ -1038,11 +1038,6 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
                 && !collected.failuresByUsername.has(key)
                 && !collected.notFoundUsernames.has(key);
         });
-        if (missingUsernames.length > 0 && hasDurableProfileRunCheckpoint(context)) {
-            throw profileRunPending(
-                'Apify profile dataset omitted accounts without explicit not-found evidence.'
-            );
-        }
         const results = usernames.map((requestedUsername) => {
             const key = requestedUsername.trim().toLowerCase();
             const profile = collected.profilesByUsername.get(key);

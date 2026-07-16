@@ -50,6 +50,20 @@ describe('selfHostedProvider', () => {
         expect(await provider.getProfile!('ghost')).toBeNull();
     });
 
+    it('forwards the invocation deadline from provider context to the web fetch', async () => {
+        const fetchUser = vi.fn().mockResolvedValue(completeUser);
+        const provider = makeSelfHostedProvider({ fetchUser });
+
+        await provider.getProfile!('sample_user', {
+            invocationDeadlineAtMs: 123_456,
+            recordUsage: vi.fn(),
+        });
+
+        expect(fetchUser).toHaveBeenCalledWith('sample_user', {
+            invocationDeadlineAtMs: 123_456,
+        });
+    });
+
     it('getProfilesBatch는 전체 요청이 있을 때 결과를 반환한다', async () => {
         const fetchUser = vi.fn().mockResolvedValue(completeUser);
         const provider = makeSelfHostedProvider({ fetchUser, concurrency: 1, retries: 0 });

@@ -1067,7 +1067,11 @@ export async function processPreflight(
             assertPreflightRuntimePolicy(dependencies.env);
             try {
                 profile = await (dependencies.getProfile ?? getSelfHostedProfileSummary)(
-                    claim.targetInstagramId
+                    claim.targetInstagramId,
+                    {
+                        invocationDeadlineAtMs:
+                            workerStartedAt + PREFLIGHT_PROVIDER_DEADLINE_MS,
+                    }
                 );
                 if (profile) assertMatchingProfile(profile, claim.targetInstagramId);
             } catch (error) {
