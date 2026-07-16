@@ -608,9 +608,13 @@ function durableTerminalProfileResults(
         throw new Error('ANALYSIS_V2_PROFILE_BATCH_IDENTITY_DRIFT');
     }
     const final = finalCheckpointResults(resume);
+    const failed = final.filter(result => result.outcome.status === 'failed');
+    const allowedIncompleteFailures = requestedUsernames.length
+        - Math.ceil(0.9 * requestedUsernames.length);
     if (
         final.length !== requestedUsernames.length
-        || final.some(result => result.outcome.status === 'failed')
+        || failed.length > allowedIncompleteFailures
+        || failed.some(result => result.outcome.failureCategory !== 'incomplete')
     ) {
         throw new Error('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
     }

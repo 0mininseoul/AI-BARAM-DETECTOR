@@ -128,7 +128,10 @@ function parseConsumerResume(data: unknown): AnalysisV2ProfileFetchResume {
 
 function projectTerminalResults(resume: AnalysisV2ProfileFetchResume) {
     return finalResults(resume).map(result => {
-        if (result.outcome.status === 'failed') {
+        if (
+            result.outcome.status === 'failed'
+            && result.outcome.failureCategory !== 'incomplete'
+        ) {
             throw new Error('ANALYSIS_V2_PROFILE_CONSUMER_RETRYABLE_OUTCOME');
         }
         if (result.outcome.status === 'success') {

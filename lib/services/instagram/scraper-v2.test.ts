@@ -109,10 +109,11 @@ describe('getProfilesBatchV2', () => {
         expect(snapshots[1].results.map(item => [
             item.outcome.requestedUsername,
             item.outcome.status,
+            item.outcome.failureCategory,
         ])).toEqual([
-            ['bob', 'success'],
-            ['carol', 'failed'],
-            ['dave', 'success'],
+            ['bob', 'success', null],
+            ['carol', 'failed', 'incomplete'],
+            ['dave', 'success', null],
         ]);
         expect(result.results.map(item => [
             item.outcome.requestedUsername,
