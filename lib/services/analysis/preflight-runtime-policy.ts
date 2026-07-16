@@ -35,8 +35,9 @@ export function maximumSelfHostedProfileRuntimeMs(
 
     // The interval term is conservative: a slow response normally consumes the interval,
     // but counting both keeps configuration changes safely inside the worker fence.
-    const admissionGateAttemptMs = globalGateConfig.admissionMaxWaitMs
-        + globalGateConfig.rpcTimeoutMs;
+    const admissionGateAttemptMs = globalGateConfig.enabled
+        ? globalGateConfig.admissionMaxWaitMs + globalGateConfig.rpcTimeoutMs
+        : 0;
     return attempts * (
         config.timeoutMs
         + config.minIntervalMs
