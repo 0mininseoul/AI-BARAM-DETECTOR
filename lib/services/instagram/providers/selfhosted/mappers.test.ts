@@ -161,6 +161,36 @@ describe('mapUserToProfile', () => {
         }
     );
 
+    it.each([
+        ['has_next_page true', { has_next_page: true }],
+        ['has_next_page false', { has_next_page: false }],
+        ['null', null],
+        ['undefined', undefined],
+        ['잘못된 scalar', 'schema-drift'],
+    ])('page_info가 존재하는 count 없는 carousel (%s)을 거부한다', (_label, pageInfo) => {
+        expect(() => mapUserToProfile(userWithPosts([{
+            id: 'sidecar-paginated',
+            shortcode: 'PAGINATED',
+            __typename: 'GraphSidecar',
+            display_url: 'https://cdn.example.com/paginated-cover.jpg',
+            is_video: false,
+            taken_at_timestamp: 1_700_000_000,
+            edge_media_to_caption: { edges: [] },
+            edge_media_to_tagged_user: { edges: [] },
+            edge_sidecar_to_children: {
+                page_info: pageInfo,
+                edges: [{
+                    node: {
+                        id: 'paginated-child',
+                        __typename: 'GraphImage',
+                        is_video: false,
+                        display_url: 'https://cdn.example.com/paginated-child.jpg',
+                    },
+                }],
+            },
+        }]))).toThrow('SCRAPING_INCOMPLETE_ERROR');
+    });
+
     it('공개 프로필의 carousel 선언 또는 자식이 불완전하면 성공으로 확정하지 않는다', () => {
         const childEdges = [
             { node: { id: 'child-1', __typename: 'GraphImage', is_video: false, display_url: 'https://cdn.example.com/child-1.jpg' } },
