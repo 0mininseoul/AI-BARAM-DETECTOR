@@ -3,6 +3,8 @@ import { createRequestStartGate } from './rate-limit';
 import {
     createSelfHostedProfileGlobalGate,
     type SelfHostedProfileGlobalGate,
+    type SelfHostedProfileGlobalGateAttemptOptions,
+    type SelfHostedProfileGlobalGateHandoff,
     type SelfHostedProfileGlobalGateRpcClient,
 } from './global-request-gate';
 import {
@@ -60,6 +62,28 @@ function neverSettlingRpcBuilder(onSignal: (signal: AbortSignal) => void) {
             return request;
         },
     });
+}
+
+function immediateGlobalGate(): SelfHostedProfileGlobalGate {
+    return {
+        async reserveWaitAndStart<T>(
+            minIntervalMs: number,
+            options: SelfHostedProfileGlobalGateAttemptOptions,
+            handoff: SelfHostedProfileGlobalGateHandoff<T>
+        ) {
+            void minIntervalMs;
+            void options;
+            handoff.beforeStart?.();
+            return {
+                reservation: {
+                    schemaVersion: 1,
+                    waitMs: 0,
+                    reservedAt: '2026-07-16T12:34:56.789+00:00',
+                },
+                started: handoff.start(),
+            };
+        },
+    };
 }
 
 describe('selfhosted web profile client', () => {
@@ -272,12 +296,12 @@ describe('selfhosted web profile client', () => {
             onRequest: () => order.push('onRequest'),
         });
 
-        expect(order).toEqual(['reserve:750', 'wait:40', 'onRequest', 'fetch']);
+        expect(order).toEqual(['reserve:750', 'wait:40', 'fetch', 'onRequest']);
     });
 
     it('bypasses the global RPC completely when the gate is disabled', async () => {
         const globalGate: SelfHostedProfileGlobalGate = {
-            reserveAndWait: vi.fn(async () => {
+            reserveWaitAndStart: vi.fn(async () => {
                 throw new Error('must not run');
             }),
         };
@@ -295,7 +319,7 @@ describe('selfhosted web profile client', () => {
         });
 
         await expect(fetchProfile('target')).resolves.toMatchObject({ username: 'target' });
-        expect(globalGate.reserveAndWait).not.toHaveBeenCalled();
+        expect(globalGate.reserveWaitAndStart).not.toHaveBeenCalled();
         expect(acquireAttempt).toHaveBeenCalledTimes(1);
         expect(assertAvailable).toHaveBeenCalledTimes(2);
         expect(fetchFn).toHaveBeenCalledTimes(1);
@@ -303,7 +327,7 @@ describe('selfhosted web profile client', () => {
 
     it('classifies coordination failure as retryable transport without a network start', async () => {
         const globalGate: SelfHostedProfileGlobalGate = {
-            reserveAndWait: vi.fn(async () => {
+            reserveWaitAndStart: vi.fn(async () => {
                 throw new Error('raw database endpoint and credential');
             }),
         };
@@ -328,15 +352,39 @@ describe('selfhosted web profile client', () => {
         expect(fetchFn).not.toHaveBeenCalled();
     });
 
+    it('aborts and drains a started request when post-start accounting throws', async () => {
+        let requestSignal: AbortSignal | undefined;
+        const fetchFn = vi.fn<typeof fetch>((_input, init) => {
+            requestSignal = init?.signal ?? undefined;
+            return Promise.reject(new Error('raw in-flight provider failure'));
+        });
+        const fetchProfile = makeWebProfileFetcher({
+            env: env({ SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: 'true' }),
+            globalGate: immediateGlobalGate(),
+            fetchFn,
+        });
+
+        const error = await fetchProfile('target', undefined, {
+            onRequest: () => {
+                throw new Error('raw accounting failure');
+            },
+        }).catch(caught => caught);
+
+        expect(fetchFn).toHaveBeenCalledTimes(1);
+        expect(requestSignal?.aborted).toBe(true);
+        expect(classifyWebProfileFailure(error)).toEqual({
+            kind: 'transport',
+            retryable: true,
+            httpStatus: null,
+        });
+        expect((error as Error).message).not.toContain('accounting');
+        expect((error as Error).message).not.toContain('provider failure');
+    });
+
     it('bounds the full gate wait to the caller deadline after request headroom', async () => {
         const clock = 10_000;
-        const globalGate: SelfHostedProfileGlobalGate = {
-            reserveAndWait: vi.fn(async () => ({
-                schemaVersion: 1 as const,
-                waitMs: 0,
-                reservedAt: '2026-07-16T12:34:56.789+00:00',
-            })),
-        };
+        const globalGate = immediateGlobalGate();
+        const reserveWaitAndStart = vi.spyOn(globalGate, 'reserveWaitAndStart');
         const fetchProfile = makeWebProfileFetcher({
             env: env({ SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: 'true' }),
             globalGate,
@@ -350,12 +398,19 @@ describe('selfhosted web profile client', () => {
             invocationDeadlineAtMs: clock + 5_000,
         });
 
-        expect(globalGate.reserveAndWait).toHaveBeenCalledWith(750, {
-            deadlineAtMs: clock + 3_750,
-            maxWaitMs: 3_000,
-            responseGuardMs: 100,
-            rpcTimeoutMs: 750,
-        });
+        expect(reserveWaitAndStart).toHaveBeenCalledWith(
+            750,
+            {
+                deadlineAtMs: clock + 3_750,
+                maxWaitMs: 3_000,
+                responseGuardMs: 100,
+                rpcTimeoutMs: 750,
+            },
+            {
+                beforeStart: expect.any(Function),
+                start: expect.any(Function),
+            }
+        );
     });
 
     it('keeps successful independent-client network starts at least one interval apart', async () => {
@@ -411,6 +466,82 @@ describe('selfhosted web profile client', () => {
 
         expect(starts).toEqual([50, 850]);
         expect(starts[1] - starts[0]).toBeGreaterThanOrEqual(750);
+    });
+
+    it('rejects a first client whose post-wait handoff would collapse the shared interval', async () => {
+        let nextStartMs = 0;
+        let firstClock = 0;
+        let secondClock = 0;
+        const client = (advanceRpc: () => void): SelfHostedProfileGlobalGateRpcClient => ({
+            rpc: vi.fn((_name, params) => {
+                const waitMs = nextStartMs;
+                nextStartMs += params.p_min_interval_ms + params.p_response_guard_ms;
+                advanceRpc();
+                return rpcBuilder({
+                    data: {
+                        schemaVersion: 1,
+                        waitMs,
+                        reservedAt: '2026-07-16T12:34:56.789+00:00',
+                    },
+                    error: null,
+                });
+            }),
+        });
+        const attemptPermit = {} as WebProfileCircuitAttemptPermit;
+        let availabilityChecks = 0;
+        const delayedCircuit: WebProfileCircuitBreaker = {
+            acquireAttempt: vi.fn(() => attemptPermit),
+            assertAvailable: vi.fn(() => {
+                availabilityChecks++;
+                if (availabilityChecks === 3) firstClock += 600;
+            }),
+            recordSuccess: vi.fn(),
+            recordFailure: vi.fn(),
+        };
+        const starts: number[] = [];
+        const firstOnRequest = vi.fn();
+        const firstFetch = vi.fn<typeof fetch>(async () => {
+            starts.push(firstClock);
+            return response({ data: { user: rawUser('first') } });
+        });
+        const first = makeWebProfileFetcher({
+            env: env({ SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: 'true' }),
+            globalGate: createSelfHostedProfileGlobalGate({
+                client: client(() => { firstClock += 50; }),
+                now: () => firstClock,
+                sleep: async ms => { firstClock += ms; },
+            }),
+            circuit: delayedCircuit,
+            now: () => firstClock,
+            sleep: async ms => { firstClock += ms; },
+            fetchFn: firstFetch,
+        });
+        const second = makeWebProfileFetcher({
+            env: env({ SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: 'true' }),
+            globalGate: createSelfHostedProfileGlobalGate({
+                client: client(() => undefined),
+                now: () => secondClock,
+                sleep: async ms => { secondClock += ms; },
+            }),
+            now: () => secondClock,
+            sleep: async ms => { secondClock += ms; },
+            fetchFn: vi.fn<typeof fetch>(async () => {
+                starts.push(secondClock);
+                return response({ data: { user: rawUser('second') } });
+            }),
+        });
+
+        const [firstResult, secondResult] = await Promise.allSettled([
+            first('first', undefined, { onRequest: firstOnRequest }),
+            second('second'),
+        ]);
+
+        expect(starts).not.toEqual([650, 850]);
+        expect(firstResult.status).toBe('rejected');
+        expect(secondResult.status).toBe('fulfilled');
+        expect(firstOnRequest).not.toHaveBeenCalled();
+        expect(firstFetch).not.toHaveBeenCalled();
+        expect(starts).toEqual([850]);
     });
 
     it('rejects a late 600ms reservation before Instagram while the next client starts safely', async () => {
@@ -510,13 +641,8 @@ describe('selfhosted web profile client', () => {
 
     it('fails before the global RPC when the caller deadline cannot cover gate and request work', async () => {
         const clock = 10_000;
-        const globalGate: SelfHostedProfileGlobalGate = {
-            reserveAndWait: vi.fn(async () => ({
-                schemaVersion: 1 as const,
-                waitMs: 0,
-                reservedAt: '2026-07-16T12:34:56.789+00:00',
-            })),
-        };
+        const globalGate = immediateGlobalGate();
+        const reserveWaitAndStart = vi.spyOn(globalGate, 'reserveWaitAndStart');
         const fetchFn = vi.fn<typeof fetch>();
         const onRequest = vi.fn();
         const fetchProfile = makeWebProfileFetcher({
@@ -536,7 +662,7 @@ describe('selfhosted web profile client', () => {
             retryable: true,
             httpStatus: null,
         });
-        expect(globalGate.reserveAndWait).not.toHaveBeenCalled();
+        expect(reserveWaitAndStart).not.toHaveBeenCalled();
         expect(onRequest).not.toHaveBeenCalled();
         expect(fetchFn).not.toHaveBeenCalled();
     });
@@ -553,14 +679,24 @@ describe('selfhosted web profile client', () => {
             recordFailure: vi.fn(),
         };
         const globalGate: SelfHostedProfileGlobalGate = {
-            reserveAndWait: vi.fn(async () => {
+            async reserveWaitAndStart<T>(
+                minIntervalMs: number,
+                options: SelfHostedProfileGlobalGateAttemptOptions,
+                handoff: SelfHostedProfileGlobalGateHandoff<T>
+            ) {
+                void minIntervalMs;
+                void options;
                 circuitOpen = true;
+                handoff.beforeStart?.();
                 return {
-                    schemaVersion: 1 as const,
-                    waitMs: 0,
-                    reservedAt: '2026-07-16T12:34:56.789+00:00',
+                    reservation: {
+                        schemaVersion: 1,
+                        waitMs: 0,
+                        reservedAt: '2026-07-16T12:34:56.789+00:00',
+                    },
+                    started: handoff.start(),
                 };
-            }),
+            },
         };
         const fetchFn = vi.fn<typeof fetch>();
         const onRequest = vi.fn();
@@ -593,18 +729,28 @@ describe('selfhosted web profile client', () => {
             markLaterFinished = resolve;
         });
         const globalGate: SelfHostedProfileGlobalGate = {
-            reserveAndWait: vi.fn(async () => {
+            async reserveWaitAndStart<T>(
+                minIntervalMs: number,
+                options: SelfHostedProfileGlobalGateAttemptOptions,
+                handoff: SelfHostedProfileGlobalGateHandoff<T>
+            ) {
+                void minIntervalMs;
+                void options;
                 reservationCount++;
                 if (reservationCount === 4) {
                     releaseLaterResponse();
                     await laterFinished;
                 }
+                handoff.beforeStart?.();
                 return {
-                    schemaVersion: 1 as const,
-                    waitMs: 0,
-                    reservedAt: '2026-07-16T12:34:56.789+00:00',
+                    reservation: {
+                        schemaVersion: 1,
+                        waitMs: 0,
+                        reservedAt: '2026-07-16T12:34:56.789+00:00',
+                    },
+                    started: handoff.start(),
                 };
-            }),
+            },
         };
         let targetFetches = 0;
         const fetchFn = vi.fn<typeof fetch>(async input => {
@@ -653,13 +799,8 @@ describe('selfhosted web profile client', () => {
     });
 
     it('builds the default full and admission fetchers around one shared global gate', async () => {
-        const globalGate: SelfHostedProfileGlobalGate = {
-            reserveAndWait: vi.fn(async () => ({
-                schemaVersion: 1 as const,
-                waitMs: 0,
-                reservedAt: '2026-07-16T12:34:56.789+00:00',
-            })),
-        };
+        const globalGate = immediateGlobalGate();
+        const reserveWaitAndStart = vi.spyOn(globalGate, 'reserveWaitAndStart');
         const fetchFn = vi.fn<typeof fetch>(async () =>
             response({ data: { user: rawUser('target') } })
         );
@@ -672,16 +813,32 @@ describe('selfhosted web profile client', () => {
         await fetchers.full('target');
         await fetchers.admission('target');
 
-        expect(globalGate.reserveAndWait).toHaveBeenNthCalledWith(1, 750, {
-            maxWaitMs: 60_000,
-            responseGuardMs: 100,
-            rpcTimeoutMs: 750,
-        });
-        expect(globalGate.reserveAndWait).toHaveBeenNthCalledWith(2, 750, {
-            maxWaitMs: 500,
-            responseGuardMs: 100,
-            rpcTimeoutMs: 750,
-        });
+        expect(reserveWaitAndStart).toHaveBeenNthCalledWith(
+            1,
+            750,
+            {
+                maxWaitMs: 60_000,
+                responseGuardMs: 100,
+                rpcTimeoutMs: 750,
+            },
+            {
+                beforeStart: expect.any(Function),
+                start: expect.any(Function),
+            }
+        );
+        expect(reserveWaitAndStart).toHaveBeenNthCalledWith(
+            2,
+            750,
+            {
+                maxWaitMs: 500,
+                responseGuardMs: 100,
+                rpcTimeoutMs: 750,
+            },
+            {
+                beforeStart: expect.any(Function),
+                start: expect.any(Function),
+            }
+        );
         expect(fetchFn).toHaveBeenCalledTimes(2);
     });
 });

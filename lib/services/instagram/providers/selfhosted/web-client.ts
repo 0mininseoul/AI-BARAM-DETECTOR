@@ -533,6 +533,29 @@ function makeWebProfileFetcherForMode(
                 circuit.assertAvailable(attemptPermit);
                 const result = await gate.schedule(async () => {
                     circuit.assertAvailable(attemptPermit);
+                    const controller = new AbortController();
+                    const requestInit: RequestInit = {
+                        headers: {
+                            'x-ig-app-id': IG_APP_ID,
+                            'User-Agent': USER_AGENT,
+                            Accept: '*/*',
+                            'X-Requested-With': 'XMLHttpRequest',
+                            Referer: `https://www.instagram.com/${encodeURIComponent(username)}/`,
+                        },
+                        signal: controller.signal,
+                    };
+                    let timer: ReturnType<typeof setTimeout> | undefined;
+                    const startRequest = (): Promise<Response> => {
+                        timer = setTimeout(() => controller.abort(), config.timeoutMs);
+                        try {
+                            return fetchFn(url, requestInit);
+                        } catch (error) {
+                            clearTimeout(timer);
+                            timer = undefined;
+                            throw error;
+                        }
+                    };
+                    let request: Promise<Response>;
                     if (globalGateConfig.enabled) {
                         const gateOptions = globalGateAttemptOptions({
                             deadlineAtMs: options.invocationDeadlineAtMs,
@@ -541,25 +564,35 @@ function makeWebProfileFetcherForMode(
                             now,
                             requestTimeoutMs: config.timeoutMs,
                         });
-                        await globalGate.reserveAndWait(globalGateConfig.minIntervalMs, {
-                            ...gateOptions,
-                        });
-                        circuit.assertAvailable(attemptPermit);
+                        const handoff = await globalGate.reserveWaitAndStart(
+                            globalGateConfig.minIntervalMs,
+                            { ...gateOptions },
+                            {
+                                beforeStart: () => circuit.assertAvailable(attemptPermit),
+                                start: () => {
+                                    const startedRequest = startRequest();
+                                    try {
+                                        options.onRequest?.();
+                                    } catch (error) {
+                                        controller.abort();
+                                        if (timer !== undefined) {
+                                            clearTimeout(timer);
+                                            timer = undefined;
+                                        }
+                                        void startedRequest.catch(() => undefined);
+                                        throw error;
+                                    }
+                                    return startedRequest;
+                                },
+                            }
+                        );
+                        request = handoff.started;
+                    } else {
+                        options.onRequest?.();
+                        request = startRequest();
                     }
-                    options.onRequest?.();
-                    const controller = new AbortController();
-                    const timer = setTimeout(() => controller.abort(), config.timeoutMs);
                     try {
-                        const response = await fetchFn(url, {
-                            headers: {
-                                'x-ig-app-id': IG_APP_ID,
-                                'User-Agent': USER_AGENT,
-                                Accept: '*/*',
-                                'X-Requested-With': 'XMLHttpRequest',
-                                Referer: `https://www.instagram.com/${encodeURIComponent(username)}/`,
-                            },
-                            signal: controller.signal,
-                        });
+                        const response = await request;
                         if (response.status === 404) return null;
                         if (!response.ok) {
                             throw responseError(response, now, config.maxRetryAfterMs);
@@ -577,7 +610,7 @@ function makeWebProfileFetcherForMode(
                         }
                         return parseUser(payload, username, validationMode);
                     } finally {
-                        clearTimeout(timer);
+                        if (timer !== undefined) clearTimeout(timer);
                     }
                 }, config.minIntervalMs);
                 circuit.recordSuccess(attemptPermit);

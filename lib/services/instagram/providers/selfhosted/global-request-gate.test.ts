@@ -14,6 +14,11 @@ const validReservation = {
     waitMs: 125,
     reservedAt: '2026-07-16T12:34:56.789+00:00',
 };
+const defaultAttemptOptions = {
+    maxWaitMs: 60_000,
+    responseGuardMs: 100,
+    rpcTimeoutMs: 750,
+};
 
 function rpcBuilder(
     result: { data: unknown; error: unknown } | Promise<{ data: unknown; error: unknown }>
@@ -182,8 +187,15 @@ describe('selfhosted production-wide profile request reservation', () => {
             },
         });
 
-        await expect(gate.reserveAndWait(750)).resolves.toEqual(validReservation);
-        expect(order).toEqual(['reserve', 'wait:125']);
+        const started = { request: true };
+        await expect(gate.reserveWaitAndStart(750, defaultAttemptOptions, {
+            beforeStart: () => order.push('beforeStart'),
+            start: () => {
+                order.push('start');
+                return started;
+            },
+        })).resolves.toEqual({ reservation: validReservation, started });
+        expect(order).toEqual(['reserve', 'wait:125', 'beforeStart', 'start']);
     });
 
     it('rejects a reservation when total RPC latency exceeds the response guard', async () => {
@@ -203,10 +215,8 @@ describe('selfhosted production-wide profile request reservation', () => {
             sleep: async () => undefined,
         });
 
-        await expect(gate.reserveAndWait(750, {
-            maxWaitMs: 60_000,
-            responseGuardMs: 100,
-            rpcTimeoutMs: 750,
+        await expect(gate.reserveWaitAndStart(750, defaultAttemptOptions, {
+            start: () => undefined,
         })).rejects.toThrow('SELFHOSTED_PROFILE_COORDINATION_ERROR');
     });
 
@@ -231,11 +241,9 @@ describe('selfhosted production-wide profile request reservation', () => {
             },
         });
 
-        await expect(gate.reserveAndWait(750, {
-            maxWaitMs: 60_000,
-            responseGuardMs: 100,
-            rpcTimeoutMs: 750,
-        })).resolves.toMatchObject({ waitMs: 100 });
+        await expect(gate.reserveWaitAndStart(750, defaultAttemptOptions, {
+            start: () => undefined,
+        })).resolves.toMatchObject({ reservation: { waitMs: 100 } });
         expect(sleeps).toEqual([100, 60]);
         expect(clock).toBe(120);
     });
@@ -259,11 +267,33 @@ describe('selfhosted production-wide profile request reservation', () => {
             },
         });
 
-        await expect(gate.reserveAndWait(750, {
-            maxWaitMs: 60_000,
-            responseGuardMs: 100,
-            rpcTimeoutMs: 750,
+        await expect(gate.reserveWaitAndStart(750, defaultAttemptOptions, {
+            start: () => undefined,
         })).rejects.toThrow('SELFHOSTED_PROFILE_COORDINATION_ERROR');
+    });
+
+    it('charges the 1ms ceil allowance before permitting the final start handoff', async () => {
+        let clock = 0;
+        const start = vi.fn();
+        const client: SelfHostedProfileGlobalGateRpcClient = {
+            rpc: vi.fn(() => {
+                clock += 99;
+                return rpcBuilder({
+                    data: { ...validReservation, waitMs: 0 },
+                    error: null,
+                });
+            }),
+        };
+        const gate = createSelfHostedProfileGlobalGate({
+            client,
+            now: () => clock,
+        });
+
+        await expect(gate.reserveWaitAndStart(750, defaultAttemptOptions, {
+            beforeStart: () => { clock += 1; },
+            start,
+        })).rejects.toThrow('SELFHOSTED_PROFILE_COORDINATION_ERROR');
+        expect(start).not.toHaveBeenCalled();
     });
 
     it('aborts and rejects a never-settling RPC at the hard timeout', async () => {

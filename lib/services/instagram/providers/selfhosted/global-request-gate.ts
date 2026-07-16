@@ -3,6 +3,7 @@ import { z } from 'zod';
 export const SELFHOSTED_PROFILE_GLOBAL_GATE_RPC =
     'reserve_selfhosted_profile_request_start' as const;
 export const SELFHOSTED_PROFILE_GLOBAL_GATE_MAX_WAIT_MS = 300_000;
+export const SELFHOSTED_PROFILE_GLOBAL_GATE_CEIL_ALLOWANCE_MS = 1;
 
 const reservationSchema = z.object({
     schemaVersion: z.literal(1),
@@ -48,11 +49,22 @@ export interface SelfHostedProfileGlobalGateAttemptOptions {
     rpcTimeoutMs: number;
 }
 
+export interface SelfHostedProfileGlobalGateHandoff<T> {
+    beforeStart?(): void;
+    start(): T;
+}
+
+export interface SelfHostedProfileGlobalGateStart<T> {
+    reservation: SelfHostedProfileRequestStartReservation;
+    started: T;
+}
+
 export interface SelfHostedProfileGlobalGate {
-    reserveAndWait(
+    reserveWaitAndStart<T>(
         minIntervalMs: number,
-        options?: SelfHostedProfileGlobalGateAttemptOptions
-    ): Promise<SelfHostedProfileRequestStartReservation>;
+        options: SelfHostedProfileGlobalGateAttemptOptions,
+        handoff: SelfHostedProfileGlobalGateHandoff<T>
+    ): Promise<SelfHostedProfileGlobalGateStart<T>>;
 }
 
 function coordinationError(): Error {
@@ -196,11 +208,7 @@ export function createSelfHostedProfileGlobalGate(input: {
         ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     const now = input.now ?? (() => performance.now());
     return {
-        async reserveAndWait(minIntervalMs, options = {
-            maxWaitMs: SELFHOSTED_PROFILE_GLOBAL_GATE_MAX_WAIT_MS,
-            responseGuardMs: 100,
-            rpcTimeoutMs: 750,
-        }) {
+        async reserveWaitAndStart(minIntervalMs, options, handoff) {
             const rpcStartedAt = now();
             const reservation = await reserveSelfHostedProfileRequestStart(
                 input.client,
@@ -238,10 +246,31 @@ export function createSelfHostedProfileGlobalGate(input: {
                 0,
                 sleepElapsedMs - reservation.waitMs
             );
-            if (rpcElapsedMs + positiveSleepOvershootMs > options.responseGuardMs) {
+            const consumedGuardMs = rpcElapsedMs
+                + positiveSleepOvershootMs
+                + SELFHOSTED_PROFILE_GLOBAL_GATE_CEIL_ALLOWANCE_MS;
+            if (consumedGuardMs > options.responseGuardMs) {
                 throw coordinationError();
             }
-            return reservation;
+            const latestStartAt = rpcStartedAt
+                + reservation.waitMs
+                + options.responseGuardMs
+                - SELFHOSTED_PROFILE_GLOBAL_GATE_CEIL_ALLOWANCE_MS;
+            if (!Number.isFinite(latestStartAt)) {
+                throw coordinationError();
+            }
+
+            handoff.beforeStart?.();
+            const startAt = now();
+            if (
+                !Number.isFinite(startAt)
+                || startAt < rpcStartedAt
+                || startAt > latestStartAt
+            ) {
+                throw coordinationError();
+            }
+            const started = handoff.start();
+            return { reservation, started };
         },
     };
 }
