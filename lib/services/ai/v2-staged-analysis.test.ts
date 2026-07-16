@@ -894,6 +894,47 @@ describe('V2 staged AI services', () => {
         expect(result.evidenceRefs[1]).not.toContain('carousel-dossier:latest-complete-carousel');
     });
 
+    it('rejects a dossier ref that collides with any supplied evidence namespace', () => {
+        for (const evidenceRefId of [
+            'coverage:target-interactions',
+            'caption:1',
+            'post:1:thumbnail',
+            'like:candidate-to-target',
+            'like:target-to-candidate',
+            'comment:1',
+            'target-post:1',
+            'profile:bio',
+        ]) {
+            expect(() => highRiskNarrativeInputSchema.parse({
+                ...narrativeInput(),
+                carouselCaptionDossier: {
+                    ...carouselCaptionDossier(),
+                    evidenceRefId,
+                },
+            }), evidenceRefId).toThrow('collide');
+        }
+    });
+
+    it('rejects dossier-only input that has no style fact after sanitization', async () => {
+        const input = {
+            ...narrativeInput(),
+            bio: null,
+            media: [],
+            captions: [],
+            carouselCaptionDossier: {
+                evidenceRefId: 'carousel-dossier:empty-after-sanitization',
+                text: '<b>',
+            },
+        } as HighRiskNarrativeInput;
+
+        expect(() => createHighRiskNarrativeResultIdentity(input)).toThrow('sanitized');
+        await expect(highRiskNarrative(
+            input,
+            {} as StagedAiAuditContext
+        )).rejects.toThrow('sanitized');
+        expect(mocks.analyzeWithGemini).not.toHaveBeenCalled();
+    });
+
     it('uses one deterministic safe fallback without a second generation for invalid output', async () => {
         mocks.analyzeWithGemini.mockImplementation(async (
             _prompt: string,

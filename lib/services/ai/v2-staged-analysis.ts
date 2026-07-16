@@ -574,15 +574,53 @@ export const highRiskNarrativeInputSchema = z.object({
             });
         }
     }
+    const identifiers = value.forbiddenIdentifiers;
+    const sanitizedBio = sanitizeNarrativeEvidenceText(
+        value.bio,
+        identifiers,
+        MAX_PROFILE_BIO_LENGTH
+    );
+    const hasSanitizedCaption = value.captions.some(caption => (
+        sanitizeNarrativeEvidenceText(caption.text, identifiers, MAX_CAPTION_LENGTH) !== null
+    ));
+    const sanitizedDossier = value.carouselCaptionDossier
+        ? sanitizeNarrativeEvidenceText(
+            value.carouselCaptionDossier.text,
+            identifiers,
+            MAX_CAROUSEL_CAPTION_CONTEXT_LENGTH
+        )
+        : null;
+    if (value.carouselCaptionDossier) {
+        const reservedRefs = new Set([
+            ...value.media.map(item => item.selectionId),
+            ...value.captions.map(caption => caption.evidenceRefId),
+            ...value.interactions.candidateToTargetLike.evidenceRefIds,
+            ...value.interactions.targetToCandidateLike.evidenceRefIds,
+            ...value.interactions.candidateToTargetComment.evidenceRefIds,
+            ...value.interactions.comments.flatMap(comment => [
+                comment.evidenceRefId,
+                comment.targetPostEvidenceRefId,
+            ]),
+            value.interactions.coverage.evidenceRefId,
+            'profile:bio',
+        ]);
+        if (reservedRefs.has(value.carouselCaptionDossier.evidenceRefId)) {
+            context.addIssue({
+                code: 'custom',
+                path: ['carouselCaptionDossier', 'evidenceRefId'],
+                message: 'Carousel caption dossier evidence must not collide with supplied evidence.',
+            });
+        }
+    }
     if (
         value.media.length === 0
-        && !value.bio?.trim()
-        && value.captions.length === 0
-        && !value.carouselCaptionDossier
+        && !sanitizedBio
+        && !hasSanitizedCaption
+        && !sanitizedDossier
     ) {
         context.addIssue({
             code: 'custom',
-            message: 'A narrative requires at least one visible profile or feed fact.',
+            message: 'A narrative requires at least one sanitized profile or feed fact.',
         });
     }
 });
