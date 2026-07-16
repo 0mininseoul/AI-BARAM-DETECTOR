@@ -1,8 +1,14 @@
+import { supabaseAdmin } from '@/lib/supabase/admin';
 import { getTransportConfig, buildRequest, type TransportConfig } from './transport';
 import {
     createRequestStartGate,
     type RequestStartGate,
 } from './rate-limit';
+import {
+    createSelfHostedProfileGlobalGate,
+    getSelfHostedProfileGlobalGateConfig,
+    type SelfHostedProfileGlobalGate,
+} from './global-request-gate';
 import { isInstagramUsername } from '../../username';
 
 export const IG_APP_ID = '936619743392459';
@@ -78,8 +84,14 @@ interface WebProfileFetcherDeps {
     now?: () => number;
     sleep?: (ms: number) => Promise<void>;
     gate?: RequestStartGate;
+    globalGate?: SelfHostedProfileGlobalGate;
     circuit?: WebProfileCircuitBreaker;
 }
+
+type SharedWebProfileFetcherDeps = Omit<WebProfileFetcherDeps, 'circuit'> & {
+    profileCircuit?: WebProfileCircuitBreaker;
+    admissionCircuit?: WebProfileCircuitBreaker;
+};
 
 function integerSetting(
     env: Record<string, string | undefined>,
@@ -354,6 +366,10 @@ function makeWebProfileFetcherForMode(
     const now = deps.now ?? Date.now;
     const wait = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
     const gate = deps.gate ?? createRequestStartGate(now, wait);
+    const globalGate = deps.globalGate ?? createSelfHostedProfileGlobalGate({
+        client: supabaseAdmin,
+        sleep: wait,
+    });
     const circuit = deps.circuit ?? createWebProfileCircuitBreaker(now);
 
     return async function fetchProfile(
@@ -365,6 +381,9 @@ function makeWebProfileFetcherForMode(
             throw new Error('SCRAPING_CONFIG_ERROR: Instagram username 형식이 올바르지 않습니다.');
         }
         const config = getWebProfileConfig(deps.env ?? process.env);
+        const globalGateConfig = getSelfHostedProfileGlobalGateConfig(
+            deps.env ?? process.env
+        );
         const { url } = buildRequest(profileUrl(username), transport);
         let lastError: unknown;
         let allowCircuitProbe = false;
@@ -374,6 +393,10 @@ function makeWebProfileFetcherForMode(
                 circuit.assertAvailable(allowCircuitProbe);
                 const result = await gate.schedule(async () => {
                     circuit.assertAvailable(allowCircuitProbe);
+                    if (globalGateConfig.enabled) {
+                        await globalGate.reserveAndWait(globalGateConfig.minIntervalMs);
+                        circuit.assertAvailable(allowCircuitProbe);
+                    }
                     options.onRequest?.();
                     const controller = new AbortController();
                     const timer = setTimeout(() => controller.abort(), config.timeoutMs);
@@ -444,24 +467,43 @@ export function makeWebProfileAdmissionFetcher(deps: WebProfileFetcherDeps = {})
     return makeWebProfileFetcherForMode('admission', deps);
 }
 
-const sharedStartGate = createRequestStartGate();
-const sharedProfileCircuit = createWebProfileCircuitBreaker();
-const sharedAdmissionCircuit = createWebProfileCircuitBreaker();
-const defaultFetcher = makeWebProfileFetcher({
-    gate: sharedStartGate,
-    circuit: sharedProfileCircuit,
-});
-const defaultAdmissionFetcher = makeWebProfileAdmissionFetcher({
-    gate: sharedStartGate,
-    circuit: sharedAdmissionCircuit,
-});
+export function createSharedWebProfileFetchers(deps: SharedWebProfileFetcherDeps = {}) {
+    const now = deps.now ?? Date.now;
+    const wait = deps.sleep
+        ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    const sharedStartGate = deps.gate ?? createRequestStartGate(now, wait);
+    const sharedGlobalGate = deps.globalGate ?? createSelfHostedProfileGlobalGate({
+        client: supabaseAdmin,
+        sleep: wait,
+    });
+    const commonDeps = {
+        env: deps.env,
+        fetchFn: deps.fetchFn,
+        now,
+        sleep: wait,
+        gate: sharedStartGate,
+        globalGate: sharedGlobalGate,
+    };
+    return {
+        full: makeWebProfileFetcher({
+            ...commonDeps,
+            circuit: deps.profileCircuit ?? createWebProfileCircuitBreaker(now),
+        }),
+        admission: makeWebProfileAdmissionFetcher({
+            ...commonDeps,
+            circuit: deps.admissionCircuit ?? createWebProfileCircuitBreaker(now),
+        }),
+    };
+}
+
+const sharedDefaultFetchers = createSharedWebProfileFetchers();
 
 export async function fetchWebProfileUser(
     username: string,
     transport?: TransportConfig,
     options?: FetchOptions
 ): Promise<Record<string, unknown> | null> {
-    return defaultFetcher(username, transport, options);
+    return sharedDefaultFetchers.full(username, transport, options);
 }
 
 export async function fetchWebProfileAdmissionUser(
@@ -469,5 +511,5 @@ export async function fetchWebProfileAdmissionUser(
     transport?: TransportConfig,
     options?: FetchOptions
 ): Promise<Record<string, unknown> | null> {
-    return defaultAdmissionFetcher(username, transport, options);
+    return sharedDefaultFetchers.admission(username, transport, options);
 }

@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createRequestStartGate } from './rate-limit';
 import {
+    createSelfHostedProfileGlobalGate,
+    type SelfHostedProfileGlobalGate,
+    type SelfHostedProfileGlobalGateRpcClient,
+} from './global-request-gate';
+import {
     classifyWebProfileFailure,
+    createSharedWebProfileFetchers,
     createWebProfileCircuitBreaker,
     getWebProfileConfig,
     makeWebProfileAdmissionFetcher,
@@ -185,5 +191,157 @@ describe('selfhosted web profile client', () => {
     it('rejects invalid reliability settings before making a request', () => {
         expect(() => getWebProfileConfig({ SELFHOSTED_PROFILE_RETRIES: 'unbounded' }))
             .toThrow('SCRAPING_CONFIG_ERROR');
+    });
+
+    it('reserves globally and waits before usage accounting or the network request', async () => {
+        const order: string[] = [];
+        const client: SelfHostedProfileGlobalGateRpcClient = {
+            rpc: vi.fn(async (_name, params) => {
+                order.push(`reserve:${params.p_min_interval_ms}`);
+                return {
+                    data: {
+                        schemaVersion: 1,
+                        waitMs: 40,
+                        reservedAt: '2026-07-16T12:34:56.789+00:00',
+                    },
+                    error: null,
+                };
+            }),
+        };
+        const globalGate = createSelfHostedProfileGlobalGate({
+            client,
+            sleep: async ms => {
+                order.push(`wait:${ms}`);
+            },
+        });
+        const fetchProfile = makeWebProfileFetcher({
+            env: env({
+                SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: 'true',
+                SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS: '750',
+            }),
+            globalGate,
+            fetchFn: vi.fn<typeof fetch>(async () => {
+                order.push('fetch');
+                return response({ data: { user: rawUser('target') } });
+            }),
+        });
+
+        await fetchProfile('target', undefined, {
+            onRequest: () => order.push('onRequest'),
+        });
+
+        expect(order).toEqual(['reserve:750', 'wait:40', 'onRequest', 'fetch']);
+    });
+
+    it('bypasses the global RPC completely when the gate is disabled', async () => {
+        const globalGate: SelfHostedProfileGlobalGate = {
+            reserveAndWait: vi.fn(async () => {
+                throw new Error('must not run');
+            }),
+        };
+        const circuit = {
+            assertAvailable: vi.fn(),
+            recordSuccess: vi.fn(),
+            recordFailure: vi.fn(),
+        };
+        const fetchFn = vi.fn<typeof fetch>(async () =>
+            response({ data: { user: rawUser('target') } })
+        );
+        const fetchProfile = makeWebProfileFetcher({
+            env: env({ SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: 'false' }),
+            globalGate,
+            circuit,
+            fetchFn,
+        });
+
+        await expect(fetchProfile('target')).resolves.toMatchObject({ username: 'target' });
+        expect(globalGate.reserveAndWait).not.toHaveBeenCalled();
+        expect(circuit.assertAvailable).toHaveBeenCalledTimes(2);
+        expect(fetchFn).toHaveBeenCalledTimes(1);
+    });
+
+    it('classifies coordination failure as retryable transport without a network start', async () => {
+        const globalGate: SelfHostedProfileGlobalGate = {
+            reserveAndWait: vi.fn(async () => {
+                throw new Error('raw database endpoint and credential');
+            }),
+        };
+        const fetchFn = vi.fn<typeof fetch>();
+        const onRequest = vi.fn();
+        const fetchProfile = makeWebProfileFetcher({
+            env: env({ SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: 'true' }),
+            globalGate,
+            fetchFn,
+        });
+
+        const error = await fetchProfile('target', undefined, { onRequest })
+            .catch(caught => caught);
+
+        expect(classifyWebProfileFailure(error)).toEqual({
+            kind: 'transport',
+            retryable: true,
+            httpStatus: null,
+        });
+        expect((error as Error).message).not.toContain('database endpoint');
+        expect(onRequest).not.toHaveBeenCalled();
+        expect(fetchFn).not.toHaveBeenCalled();
+    });
+
+    it('rechecks the process-local circuit after the global wait', async () => {
+        let circuitOpen = false;
+        const circuit = {
+            assertAvailable: vi.fn(() => {
+                if (circuitOpen) throw new Error('circuit opened while globally queued');
+            }),
+            recordSuccess: vi.fn(),
+            recordFailure: vi.fn(),
+        };
+        const globalGate: SelfHostedProfileGlobalGate = {
+            reserveAndWait: vi.fn(async () => {
+                circuitOpen = true;
+                return {
+                    schemaVersion: 1 as const,
+                    waitMs: 0,
+                    reservedAt: '2026-07-16T12:34:56.789+00:00',
+                };
+            }),
+        };
+        const fetchFn = vi.fn<typeof fetch>();
+        const onRequest = vi.fn();
+        const fetchProfile = makeWebProfileFetcher({
+            env: env({ SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: 'true' }),
+            globalGate,
+            circuit,
+            fetchFn,
+        });
+
+        await expect(fetchProfile('target', undefined, { onRequest })).rejects.toThrow();
+        expect(circuit.assertAvailable).toHaveBeenCalledTimes(3);
+        expect(onRequest).not.toHaveBeenCalled();
+        expect(fetchFn).not.toHaveBeenCalled();
+    });
+
+    it('builds the default full and admission fetchers around one shared global gate', async () => {
+        const globalGate: SelfHostedProfileGlobalGate = {
+            reserveAndWait: vi.fn(async () => ({
+                schemaVersion: 1 as const,
+                waitMs: 0,
+                reservedAt: '2026-07-16T12:34:56.789+00:00',
+            })),
+        };
+        const fetchFn = vi.fn<typeof fetch>(async () =>
+            response({ data: { user: rawUser('target') } })
+        );
+        const fetchers = createSharedWebProfileFetchers({
+            env: env({ SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: 'true' }),
+            globalGate,
+            fetchFn,
+        });
+
+        await fetchers.full('target');
+        await fetchers.admission('target');
+
+        expect(globalGate.reserveAndWait).toHaveBeenCalledTimes(2);
+        expect(fetchFn).toHaveBeenCalledTimes(2);
     });
 });
