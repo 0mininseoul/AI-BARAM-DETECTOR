@@ -586,6 +586,25 @@ function weakFeaturePartnerEvidence(feature: FeatureAnalysisResult): boolean {
         );
 }
 
+function analyzedPosts(outcome: AnalysisV2ProfileAiOutcome) {
+    if (!outcome.profile) return [];
+    const normalizedSelectionIds = new Set(outcome.normalizedSelectionIds);
+    const selectedPostIds = new Set(mediaPolicy(outcome.profile).feature.media.flatMap(media => (
+        media.postId && normalizedSelectionIds.has(media.selectionId) ? [media.postId] : []
+    )));
+    const emittedPostIds = new Set<string>();
+    return (outcome.profile.latestPosts ?? []).flatMap(post => {
+        const postId = post.id.trim();
+        if (!selectedPostIds.has(postId) || emittedPostIds.has(postId)) return [];
+        emittedPostIds.add(postId);
+        return [{
+            postId,
+            taggedUsers: post.taggedUsers,
+            mentionedUsers: post.mentionedUsers,
+        }];
+    });
+}
+
 function publicFeatureRow(outcome: AnalysisV2ProfileAiOutcome): AnalysisV2VerifiedFemaleFeatureRow {
     if (outcome.status === 'fetch_unavailable' || outcome.status === 'media_unavailable') {
         const mediaUnavailable = outcome.status === 'media_unavailable';
@@ -609,11 +628,7 @@ function publicFeatureRow(outcome: AnalysisV2ProfileAiOutcome): AnalysisV2Verifi
         throw new Error('ANALYSIS_V2_ANALYZED_PROFILE_INCOMPLETE');
     }
     const classification = outcome.status;
-    const posts = (outcome.profile.latestPosts ?? []).map(post => ({
-        postId: post.id,
-        taggedUsers: post.taggedUsers,
-        mentionedUsers: post.mentionedUsers,
-    }));
+    const posts = analyzedPosts(outcome);
     return {
         candidateId: outcome.candidateId,
         instagramId: outcome.instagramId,
