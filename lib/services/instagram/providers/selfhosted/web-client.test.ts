@@ -12,6 +12,8 @@ import {
     getWebProfileConfig,
     makeWebProfileAdmissionFetcher,
     makeWebProfileFetcher,
+    type WebProfileCircuitAttemptPermit,
+    type WebProfileCircuitBreaker,
 } from './web-client';
 
 function response(payload: unknown, status = 200, headers?: HeadersInit): Response {
@@ -77,7 +79,7 @@ describe('selfhosted web profile client', () => {
             clock += ms;
         };
         const fetchFn = vi.fn<typeof fetch>()
-            .mockResolvedValueOnce(response({}, 429, { 'retry-after': '2' }))
+            .mockResolvedValueOnce(response({}, 429, { 'retry-after': '0.5' }))
             .mockResolvedValueOnce(response({ data: { user: rawUser('target') } }));
         const fetchProfile = makeWebProfileFetcher({
             env: env({ SELFHOSTED_PROFILE_RETRIES: '1' }),
@@ -90,7 +92,7 @@ describe('selfhosted web profile client', () => {
 
         await expect(fetchProfile('target')).resolves.toMatchObject({ username: 'target' });
         expect(fetchFn).toHaveBeenCalledTimes(2);
-        expect(waits).toContain(2_000);
+        expect(waits).toContain(500);
     });
 
     it('opens immediately after a terminal 429 and fails the next call before fetch', async () => {
@@ -239,11 +241,9 @@ describe('selfhosted web profile client', () => {
                 throw new Error('must not run');
             }),
         };
-        const circuit = {
-            assertAvailable: vi.fn(),
-            recordSuccess: vi.fn(),
-            recordFailure: vi.fn(),
-        };
+        const circuit = createWebProfileCircuitBreaker(() => 0);
+        const acquireAttempt = vi.spyOn(circuit, 'acquireAttempt');
+        const assertAvailable = vi.spyOn(circuit, 'assertAvailable');
         const fetchFn = vi.fn<typeof fetch>(async () =>
             response({ data: { user: rawUser('target') } })
         );
@@ -256,7 +256,8 @@ describe('selfhosted web profile client', () => {
 
         await expect(fetchProfile('target')).resolves.toMatchObject({ username: 'target' });
         expect(globalGate.reserveAndWait).not.toHaveBeenCalled();
-        expect(circuit.assertAvailable).toHaveBeenCalledTimes(2);
+        expect(acquireAttempt).toHaveBeenCalledTimes(1);
+        expect(assertAvailable).toHaveBeenCalledTimes(2);
         expect(fetchFn).toHaveBeenCalledTimes(1);
     });
 
@@ -289,7 +290,9 @@ describe('selfhosted web profile client', () => {
 
     it('rechecks the process-local circuit after the global wait', async () => {
         let circuitOpen = false;
-        const circuit = {
+        const attemptPermit = {} as WebProfileCircuitAttemptPermit;
+        const circuit: WebProfileCircuitBreaker = {
+            acquireAttempt: vi.fn(() => attemptPermit),
             assertAvailable: vi.fn(() => {
                 if (circuitOpen) throw new Error('circuit opened while globally queued');
             }),
@@ -319,6 +322,81 @@ describe('selfhosted web profile client', () => {
         expect(circuit.assertAvailable).toHaveBeenCalledTimes(3);
         expect(onRequest).not.toHaveBeenCalled();
         expect(fetchFn).not.toHaveBeenCalled();
+    });
+
+    it('invalidates a retry probe when another request reopens the circuit during the global wait', async () => {
+        const circuit = createWebProfileCircuitBreaker(() => 0);
+        let reservationCount = 0;
+        let releaseLaterResponse!: () => void;
+        let markLaterStarted!: () => void;
+        let markLaterFinished!: () => void;
+        const laterResponse = new Promise<void>(resolve => {
+            releaseLaterResponse = resolve;
+        });
+        const laterStarted = new Promise<void>(resolve => {
+            markLaterStarted = resolve;
+        });
+        const laterFinished = new Promise<void>(resolve => {
+            markLaterFinished = resolve;
+        });
+        const globalGate: SelfHostedProfileGlobalGate = {
+            reserveAndWait: vi.fn(async () => {
+                reservationCount++;
+                if (reservationCount === 3) {
+                    releaseLaterResponse();
+                    await laterFinished;
+                }
+                return {
+                    schemaVersion: 1 as const,
+                    waitMs: 0,
+                    reservedAt: '2026-07-16T12:34:56.789+00:00',
+                };
+            }),
+        };
+        let targetFetches = 0;
+        const fetchFn = vi.fn<typeof fetch>(async input => {
+            const username = new URL(String(input)).searchParams.get('username');
+            if (username === 'later') {
+                markLaterStarted();
+                await laterResponse;
+                return response({}, 429);
+            }
+            targetFetches++;
+            return targetFetches === 1
+                ? response({}, 429)
+                : response({ data: { user: rawUser('target') } });
+        });
+        const sharedDeps = {
+            globalGate,
+            circuit,
+            fetchFn,
+            now: () => 0,
+            sleep: async () => undefined,
+        };
+        const fetchLater = makeWebProfileFetcher({
+            ...sharedDeps,
+            env: env({
+                SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: 'true',
+                SELFHOSTED_PROFILE_RETRIES: '0',
+            }),
+        });
+        const fetchTarget = makeWebProfileFetcher({
+            ...sharedDeps,
+            env: env({
+                SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: 'true',
+                SELFHOSTED_PROFILE_RETRIES: '1',
+            }),
+        });
+
+        const laterCall = fetchLater('later')
+            .catch(() => undefined)
+            .finally(markLaterFinished);
+        await laterStarted;
+
+        await expect(fetchTarget('target')).rejects.toThrow('circuit is open');
+        await laterCall;
+        expect(fetchFn).toHaveBeenCalledTimes(2);
+        expect(targetFetches).toBe(1);
     });
 
     it('builds the default full and admission fetchers around one shared global gate', async () => {

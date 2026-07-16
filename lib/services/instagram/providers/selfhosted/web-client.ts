@@ -72,10 +72,26 @@ export function classifyWebProfileFailure(
     });
 }
 
+declare const webProfileCircuitRetryPermitBrand: unique symbol;
+declare const webProfileCircuitAttemptPermitBrand: unique symbol;
+
+export interface WebProfileCircuitRetryPermit {
+    readonly [webProfileCircuitRetryPermitBrand]: true;
+}
+
+export interface WebProfileCircuitAttemptPermit {
+    readonly [webProfileCircuitAttemptPermitBrand]: true;
+}
+
 export interface WebProfileCircuitBreaker {
-    assertAvailable(allowProbe: boolean): void;
-    recordSuccess(): void;
-    recordFailure(error: WebProfileRequestError, config: WebProfileRuntimeConfig): void;
+    acquireAttempt(retryPermit?: WebProfileCircuitRetryPermit): WebProfileCircuitAttemptPermit;
+    assertAvailable(attemptPermit: WebProfileCircuitAttemptPermit): void;
+    recordSuccess(attemptPermit: WebProfileCircuitAttemptPermit): void;
+    recordFailure(
+        error: WebProfileRequestError,
+        config: WebProfileRuntimeConfig,
+        attemptPermit: WebProfileCircuitAttemptPermit
+    ): WebProfileCircuitRetryPermit | undefined;
 }
 
 interface WebProfileFetcherDeps {
@@ -163,39 +179,104 @@ export function getWebProfileConfig(
 export function createWebProfileCircuitBreaker(
     now: () => number = Date.now
 ): WebProfileCircuitBreaker {
+    type RetryPermitState = WebProfileCircuitRetryPermit & { generation: number };
+    type AttemptPermitState = WebProfileCircuitAttemptPermit & {
+        generation: number;
+        probe: boolean;
+    };
+
     let openUntil = 0;
     let schemaFailures = 0;
     let transientFailures = 0;
+    let generation = 0;
+    let pendingRetryPermit: RetryPermitState | undefined;
+    let activeProbePermit: AttemptPermitState | undefined;
+
+    const circuitError = () => new WebProfileRequestError(
+        'SCRAPING_ERROR: selfhosted profile circuit is open.',
+        'circuit',
+        false
+    );
+
+    const expireOpenCircuit = (): void => {
+        if (openUntil !== 0 && openUntil <= now()) {
+            openUntil = 0;
+            pendingRetryPermit = undefined;
+            activeProbePermit = undefined;
+        }
+    };
+
+    const openCircuit = (
+        durationMs: number,
+        issueRetryPermit: boolean
+    ): WebProfileCircuitRetryPermit | undefined => {
+        generation++;
+        openUntil = Math.max(openUntil, now() + durationMs);
+        pendingRetryPermit = undefined;
+        activeProbePermit = undefined;
+        if (!issueRetryPermit) return undefined;
+
+        const retryPermit = { generation } as RetryPermitState;
+        pendingRetryPermit = retryPermit;
+        return retryPermit;
+    };
 
     return {
-        assertAvailable(allowProbe: boolean): void {
-            if (!allowProbe && openUntil > now()) {
-                throw new WebProfileRequestError(
-                    'SCRAPING_ERROR: selfhosted profile circuit is open.',
-                    'circuit',
-                    false
-                );
+        acquireAttempt(retryPermit): WebProfileCircuitAttemptPermit {
+            expireOpenCircuit();
+            if (openUntil > now()) {
+                const permit = retryPermit as RetryPermitState | undefined;
+                if (
+                    permit === undefined
+                    || permit !== pendingRetryPermit
+                    || permit.generation !== generation
+                ) {
+                    throw circuitError();
+                }
+                pendingRetryPermit = undefined;
+                const attemptPermit = {
+                    generation,
+                    probe: true,
+                } as AttemptPermitState;
+                activeProbePermit = attemptPermit;
+                return attemptPermit;
+            }
+
+            return { generation, probe: false } as AttemptPermitState;
+        },
+        assertAvailable(attemptPermit): void {
+            expireOpenCircuit();
+            const permit = attemptPermit as AttemptPermitState;
+            if (
+                permit.generation !== generation
+                || (openUntil > now() && permit !== activeProbePermit)
+            ) {
+                throw circuitError();
             }
         },
-        recordSuccess(): void {
+        recordSuccess(attemptPermit): void {
+            const permit = attemptPermit as AttemptPermitState;
+            if (permit.generation !== generation) return;
             openUntil = 0;
             schemaFailures = 0;
             transientFailures = 0;
+            pendingRetryPermit = undefined;
+            activeProbePermit = undefined;
         },
-        recordFailure(error, config): void {
+        recordFailure(error, config, attemptPermit): WebProfileCircuitRetryPermit | undefined {
+            if (attemptPermit === activeProbePermit) activeProbePermit = undefined;
             if (error.kind === 'rate_limit' || error.kind === 'auth') {
-                openUntil = Math.max(
-                    openUntil,
-                    now() + Math.max(config.circuitCooldownMs, error.retryAfterMs ?? 0)
+                return openCircuit(
+                    Math.max(config.circuitCooldownMs, error.retryAfterMs ?? 0),
+                    error.kind === 'rate_limit'
                 );
-                return;
             }
             if (error.kind === 'schema') {
                 schemaFailures++;
                 if (schemaFailures >= config.schemaFailureThreshold) {
-                    openUntil = Math.max(openUntil, now() + config.circuitCooldownMs);
+                    return openCircuit(config.circuitCooldownMs, true);
                 }
-                return;
+                return undefined;
             }
             if (
                 error.kind === 'timeout' ||
@@ -204,9 +285,10 @@ export function createWebProfileCircuitBreaker(
             ) {
                 transientFailures++;
                 if (transientFailures >= config.transientFailureThreshold) {
-                    openUntil = Math.max(openUntil, now() + config.circuitCooldownMs);
+                    return openCircuit(config.circuitCooldownMs, false);
                 }
             }
+            return undefined;
         },
     };
 }
@@ -386,16 +468,18 @@ function makeWebProfileFetcherForMode(
         );
         const { url } = buildRequest(profileUrl(username), transport);
         let lastError: unknown;
-        let allowCircuitProbe = false;
+        let retryPermit: WebProfileCircuitRetryPermit | undefined;
 
         for (let attempt = 0; attempt <= config.retries; attempt++) {
+            const attemptPermit = circuit.acquireAttempt(retryPermit);
+            retryPermit = undefined;
             try {
-                circuit.assertAvailable(allowCircuitProbe);
+                circuit.assertAvailable(attemptPermit);
                 const result = await gate.schedule(async () => {
-                    circuit.assertAvailable(allowCircuitProbe);
+                    circuit.assertAvailable(attemptPermit);
                     if (globalGateConfig.enabled) {
                         await globalGate.reserveAndWait(globalGateConfig.minIntervalMs);
-                        circuit.assertAvailable(allowCircuitProbe);
+                        circuit.assertAvailable(attemptPermit);
                     }
                     options.onRequest?.();
                     const controller = new AbortController();
@@ -431,7 +515,7 @@ function makeWebProfileFetcherForMode(
                         clearTimeout(timer);
                     }
                 }, config.minIntervalMs);
-                circuit.recordSuccess();
+                circuit.recordSuccess(attemptPermit);
                 return result;
             } catch (error) {
                 const classified = error instanceof WebProfileRequestError
@@ -448,9 +532,8 @@ function makeWebProfileFetcherForMode(
                           true
                       );
                 lastError = classified;
-                circuit.recordFailure(classified, config);
+                retryPermit = circuit.recordFailure(classified, config, attemptPermit);
                 if (!classified.retryable || attempt >= config.retries) break;
-                allowCircuitProbe = classified.kind === 'rate_limit' || classified.kind === 'schema';
                 const backoffMs = config.retryBaseDelayMs * 2 ** attempt;
                 await wait(Math.max(backoffMs, classified.retryAfterMs ?? 0));
             }

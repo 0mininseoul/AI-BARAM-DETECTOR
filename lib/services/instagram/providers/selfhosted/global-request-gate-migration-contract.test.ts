@@ -1,10 +1,12 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
+const migrationsDirectory = join(process.cwd(), 'supabase/migrations');
+const migrationFileName = '20260716130001_add_selfhosted_profile_global_gate.sql';
 const migration = readFileSync(join(
-    process.cwd(),
-    'supabase/migrations/20260716071911_add_selfhosted_profile_global_gate.sql'
+    migrationsDirectory,
+    migrationFileName
 ), 'utf8');
 
 function tableDefinition(): string {
@@ -24,6 +26,16 @@ function functionDefinition(): string {
 }
 
 describe('selfhosted profile global request-start gate migration', () => {
+    it('sorts strictly after the latest migration already deployed remotely', () => {
+        const migrationNames = readdirSync(migrationsDirectory).sort();
+        const latestRemoteMigration = '20260716130000_allow_carousel_child_captions.sql';
+
+        expect(migrationNames).toContain(latestRemoteMigration);
+        expect(migrationNames.indexOf(migrationFileName)).toBeGreaterThan(
+            migrationNames.indexOf(latestRemoteMigration)
+        );
+    });
+
     it('creates and seeds exactly one PII-free constrained singleton row', () => {
         const table = tableDefinition();
         expect(table).toMatch(

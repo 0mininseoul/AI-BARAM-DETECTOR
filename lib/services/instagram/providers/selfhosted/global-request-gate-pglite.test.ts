@@ -4,7 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 const migration = readFileSync(
     new URL(
-        '../../../../../supabase/migrations/20260716071911_add_selfhosted_profile_global_gate.sql',
+        '../../../../../supabase/migrations/20260716130001_add_selfhosted_profile_global_gate.sql',
         import.meta.url
     ),
     'utf8'
@@ -18,6 +18,10 @@ interface Reservation {
 
 interface ReservationRow {
     result: Reservation;
+}
+
+interface GateStateRow {
+    nextStartAt: string;
 }
 
 let db: PGlite;
@@ -67,20 +71,33 @@ describe('selfhosted profile global request-start gate PGlite contract', () => {
         await db.close();
     });
 
-    it('advances deterministic reservations by the exact requested interval', async () => {
-        const first = await reserve(750);
-        const second = await reserve(750);
-        const third = await reserve(750);
+    it('serializes overlapping callers into unique interval-spaced reservations', async () => {
+        const reservations = await Promise.all([
+            reserve(750),
+            reserve(750),
+            reserve(750),
+        ]);
+        const reservedTimes = reservations
+            .map(reservation => Date.parse(reservation.reservedAt))
+            .sort((left, right) => left - right);
+        const gateState = await db.query<GateStateRow>(`
+            SELECT next_start_at::TEXT AS "nextStartAt"
+            FROM public.selfhosted_profile_request_start_gate
+            WHERE singleton IS TRUE
+        `);
 
-        expect(Object.keys(first).sort()).toEqual(['reservedAt', 'schemaVersion', 'waitMs']);
-        expect(first.schemaVersion).toBe(1);
-        expect(second.schemaVersion).toBe(1);
-        expect(third.schemaVersion).toBe(1);
-        expect(Date.parse(second.reservedAt) - Date.parse(first.reservedAt)).toBe(750);
-        expect(Date.parse(third.reservedAt) - Date.parse(second.reservedAt)).toBe(750);
-        expect(second.waitMs).toBeGreaterThan(first.waitMs);
-        expect(third.waitMs).toBeGreaterThan(second.waitMs);
-        expect(third.waitMs).toBeLessThanOrEqual(300_000);
+        expect(Object.keys(reservations[0]).sort()).toEqual([
+            'reservedAt',
+            'schemaVersion',
+            'waitMs',
+        ]);
+        expect(reservations.map(reservation => reservation.schemaVersion)).toEqual([1, 1, 1]);
+        expect(new Set(reservedTimes)).toHaveLength(3);
+        expect(reservedTimes[1] - reservedTimes[0]).toBe(750);
+        expect(reservedTimes[2] - reservedTimes[1]).toBe(750);
+        expect(Math.max(...reservations.map(reservation => reservation.waitMs)))
+            .toBeLessThanOrEqual(300_000);
+        expect(Date.parse(gateState.rows[0].nextStartAt) - reservedTimes[2]).toBe(750);
     });
 
     it('rejects invalid intervals and direct table access for service_role', async () => {

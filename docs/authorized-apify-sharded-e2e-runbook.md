@@ -32,12 +32,13 @@ The worker must have Secret Manager references for every slot named by the polic
 
 ## Pre-run checks
 
-1. Confirm the deployed Vercel and Cloud Run commit SHAs match the reviewed main commit.
-2. Confirm the database migration is applied and the worker can load `accessMode` plus the optional request-bound policy.
-3. Confirm all five Apify slots resolve to distinct intended test accounts without displaying token values.
-4. In the browser session, confirm the Supabase user email is exactly `ym1113@kakao.com` and record its UUID.
-5. Confirm the preflight target is exactly `0_min._.00`, the selected plan is eligible, and the girlfriend exclusion decision is explicit.
-6. Confirm the self-hosted global-gate migration is applied and both Vercel and Cloud Run use `SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED=true` with `SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS=750`. A coordination failure must stop the direct Instagram request; it must not be bypassed for an E2E.
+1. Apply `20260716130001_add_selfhosted_profile_global_gate.sql` through the normal ordered migration path. Do not use `--include-all`.
+2. Only after that migration succeeds, deploy and enable the reviewed commit on Vercel and Cloud Run, then confirm both deployed SHAs match it.
+3. Confirm the worker can load `accessMode` plus the optional request-bound policy.
+4. Confirm all five Apify slots resolve to distinct intended test accounts without displaying token values.
+5. In the browser session, confirm the Supabase user email is exactly `ym1113@kakao.com` and record its UUID.
+6. Confirm the preflight target is exactly `0_min._.00`, the selected plan is eligible, and the girlfriend exclusion decision is explicit.
+7. Confirm both Vercel and Cloud Run use `SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED=true` with `SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS=750`. A coordination failure must stop the direct Instagram request; it must not be bypassed for an E2E.
 
 ### Free Actor API quota
 
