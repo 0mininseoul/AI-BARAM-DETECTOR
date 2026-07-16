@@ -17,7 +17,12 @@ import type {
     AnalysisV2RelationshipStagingSnapshot,
     AnalysisV2TargetEvidenceStagingSnapshot,
 } from './v2-evidence-store';
-import type { AnalysisV2ResultCheckpointManifest } from './v2-result-store';
+import {
+    createSupabaseAnalysisV2ResultStore,
+    type AnalysisV2ProfileClassificationRow,
+    type AnalysisV2ResultCheckpointManifest,
+    type AnalysisV2ResultSupabaseClient,
+} from './v2-result-store';
 import type { AnalysisV2StageExecutorContext, AnalysisV2StageId } from './v2-worker';
 import type { AnalysisV2AiStageRuntime } from './v2-ai-stage-runtime';
 import type { AnalysisV2MediaArtifactStore } from './v2-media-artifact-store';
@@ -955,6 +960,247 @@ describe('V2 AI and scoring executors', () => {
             normalizedCount: 9,
             failures: [],
         });
+    });
+
+    it('checkpoints every triage-referenced post for an early-exit man', async () => {
+        const memoryState = memory();
+        const baseAccount = profile('man.triage_posts', { postCount: 2 });
+        const sharedUrl = 'https://cdninstagram.com/triage/shared.jpg';
+        const carouselPost = {
+            ...baseAccount.latestPosts![0]!,
+            id: 'triage-carousel-post',
+            shortCode: 'triagecarouselpost',
+            type: 'carousel' as const,
+            imageUrl: 'https://cdninstagram.com/triage/carousel-cover.jpg',
+            mediaItems: [{
+                id: 'triage-carousel-first',
+                type: 'image' as const,
+                imageUrl: 'https://cdninstagram.com/triage/carousel-first.jpg',
+            }, {
+                id: 'triage-carousel-middle',
+                type: 'image' as const,
+                imageUrl: sharedUrl,
+            }, {
+                id: 'triage-carousel-last',
+                type: 'image' as const,
+                imageUrl: 'https://cdninstagram.com/triage/carousel-last.jpg',
+            }],
+            declaredMediaCount: 3,
+            childrenComplete: true,
+            taggedUsers: ['tagged.carousel'],
+            mentionedUsers: ['mentioned.carousel'],
+        };
+        const laterPost = {
+            ...baseAccount.latestPosts![1]!,
+            id: 'triage-later-post',
+            shortCode: 'triagelaterpost',
+            imageUrl: sharedUrl,
+            taggedUsers: ['tagged.later'],
+            mentionedUsers: ['mentioned.later'],
+        };
+        const account: AnalysisV2CheckpointProfile = {
+            ...baseAccount,
+            latestPosts: [laterPost, carouselPost],
+        };
+        const rpc = vi.fn<(
+            name: string,
+            params: Record<string, unknown>
+        ) => Promise<{
+            data: AnalysisV2ResultCheckpointManifest;
+            error: null;
+        }>>(async () => ({
+            data: resultManifest('track:profile-ai:batch:0', 1),
+            error: null,
+        }));
+        const resultStore = createSupabaseAnalysisV2ResultStore({
+            rpc,
+        } as AnalysisV2ResultSupabaseClient);
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: [account.username],
+                    results: [{
+                        username: account.username,
+                        status: 'success' as const,
+                        profile: account,
+                    }],
+                })),
+            },
+            resultStore,
+        });
+        deps.ai.gender = vi.fn(async (
+            input: Parameters<AnalysisV2AiStageRuntime['gender']>[0]
+        ) => ({
+            result: triage(input.media.map(row => row.selectionId), 'male'),
+            operationKey: `gender-triage:${digest('triage-post-projection-male')}`,
+            resultHash: digest('triage-post-projection-male-result'),
+            source: 'checkpoint' as const,
+        }));
+        const base = state();
+
+        await createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0',
+                batch: 0,
+                state: state({
+                    relationships: {
+                        ...base.relationships!,
+                        detectedMutualCount: 1,
+                        publicCount: 1,
+                        detailedSelectedPublicCount: 1,
+                        profileBatches: [{
+                            batch: 0,
+                            itemCount: 1,
+                            inputHash: digest('profile-topology-triage-posts'),
+                        }],
+                    },
+                    profileFetchBatches: [{
+                        batch: 0,
+                        itemCount: 1,
+                        producerInputHash: digest('profile-producer-triage-posts'),
+                        revision: 1,
+                        resultHash: digest('profile-result-triage-posts'),
+                    }],
+                }),
+            })
+        );
+
+        const genderInput = vi.mocked(deps.ai.gender).mock.calls[0]![0];
+        expect(genderInput.media.flatMap(media => (
+            media.postId ? [media.postId] : []
+        ))).toEqual(['triage-carousel-post', 'triage-later-post']);
+        expect(deps.ai.features).not.toHaveBeenCalled();
+        const rows = rpc.mock.calls[0]![1].p_rows as AnalysisV2ProfileClassificationRow[];
+        expect(rows[0]!.classification).toBe('verified_non_female');
+        expect(rows[0]!.mediaContext!.selectionIds).toEqual(
+            genderInput.media.map(media => media.selectionId)
+        );
+        expect(rows[0]!.mediaContext!.posts).toEqual([{
+            postId: 'triage-later-post',
+            taggedUsers: ['tagged.later'],
+            mentionedUsers: ['mentioned.later'],
+        }, {
+            postId: 'triage-carousel-post',
+            taggedUsers: ['tagged.carousel'],
+            mentionedUsers: ['mentioned.carousel'],
+        }]);
+    });
+
+    it('checkpoints only posts referenced by analyzed media from a twelve-post profile', async () => {
+        const memoryState = memory();
+        const baseAccount = profile('woman.twelve', { postCount: 12 });
+        const unavailablePostId = baseAccount.latestPosts![3]!.id;
+        const remainingPostsInOriginalOrder = [
+            baseAccount.latestPosts![2]!,
+            baseAccount.latestPosts![1]!,
+            ...baseAccount.latestPosts!.slice(3),
+        ];
+        const account: AnalysisV2CheckpointProfile = {
+            ...baseAccount,
+            latestPosts: [{
+                ...baseAccount.latestPosts![0],
+                id: 'newest-carousel-post',
+                shortCode: 'newestcarouselpost',
+                type: 'carousel',
+                imageUrl: 'https://cdninstagram.com/carousel/cover.jpg',
+                mediaItems: Array.from({ length: 5 }, (_, index) => ({
+                    id: `newest-carousel-frame-${index + 1}`,
+                    type: 'image' as const,
+                    caption: `carousel caption ${index + 1}`,
+                    imageUrl: `https://cdninstagram.com/carousel/frame-${index + 1}.jpg`,
+                })),
+                declaredMediaCount: 5,
+                childrenComplete: true,
+                taggedUsers: ['tagged.carousel'],
+                mentionedUsers: ['mentioned.carousel'],
+            }, ...remainingPostsInOriginalOrder.map((post, index) => ({
+                ...post,
+                ...(post.id === unavailablePostId ? { imageUrl: undefined } : {}),
+                taggedUsers: [`tagged.${index + 1}`],
+                mentionedUsers: [`mentioned.${index + 1}`],
+            }))],
+        };
+        const rpc = vi.fn<(
+            name: string,
+            params: Record<string, unknown>
+        ) => Promise<{
+            data: AnalysisV2ResultCheckpointManifest;
+            error: null;
+        }>>(async () => ({
+            data: resultManifest('track:profile-ai:batch:0', 1),
+            error: null,
+        }));
+        const resultStore = createSupabaseAnalysisV2ResultStore({
+            rpc,
+        } as AnalysisV2ResultSupabaseClient);
+        const deps = dependencies(memoryState, {
+            profileBatches: {
+                loadExactBatch: vi.fn(async () => ({
+                    requestedUsernames: [account.username],
+                    results: [{
+                        username: account.username,
+                        status: 'success' as const,
+                        profile: account,
+                    }],
+                })),
+            },
+            resultStore,
+        });
+        const base = state();
+
+        await expect(createAnalysisV2AiScoringExecutorRegistry(deps).profile_ai!(
+            context('profile_ai', {
+                jobKey: 'track:profile-ai:batch:0',
+                batch: 0,
+                state: state({
+                    relationships: {
+                        ...base.relationships!,
+                        detectedMutualCount: 1,
+                        publicCount: 1,
+                        detailedSelectedPublicCount: 1,
+                        profileBatches: [{
+                            batch: 0,
+                            itemCount: 1,
+                            inputHash: digest('profile-topology-twelve-posts'),
+                        }],
+                    },
+                    profileFetchBatches: [{
+                        batch: 0,
+                        itemCount: 1,
+                        producerInputHash: digest('profile-producer-twelve-posts'),
+                        revision: 1,
+                        resultHash: digest('profile-result-twelve-posts'),
+                    }],
+                }),
+            })
+        )).resolves.toBeDefined();
+
+        const featureInput = vi.mocked(deps.ai.features).mock.calls[0]![0];
+        const selectedPostIds = new Set(featureInput.media.flatMap(media => (
+            media.postId ? [media.postId] : []
+        )));
+        const expectedPosts = account.latestPosts!.flatMap(post => (
+            selectedPostIds.has(post.id)
+                ? [{
+                    postId: post.id,
+                    taggedUsers: post.taggedUsers,
+                    mentionedUsers: post.mentionedUsers,
+                }]
+                : []
+        ));
+        const rows = rpc.mock.calls[0]![1].p_rows as AnalysisV2ProfileClassificationRow[];
+        const checkpointPosts = rows[0]!.mediaContext!.posts;
+
+        expect(featureInput.media.filter(media => (
+            media.postId === 'newest-carousel-post'
+        ))).toHaveLength(3);
+        expect(expectedPosts).toHaveLength(7);
+        expect(expectedPosts.map(post => post.postId)).not.toContain(unavailablePostId);
+        expect(checkpointPosts).toEqual(expectedPosts);
+        expect(checkpointPosts).toHaveLength(new Set(
+            checkpointPosts.map(post => post.postId)
+        ).size);
+        expect(checkpointPosts.length).toBeLessThanOrEqual(8);
     });
 
     it('aligns first, middle, and last child captions with the canonical feature selections', async () => {

@@ -129,6 +129,68 @@ describe('mapUserToProfile', () => {
         ]);
     });
 
+    it.each(Array.from({ length: 20 }, (_, index) => index + 1))(
+        'count 없는 GraphSidecar의 유효한 자식 %i개를 완전한 carousel로 추론한다',
+        (childCount) => {
+            const children = Array.from({ length: childCount }, (_, index) => ({
+                node: {
+                    id: `countless-child-${index + 1}`,
+                    __typename: 'GraphImage',
+                    is_video: false,
+                    display_url: `https://cdn.example.com/countless-child-${index + 1}.jpg`,
+                },
+            }));
+            const [post] = mapUserToProfile(userWithPosts([{
+                id: 'sidecar-countless',
+                shortcode: 'COUNTLESS',
+                __typename: 'GraphSidecar',
+                display_url: 'https://cdn.example.com/countless-cover.jpg',
+                is_video: false,
+                taken_at_timestamp: 1_700_000_000,
+                edge_media_to_caption: { edges: [] },
+                edge_media_to_tagged_user: { edges: [] },
+                edge_sidecar_to_children: { edges: children },
+            }])).latestPosts!;
+
+            expect(post).toMatchObject({
+                type: 'carousel',
+                declaredMediaCount: childCount,
+                childrenComplete: true,
+            });
+            expect(post.mediaItems).toHaveLength(childCount);
+        }
+    );
+
+    it.each([
+        ['has_next_page true', { has_next_page: true }],
+        ['has_next_page false', { has_next_page: false }],
+        ['null', null],
+        ['undefined', undefined],
+        ['잘못된 scalar', 'schema-drift'],
+    ])('page_info가 존재하는 count 없는 carousel (%s)을 거부한다', (_label, pageInfo) => {
+        expect(() => mapUserToProfile(userWithPosts([{
+            id: 'sidecar-paginated',
+            shortcode: 'PAGINATED',
+            __typename: 'GraphSidecar',
+            display_url: 'https://cdn.example.com/paginated-cover.jpg',
+            is_video: false,
+            taken_at_timestamp: 1_700_000_000,
+            edge_media_to_caption: { edges: [] },
+            edge_media_to_tagged_user: { edges: [] },
+            edge_sidecar_to_children: {
+                page_info: pageInfo,
+                edges: [{
+                    node: {
+                        id: 'paginated-child',
+                        __typename: 'GraphImage',
+                        is_video: false,
+                        display_url: 'https://cdn.example.com/paginated-child.jpg',
+                    },
+                }],
+            },
+        }]))).toThrow('SCRAPING_INCOMPLETE_ERROR');
+    });
+
     it('공개 프로필의 carousel 선언 또는 자식이 불완전하면 성공으로 확정하지 않는다', () => {
         const childEdges = [
             { node: { id: 'child-1', __typename: 'GraphImage', is_video: false, display_url: 'https://cdn.example.com/child-1.jpg' } },
@@ -147,11 +209,69 @@ describe('mapUserToProfile', () => {
 
         expect(() => mapUserToProfile(userWithPosts([{
             ...base,
-            edge_sidecar_to_children: { edges: childEdges.slice(0, 1) },
+            edge_sidecar_to_children: { count: 2, edges: childEdges.slice(0, 1) },
         }]))).toThrow('SCRAPING_INCOMPLETE_ERROR');
         expect(() => mapUserToProfile(userWithPosts([{
             ...base,
             edge_sidecar_to_children: { count: 2, edges: childEdges },
+        }]))).toThrow('SCRAPING_INCOMPLETE_ERROR');
+    });
+
+    it.each([0, -1, 1.5])(
+        '명시적 carousel count %s가 잘못되면 edges count로 추론하지 않는다',
+        (invalidCount) => {
+            expect(() => mapUserToProfile(userWithPosts([{
+                id: 'sidecar-invalid-count',
+                shortcode: 'INVALIDCOUNT',
+                __typename: 'GraphSidecar',
+                display_url: 'https://cdn.example.com/invalid-count-cover.jpg',
+                is_video: false,
+                taken_at_timestamp: 1_700_000_000,
+                edge_media_to_caption: { edges: [] },
+                edge_media_to_tagged_user: { edges: [] },
+                edge_sidecar_to_children: {
+                    count: invalidCount,
+                    edges: [{
+                        node: {
+                            id: 'valid-child',
+                            __typename: 'GraphImage',
+                            is_video: false,
+                            display_url: 'https://cdn.example.com/valid-child.jpg',
+                        },
+                    }],
+                },
+            }]))).toThrow('SCRAPING_INCOMPLETE_ERROR');
+        }
+    );
+
+    it.each([
+        ['edges 누락', {}],
+        ['0 edges', { edges: [] }],
+        ['child node 누락', { edges: [{}] }],
+        ['유효하지 않은 child', {
+            edges: [{ node: { id: 'invalid-child', __typename: 'GraphImage', is_video: false } }],
+        }],
+        ['중첩 carousel child', {
+            edges: [{
+                node: {
+                    id: 'nested-child',
+                    __typename: 'GraphSidecar',
+                    is_video: false,
+                    display_url: 'https://cdn.example.com/nested-child.jpg',
+                },
+            }],
+        }],
+    ])('count 없는 carousel의 %s 응답을 불완전으로 거부한다', (_label, connection) => {
+        expect(() => mapUserToProfile(userWithPosts([{
+            id: 'sidecar-invalid-edges',
+            shortcode: 'INVALIDEDGES',
+            __typename: 'GraphSidecar',
+            display_url: 'https://cdn.example.com/invalid-edges-cover.jpg',
+            is_video: false,
+            taken_at_timestamp: 1_700_000_000,
+            edge_media_to_caption: { edges: [] },
+            edge_media_to_tagged_user: { edges: [] },
+            edge_sidecar_to_children: connection,
         }]))).toThrow('SCRAPING_INCOMPLETE_ERROR');
     });
 

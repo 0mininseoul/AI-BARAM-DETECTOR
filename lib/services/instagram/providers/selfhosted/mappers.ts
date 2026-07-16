@@ -162,12 +162,19 @@ function mapSidecarChildren(node: Record<string, unknown>): Pick<
             return mapChildMedia((edge as Record<string, unknown>).node);
         })
         .filter((item): item is InstagramPostMediaItem => item !== null);
+    const hasExplicitCount = Object.hasOwn(value, 'count');
+    const hasPageInfo = Object.hasOwn(value, 'page_info');
     const count = value.count;
     const declaredMediaCount = Number.isSafeInteger(count)
         && (count as number) >= 1
         && (count as number) <= MAX_CAROUSEL_CHILDREN
         ? count as number
-        : undefined;
+        : !hasExplicitCount
+            && !hasPageInfo
+            && edges.length >= 1
+            && edges.length <= MAX_CAROUSEL_CHILDREN
+            ? edges.length
+            : undefined;
     const childrenComplete = declaredMediaCount !== undefined
         && edges.length === declaredMediaCount
         && mediaItems.length === declaredMediaCount;
