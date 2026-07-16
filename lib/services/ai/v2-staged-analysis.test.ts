@@ -735,6 +735,42 @@ describe('V2 staged AI services', () => {
         });
     });
 
+    it('neutralizes uncertain relationship fields after clearing valid IDs with no signal', async () => {
+        let checkpointedFeatures: FeatureAnalysisResult['features'] | null = null;
+        mocks.analyzeWithGemini.mockImplementationOnce(async (
+            _prompt: string,
+            _images: string[],
+            options: { schema: { parse(value: unknown): unknown } }
+        ) => {
+            checkpointedFeatures = options.schema.parse(featureResponse({
+                marriageEvidence: 'uncertain',
+                partnerEvidence: 'uncertain',
+                partnerExclusionContext: 'none',
+                evidenceSelectionIds: {
+                    ...featureResponse().evidenceSelectionIds,
+                    marriagePartner: ['post:2:thumbnail'],
+                },
+            })) as FeatureAnalysisResult['features'];
+            return checkpointedFeatures;
+        });
+
+        const result = await featureAnalysis(featureInput(), audit('featureAnalysis'));
+
+        expect(checkpointedFeatures).toMatchObject({
+            marriageEvidence: 'none',
+            partnerEvidence: 'none',
+            partnerExclusionContext: 'none',
+            evidenceSelectionIds: { marriagePartner: [] },
+        });
+        expect(result.features).toMatchObject({
+            marriageEvidence: 'none',
+            partnerEvidence: 'none',
+            partnerExclusionContext: 'none',
+            evidenceSelectionIds: { marriagePartner: [] },
+        });
+        expect(() => featureAnalysisModelResponseSchema.parse(result.features)).not.toThrow();
+    });
+
     it('neutralizes unsupported relationship and gender signals without fabricating evidence', async () => {
         mocks.analyzeWithGemini.mockImplementationOnce(async (
             _prompt: string,

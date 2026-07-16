@@ -869,7 +869,11 @@ function normalizeFeatureResponse(
         || partnerEvidence === 'weak'
         || partnerEvidence === 'strong'
         || partnerExclusionContext !== 'none';
-    if (!hasNormalizedRelationshipSignal) evidenceSelectionIds.marriagePartner = [];
+    if (!hasNormalizedRelationshipSignal) {
+        marriageEvidence = 'none';
+        partnerEvidence = 'none';
+        evidenceSelectionIds.marriagePartner = [];
+    }
 
     const safeOverview = safeOverviewSchema.safeParse(value.oneLineOverview);
     return {
