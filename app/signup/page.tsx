@@ -92,15 +92,8 @@ export default function SignupPage() {
                         <FieldRow label="이름" required note="카카오·구글 계정에서 제공" />
                         <FieldRow label="연락처" required note="카카오계정(전화번호)" />
                         <FieldRow label="이메일" required note="카카오·구글 계정에서 제공" />
-                    </div>
-                </CaseCard>
-
-                {/* 선택 회원정보 */}
-                <CaseCard className="mt-3 p-5">
-                    <span className="eyebrow">선택 회원정보</span>
-                    <div className="mt-2 divide-y divide-line">
-                        <FieldRow label="성별" note="카카오 계정에서 제공 (선택)" />
-                        <FieldRow label="출생 연도" note="카카오 계정에서 제공 (선택)" />
+                        <FieldRow label="성별" required note="카카오 계정에서 제공" />
+                        <FieldRow label="출생 연도" required note="카카오 계정에서 제공" />
                     </div>
                 </CaseCard>
 
