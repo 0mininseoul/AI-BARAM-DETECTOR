@@ -664,6 +664,27 @@ describe('preflight Apify provider-run PGlite contract', () => {
             [requestId, CLAIM_TOKEN]
         );
 
+        const unrelatedPreflightId = '11200000-0000-4000-8000-000000000002';
+        await seedFreshAdmission(unrelatedPreflightId);
+        await db.query(
+            `UPDATE public.analysis_requests
+             SET preflight_id = $2
+             WHERE id = $1`,
+            [requestId, unrelatedPreflightId]
+        );
+        await expect(serviceQuery(
+            `SELECT public.load_analysis_v2_reusable_target_profile_run(
+                $1, 'track:target-evidence:collect', $2, $3
+            )`,
+            [requestId, CLAIM_TOKEN, INPUT_HASH]
+        )).rejects.toThrow(/FENCE_MISMATCH/);
+        await db.query(
+            `UPDATE public.analysis_requests
+             SET preflight_id = $2
+             WHERE id = $1`,
+            [requestId, preflightId]
+        );
+
         await db.query(
             `UPDATE public.analysis_preflights
              SET admission_generation = $2

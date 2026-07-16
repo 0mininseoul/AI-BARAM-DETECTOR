@@ -113,8 +113,9 @@ change does not classify the fallback as proof that logged-out collection is pro
 
 ### Fresh-admission target profile reuse
 
-A successful fresh-admission Apify run is reusable by `track:target-evidence:collect` only when the
-full profile dataset passed schema-v1 validation and the request, target, admission generation, job
+A successful fresh-admission Apify run is reusable by `track:target-evidence:collect` only when its
+bounded full-profile snapshot passed schema-v1 validation (`latestPosts` parser max 10) and the
+request, target, admission generation, job
 input hash, and live lease still match. Replay reads the existing dataset and writes the normal
 profile checkpoint, but does not start another profile Actor, bind a V2 provider-run row, or record
 the cost again. Missing or legacy `NULL` attestations use the existing bound fallback. Malformed

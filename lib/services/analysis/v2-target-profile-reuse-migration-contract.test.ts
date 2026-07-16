@@ -57,6 +57,7 @@ describe('reusable fresh-admission target profile migration', () => {
             "p_job_key IS DISTINCT FROM 'track:target-evidence:collect'",
             "v_request.pipeline_version IS DISTINCT FROM 'v2'",
             "v_request.status NOT IN ('pending', 'processing')",
+            'v_request.preflight_id IS DISTINCT FROM v_preflight.id',
             "v_preflight.status IS DISTINCT FROM 'consumed'",
             'v_preflight.consumed_request_id IS DISTINCT FROM p_request_id',
             'v_preflight.target_instagram_id IS DISTINCT FROM pg_catalog.lower(v_request.target_instagram_id)',
@@ -75,6 +76,25 @@ describe('reusable fresh-admission target profile migration', () => {
         ]) expect(block).toContain(required);
         expect(block).not.toContain("'operationKey'");
         expect(block).not.toContain("'profile'");
+    });
+
+    it('locks preflight, request, then job in the canonical terminal-capable order', () => {
+        const block = functionBlock('load_analysis_v2_reusable_target_profile_run');
+        const preflightLock = block.indexOf('SELECT preflight.*');
+        const requestLock = block.indexOf('SELECT analysis_request.*');
+        const jobLock = block.indexOf('SELECT job.*');
+        const fenceCheck = block.indexOf('\n    IF v_preflight.id', jobLock);
+
+        expect(preflightLock).toBeGreaterThanOrEqual(0);
+        expect(requestLock).toBeGreaterThan(preflightLock);
+        expect(jobLock).toBeGreaterThan(requestLock);
+        expect(fenceCheck).toBeGreaterThan(jobLock);
+        expect(block.slice(preflightLock, requestLock)).toContain(
+            'preflight.consumed_request_id = p_request_id'
+        );
+        expect(block.slice(preflightLock, requestLock)).toContain('FOR UPDATE');
+        expect(block.slice(requestLock, jobLock)).toContain('FOR UPDATE');
+        expect(block.slice(jobLock, fenceCheck)).toContain('FOR UPDATE');
     });
 
     it('keeps both RPCs service-role-only', () => {

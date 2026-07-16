@@ -1,5 +1,6 @@
 -- A fresh-admission profile Actor dataset may be replayed once by target evidence only
--- after the worker has parsed the complete profile schema. The ledger remains PII-free.
+-- after the worker has parsed the bounded full-profile snapshot schema (up to 10 latestPosts).
+-- The ledger remains PII-free.
 
 ALTER TABLE public.analysis_preflight_provider_runs
     ADD COLUMN reusable_profile_schema_version SMALLINT;
@@ -11,7 +12,7 @@ ALTER TABLE public.analysis_preflight_provider_runs
     );
 
 COMMENT ON COLUMN public.analysis_preflight_provider_runs.reusable_profile_schema_version IS
-    'Schema version attested only after a complete fresh-admission profile dataset parse; NULL is never reusable.';
+    'Schema version attested only after the bounded fresh-admission profile snapshot parse; NULL is never reusable.';
 
 CREATE OR REPLACE FUNCTION public.mark_analysis_v2_fresh_admission_profile_run_reusable_v1(
     p_preflight_id UUID,
@@ -133,6 +134,13 @@ BEGIN
             ERRCODE = 'P0001';
     END IF;
 
+    -- Preserve the terminal-capable preflight -> request -> job lock order.
+    SELECT preflight.*
+    INTO v_preflight
+    FROM public.analysis_preflights AS preflight
+    WHERE preflight.consumed_request_id = p_request_id
+    FOR UPDATE;
+
     SELECT analysis_request.*
     INTO v_request
     FROM public.analysis_requests AS analysis_request
@@ -146,10 +154,11 @@ BEGIN
       AND job.job_key = p_job_key
     FOR UPDATE;
 
-    IF v_request.id IS NULL
+    IF v_preflight.id IS NULL
+       OR v_request.id IS NULL
        OR v_request.pipeline_version IS DISTINCT FROM 'v2'
        OR v_request.status NOT IN ('pending', 'processing')
-       OR v_request.preflight_id IS NULL
+       OR v_request.preflight_id IS DISTINCT FROM v_preflight.id
        OR v_job.request_id IS NULL
        OR v_job.status IS DISTINCT FROM 'processing'
        OR v_job.input_hash IS DISTINCT FROM p_job_input_hash
@@ -161,13 +170,7 @@ BEGIN
             ERRCODE = 'P0001';
     END IF;
 
-    SELECT preflight.*
-    INTO v_preflight
-    FROM public.analysis_preflights AS preflight
-    WHERE preflight.id = v_request.preflight_id
-    FOR UPDATE;
-    IF NOT FOUND
-       OR v_preflight.status IS DISTINCT FROM 'consumed'
+    IF v_preflight.status IS DISTINCT FROM 'consumed'
        OR v_preflight.consumed_request_id IS DISTINCT FROM p_request_id
        OR v_preflight.target_instagram_id IS DISTINCT FROM pg_catalog.lower(v_request.target_instagram_id)
        OR v_preflight.admission_generation NOT BETWEEN 1 AND 100

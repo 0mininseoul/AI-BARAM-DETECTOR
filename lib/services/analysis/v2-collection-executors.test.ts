@@ -1290,7 +1290,7 @@ describe('analysis V2 concrete collection executors', () => {
         expect(providers.bindAdapterCheckpoint).not.toHaveBeenCalled();
     });
 
-    it('fails a malformed reusable replay closed and never binds a replacement Actor', async () => {
+    it('seals a malformed reusable replay and never retries or binds a replacement Actor', async () => {
         const primary = [failure('target')] as AnalysisV2ProfileFetchResume['primaryResults'];
         const profileStore = inMemoryProfileStore({
             requestId,
@@ -1304,13 +1304,39 @@ describe('analysis V2 concrete collection executors', () => {
         });
         const providers = providerStore();
         const reusable = reusableTargetProfileRunStore();
+        const fallbackSchemaFailure = [{
+            outcome: {
+                requestedUsername: 'target',
+                source: 'apify' as const,
+                status: 'failed' as const,
+                failureCategory: 'schema' as const,
+                httpStatus: null,
+                requestCount: 1,
+                latencyMs: 10,
+                capturedAt,
+            },
+        }] as ProfileAttemptResult[];
+        const observedProviderRuns: Array<Parameters<
+            typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2
+        >[1]['providerRun']> = [];
         const fetcher = vi.fn(async (
             requested: readonly string[],
             options: Parameters<typeof import('@/lib/services/instagram/scraper').getProfilesBatchV2>[1]
         ) => {
-            void requested;
-            void options;
-            throw new Error('SCRAPING_SCHEMA_ERROR: replayed latestPosts malformed');
+            observedProviderRuns.push(options.providerRun);
+            await options.persistAttemptOutcomes({
+                attempt: 'fallback',
+                source: 'apify',
+                requestedUsernames: requested,
+                results: fallbackSchemaFailure,
+            });
+            return {
+                results: fallbackSchemaFailure,
+                profiles: [],
+                primaryResults: primary,
+                fallbackResults: fallbackSchemaFailure,
+                frozenUnresolvedUsernames: ['target'],
+            };
         });
         const executor = createAnalysisV2TargetEvidenceExecutor({
             requestContextStore: contextStore(requestContext()),
@@ -1321,13 +1347,26 @@ describe('analysis V2 concrete collection executors', () => {
         });
 
         await expect(executor(stageContext('target_evidence', state())))
-            .rejects.toThrow('SCRAPING_SCHEMA_ERROR');
+            .rejects.toThrow('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
         await expect(executor(stageContext('target_evidence', state())))
-            .rejects.toThrow('SCRAPING_SCHEMA_ERROR');
+            .rejects.toThrow('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
 
-        expect(fetcher.mock.calls.map(([, options]) => options.providerRun?.resumeRunId))
-            .toEqual(['FreshAdmissionRun123', 'FreshAdmissionRun123']);
+        expect(fetcher).toHaveBeenCalledOnce();
+        expect(profileStore.store.checkpointFallback).toHaveBeenCalledOnce();
+        expect(profileStore.current()?.fallbackResults).toEqual(fallbackSchemaFailure);
+        expect(observedProviderRuns).toEqual([expect.objectContaining({
+            resumeRunId: 'FreshAdmissionRun123',
+            logicalProvider: 'apify',
+            actorId: 'apify/instagram-profile-scraper',
+            credentialSlot: 'quinary',
+            maxChargeUsd: 0.0026,
+        })]);
+        expect(observedProviderRuns[0]?.startReserved).toBeUndefined();
+        expect(observedProviderRuns[0]?.onBeforeRunStart).toBeUndefined();
+        expect(observedProviderRuns[0]?.onRunStarted).toBeUndefined();
+        expect(reusable.load).toHaveBeenCalledOnce();
         expect(providers.bindAdapterCheckpoint).not.toHaveBeenCalled();
+        expect(providers.load).not.toHaveBeenCalled();
     });
 
     it('never loads target reuse for a non-target profile batch', async () => {

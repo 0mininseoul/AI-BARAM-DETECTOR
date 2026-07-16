@@ -19,7 +19,7 @@
 
 ## V2 과금 경로
 
-결제 전 대상 프로필 사전 점검은 로그인 없는 자체 summary 수집을 먼저 시도한다. 대상 없음이 자체 수집에서 명시적으로 확인되면 유료 fallback을 실행하지 않는다. 분류된 자체 provider 실패일 때만 최초 preflight operation과 각 fresh-admission generation이 각각 Apify profile fallback 1회를 허용한다. fresh-admission fallback은 최신 게시물을 포함한 full-profile schema를 검증한 뒤만 해당 run을 schema v1으로 표시한다. 각 실행 전 별도의 원장 행을 예약하고 `maxTotalChargeUsd=$0.0026`을 고정하며, 같은 operation/generation의 retry는 저장된 run ID만 재개한다. 최초 실행과 fresh generation 1회가 모두 fallback하면 합산 상한은 `$0.0052`다. Instagram 로그인 쿠키나 세션은 전달하지 않는다.
+결제 전 대상 프로필 사전 점검은 로그인 없는 자체 summary 수집을 먼저 시도한다. 대상 없음이 자체 수집에서 명시적으로 확인되면 유료 fallback을 실행하지 않는다. 분류된 자체 provider 실패일 때만 최초 preflight operation과 각 fresh-admission generation이 각각 Apify profile fallback 1회를 허용한다. fresh-admission fallback은 최신 게시물 parser가 최대 10건까지 검증한 bounded full-profile snapshot/schema를 통과한 뒤만 해당 run을 schema v1으로 표시한다. 각 실행 전 별도의 원장 행을 예약하고 `maxTotalChargeUsd=$0.0026`을 고정하며, 같은 operation/generation의 retry는 저장된 run ID만 재개한다. 최초 실행과 fresh generation 1회가 모두 fallback하면 합산 상한은 `$0.0052`다. Instagram 로그인 쿠키나 세션은 전달하지 않는다.
 
 1. 대상/공개 맞팔 프로필은 로그인 없는 자체 수집기를 먼저 사용한다.
 2. 자체 수집의 username별 terminal 결과를 먼저 저장하고, **그 스냅샷에서 정확히 unresolved인 username만** Apify profile fallback 입력으로 고정한다. target-evidence는 현재 consumed preflight의 같은 target/generation에 schema-v1 표시된 fresh run이 있으면 그 dataset을 1회 재해석한다. 이 경우 새 Actor나 `analysis_v2_provider_runs` 행을 만들지 않고 비용은 preflight에만 귀속한다. 표시된 run이 없으면 기존 bound fallback을 실행한다.
