@@ -10,7 +10,7 @@ const migration = readFileSync(
 );
 const childCaptionMigration = readFileSync(
     new URL(
-        '../../../supabase/migrations/20260716013159_allow_carousel_child_captions.sql',
+        '../../../supabase/migrations/20260716130000_allow_carousel_child_captions.sql',
         import.meta.url
     ),
     'utf8'

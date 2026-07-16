@@ -16,7 +16,7 @@
 - `lib/services/instagram/providers/apify.ts`: parse `childPosts.caption` and merge exact slide mentions.
 - `lib/services/instagram/providers/selfhosted/mappers.ts`: parse child caption shapes and merge exact slide mentions.
 - `lib/services/analysis/v2-profile-fetch-store.ts`: private checkpoint validation for child captions.
-- `supabase/migrations/20260716013159_allow_carousel_child_captions.sql`: database JSON validator replacement.
+- `supabase/migrations/20260716130000_allow_carousel_child_captions.sql`: database JSON validator replacement.
 - `lib/domain/analysis/carousel-caption-policy.ts`: pure selection, normalization, deduplication, alignment, and 2,000-character dossier packing.
 - `lib/services/ai/v2-staged-analysis.ts`: bounded partner-contact caption context and narrative dossier schemas/prompts.
 - `lib/services/analysis/v2-ai-scoring-executors.ts`: wire the pure policy into existing calls only.
@@ -100,7 +100,7 @@ Expected: PASS, then a focused regression commit.
 - Test: `lib/services/instagram/providers/selfhosted/mappers.test.ts`
 - Test: `lib/services/analysis/v2-profile-fetch-store.test.ts`
 - Test: `lib/services/analysis/v2-profile-fetch-migration-contract.test.ts`
-- Create: `supabase/migrations/20260716013159_allow_carousel_child_captions.sql`
+- Create: `supabase/migrations/20260716130000_allow_carousel_child_captions.sql`
 
 - [ ] **Step 1: Write provider and checkpoint failures first**
 
@@ -172,7 +172,7 @@ Keep the existing media-URL `superRefine` unchanged.
 
 - [ ] **Step 5: Implement the generated Supabase migration**
 
-Populate `supabase/migrations/20260716013159_allow_carousel_child_captions.sql` by copying the existing `public.analysis_v2_valid_profile_snapshot(JSONB)` body and changing only child-media validation so `caption` is allowed and, when present, is a JSON string no longer than 2,200 characters:
+Populate `supabase/migrations/20260716130000_allow_carousel_child_captions.sql` by copying the existing `public.analysis_v2_valid_profile_snapshot(JSONB)` body and changing only child-media validation so `caption` is allowed and, when present, is a JSON string no longer than 2,200 characters:
 
 ```sql
 OR media_item.value - ARRAY[
