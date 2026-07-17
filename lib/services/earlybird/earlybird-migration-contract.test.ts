@@ -30,7 +30,7 @@ describe('Groble earlybird migration contract', () => {
         expect(migration).toContain('CREATE UNIQUE INDEX earlybird_orders_plan_sequence_unique');
     });
 
-    it('grants browser reads only for owner-scoped orders and waitlist rows', () => {
+    it('grants browser reads only for owner-scoped, presentation-safe order columns', () => {
         expect(migration).toMatch(
             /CREATE POLICY earlybird_orders_owner_select[\s\S]*?FOR SELECT[\s\S]*?\(SELECT auth\.uid\(\)\) = user_id/
         );
@@ -40,8 +40,18 @@ describe('Groble earlybird migration contract', () => {
         expect(migration).toContain(
             'REVOKE ALL ON TABLE public.earlybird_orders FROM anon, authenticated'
         );
-        expect(migration).toContain(
+        expect(migration).toMatch(
+            /GRANT SELECT \([\s\S]*?target_instagram_id[\s\S]*?actual_amount_krw[\s\S]*?plan_sequence[\s\S]*?\)\s+ON public\.earlybird_orders TO authenticated/
+        );
+        expect(migration).not.toContain(
             'GRANT SELECT ON TABLE public.earlybird_orders TO authenticated'
+        );
+        const authenticatedOrderGrant = migration.match(
+            /GRANT SELECT \(([\s\S]*?)\)\s+ON public\.earlybird_orders TO authenticated/
+        )?.[1];
+        expect(authenticatedOrderGrant).toBeDefined();
+        expect(authenticatedOrderGrant).not.toMatch(
+            /payment_id|expected_groble_product_id|actual_groble_product_id|disclosure_text/
         );
         expect(migration).not.toMatch(/GRANT (?:INSERT|UPDATE|DELETE).*authenticated/i);
     });

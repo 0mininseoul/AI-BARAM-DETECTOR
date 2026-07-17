@@ -183,7 +183,19 @@ REVOKE ALL ON TABLE public.earlybird_orders FROM anon, authenticated;
 REVOKE ALL ON TABLE public.earlybird_plan_inventory FROM anon, authenticated;
 REVOKE ALL ON TABLE public.earlybird_webhook_events FROM anon, authenticated;
 REVOKE ALL ON TABLE public.earlybird_waitlist FROM anon, authenticated;
-GRANT SELECT ON TABLE public.earlybird_orders TO authenticated;
+GRANT SELECT (
+    id,
+    user_id,
+    target_instagram_id,
+    plan_id,
+    actual_amount_krw,
+    status,
+    paid_at,
+    due_at,
+    plan_sequence,
+    result_request_id,
+    created_at
+) ON public.earlybird_orders TO authenticated;
 GRANT SELECT ON TABLE public.earlybird_waitlist TO authenticated;
 GRANT ALL ON TABLE public.earlybird_orders TO service_role;
 GRANT ALL ON TABLE public.earlybird_plan_inventory TO service_role;
