@@ -105,7 +105,17 @@ export async function POST(request: Request): Promise<NextResponse> {
         let payment;
         try {
             payment = parseGroblePaymentCompletedEvent(rawBody);
-        } catch {
+        } catch (error) {
+            if (envelope.eventId.startsWith('evt_test_') && error instanceof z.ZodError) {
+                const invalidFields = Array.from(new Set(
+                    error.issues.map(issue => issue.path.join('.')).filter(Boolean)
+                )).sort();
+                return response(400, {
+                    received: false,
+                    code: 'INVALID_PAYMENT_PAYLOAD',
+                    invalidFields,
+                });
+            }
             return response(400, { received: false, code: 'INVALID_PAYMENT_PAYLOAD' });
         }
         try {
