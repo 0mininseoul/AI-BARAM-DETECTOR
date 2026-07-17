@@ -105,6 +105,19 @@ describe('signed Groble webhook route', () => {
         expect(mocks.rpc).not.toHaveBeenCalled();
     });
 
+    it('returns a retryable response when webhook server configuration is unavailable', async () => {
+        delete process.env.GROBLE_WEBHOOK_SECRET;
+
+        const response = await POST(request(JSON.stringify(payload())));
+
+        expect(response.status).toBe(503);
+        await expect(response.json()).resolves.toEqual({
+            received: false,
+            code: 'WEBHOOK_CONFIGURATION_UNAVAILABLE',
+        });
+        expect(mocks.rpc).not.toHaveBeenCalled();
+    });
+
     it('moves a paid order to refund review for an official cancellation request', async () => {
         const completed = payload();
         const body = JSON.stringify({

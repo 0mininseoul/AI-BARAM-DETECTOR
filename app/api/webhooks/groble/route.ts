@@ -64,6 +64,14 @@ export async function POST(request: Request): Promise<NextResponse> {
     let config;
     try {
         config = readGrobleConfig();
+    } catch {
+        return response(503, {
+            received: false,
+            code: 'WEBHOOK_CONFIGURATION_UNAVAILABLE',
+        });
+    }
+
+    try {
         verifyGrobleWebhookSignature({
             rawBody,
             timestamp: request.headers.get('x-groble-timestamp'),
