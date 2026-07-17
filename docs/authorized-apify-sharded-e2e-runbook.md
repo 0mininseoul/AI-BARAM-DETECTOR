@@ -14,12 +14,15 @@ This runbook applies only to the explicitly authorized `0_min._.00` E2E. It does
 
 ## Policy configuration
 
-Set these non-secret variables on the entitlement intake runtime for the authorized run:
+Set the authorized-test variables below on the entitlement intake runtime. Set the normal-slot
+variable shown in the same block on both the intake and worker so `primary` is effective before and
+after request dispatch:
 
 ```dotenv
 ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=true
 ANALYSIS_V2_AUTHORIZED_TEST_SHARD_TARGET=0_min._.00
 ANALYSIS_V2_AUTHORIZED_TEST_OWNER_USER_ID=974247fa-8d0e-4ab7-b6d2-ddf256ad6bdd
+ANALYSIS_V2_APIFY_API_TOKEN_SLOT=primary
 ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWERS_SLOT=secondary
 ANALYSIS_V2_AUTHORIZED_TEST_RELATIONSHIP_FOLLOWING_SLOT=quinary
 ANALYSIS_V2_AUTHORIZED_TEST_PROFILE_FALLBACK_SLOT=primary
@@ -36,19 +39,26 @@ differ.
 
 Use this mapping only if immediate read-only balance checks, exact Actor daily item and run quota
 checks, and active/latest Secret Manager references all confirm the intended accounts have enough
-headroom. Never rotate a numeric secret version to force this mapping. The worker must have Secret
-Manager references for every slot named by the policy. The normal selected slot and its single-slot
-behavior remain unchanged.
+headroom. Both the intake and worker must resolve their effective normal selected slot to `primary`
+through the current active primary Secret Manager reference. Never rotate a numeric secret version
+to force this mapping or the normal-slot selection. The worker must have Secret Manager references
+for every slot named by the policy.
+
+Fresh-admission/preflight target-profile fallback occurs before request-bound sharding is bound and
+therefore uses the effective normal selected slot. That slot must be `primary`, matching the
+request-bound `target-profile` and `profile-fallback` entries, so the schema-v1 attested preflight
+run can be reused consistently after the request is created.
 
 ## Pre-run checks
 
 1. Apply migrations through `20260717120000_fix_analysis_v2_checkpoint_contracts.sql` using the normal ordered migration path. Do not use `--include-all`.
 2. Only after that migration succeeds, deploy and enable the reviewed commit on Vercel and Cloud Run, then confirm both deployed SHAs match it.
 3. Confirm the worker can load `accessMode` plus the optional request-bound policy.
-4. Confirm every credential slot referenced by the policy resolves to its intended physical account without displaying token values.
-5. In the browser session, confirm the Supabase user email is exactly `ym1113@kakao.com` and record its UUID.
-6. Confirm the preflight target is exactly `0_min._.00`, the selected plan is eligible, and the girlfriend exclusion decision is explicit.
-7. Confirm both Vercel and Cloud Run use `SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED=true`, `SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS=750`, and `SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS=100`. A coordination failure or guard overrun must stop the direct Instagram request; it must not be bypassed for an E2E.
+4. Confirm both intake and worker have effective normal selected slot `primary`, resolved through the current active primary secret reference without rotating to a numeric secret version.
+5. Confirm every credential slot referenced by the policy resolves to its intended physical account without displaying token values.
+6. In the browser session, confirm the Supabase user email is exactly `ym1113@kakao.com` and record its UUID.
+7. Confirm the preflight target is exactly `0_min._.00`, the selected plan is eligible, and the girlfriend exclusion decision is explicit.
+8. Confirm both Vercel and Cloud Run use `SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED=true`, `SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS=750`, and `SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS=100`. A coordination failure or guard overrun must stop the direct Instagram request; it must not be bypassed for an E2E.
 
 ### Free Actor API quota
 
