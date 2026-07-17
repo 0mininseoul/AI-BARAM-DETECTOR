@@ -38,6 +38,11 @@ const paymentCompletedSchema = z.object({
     }),
 });
 
+const eventEnvelopeSchema = z.object({
+    id: boundedIdentifier,
+    type: z.string().trim().min(1).max(64),
+});
+
 export interface VerifyGrobleWebhookSignatureInput {
     rawBody: string;
     timestamp: string | null;
@@ -56,6 +61,11 @@ export interface GroblePaymentCompletedEvent {
     productId: string;
     amountKrw: number;
     paidAt: string;
+}
+
+export interface GrobleEventEnvelope {
+    eventId: string;
+    type: string;
 }
 
 function calculateSignature(secret: string, timestamp: string, rawBody: string): Buffer {
@@ -114,4 +124,10 @@ export function parseGroblePaymentCompletedEvent(
         amountKrw: payment.pricing.finalAmount,
         paidAt: payment.payment.purchasedAt,
     });
+}
+
+export function parseGrobleEventEnvelope(rawBody: string): GrobleEventEnvelope {
+    const parsedJson: unknown = JSON.parse(rawBody);
+    const event = eventEnvelopeSchema.parse(parsedJson);
+    return Object.freeze({ eventId: event.id, type: event.type });
 }
