@@ -8,6 +8,7 @@ import {
 } from '@/lib/domain/earlybird/catalog';
 
 const databaseUrl = process.env.EARLYBIRD_POSTGRES_TEST_URL;
+const destructiveTestMarker = process.env.EARLYBIRD_POSTGRES_TEST_MARKER;
 const describePostgres = databaseUrl ? describe : describe.skip;
 const migration = readFileSync(
     new URL(
@@ -21,15 +22,12 @@ const bootstrap = `
 DROP SCHEMA IF EXISTS public CASCADE;
 DROP SCHEMA IF EXISTS auth CASCADE;
 DROP SCHEMA IF EXISTS extensions CASCADE;
-DROP ROLE IF EXISTS anon;
-DROP ROLE IF EXISTS authenticated;
-DROP ROLE IF EXISTS service_role;
-CREATE ROLE anon NOLOGIN;
-CREATE ROLE authenticated NOLOGIN;
-CREATE ROLE service_role NOLOGIN;
 CREATE SCHEMA public;
 CREATE SCHEMA auth;
 CREATE SCHEMA extensions;
+DO $$ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE authenticated NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE service_role NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
 
 CREATE FUNCTION extensions.gen_random_uuid()
@@ -78,6 +76,38 @@ function uuid(prefix: '1' | '2', index: number): string {
     return `${prefix}0000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
 }
 
+export function isSafeEarlybirdPostgresTestTarget(
+    connectionString: string | undefined,
+    marker: string | undefined
+): boolean {
+    if (marker !== 'local-ephemeral-earlybird-only' || !connectionString) return false;
+    try {
+        const url = new URL(connectionString);
+        return url.protocol === 'postgresql:'
+            && (url.hostname === '127.0.0.1' || url.hostname === 'localhost')
+            && url.pathname === '/earlybird_concurrency_test';
+    } catch {
+        return false;
+    }
+}
+
+describe('earlybird PostgreSQL destructive-test target guard', () => {
+    it('accepts only the explicit loopback test database and marker', () => {
+        expect(isSafeEarlybirdPostgresTestTarget(
+            'postgresql://tester@127.0.0.1:55432/earlybird_concurrency_test',
+            'local-ephemeral-earlybird-only'
+        )).toBe(true);
+    });
+
+    it.each([
+        ['postgresql://tester@db.example.com/earlybird_concurrency_test', 'local-ephemeral-earlybird-only'],
+        ['postgresql://tester@127.0.0.1:55432/postgres', 'local-ephemeral-earlybird-only'],
+        ['postgresql://tester@127.0.0.1:55432/earlybird_concurrency_test', undefined],
+    ])('rejects an unsafe target or missing marker', (url, marker) => {
+        expect(isSafeEarlybirdPostgresTestTarget(url, marker)).toBe(false);
+    });
+});
+
 function planCards(planId: 'basic' | 'standard') {
     return {
         basic: {
@@ -113,7 +143,18 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
     let pool: Pool;
 
     beforeAll(async () => {
+        if (!isSafeEarlybirdPostgresTestTarget(databaseUrl, destructiveTestMarker)) {
+            throw new Error(
+                'Refusing destructive PostgreSQL test: use the loopback earlybird_concurrency_test database and explicit marker.'
+            );
+        }
         pool = new Pool({ connectionString: databaseUrl, max: 30 });
+        const identity = await pool.query<{ database_name: string }>(
+            'SELECT pg_catalog.current_database() AS database_name'
+        );
+        if (identity.rows[0]?.database_name !== 'earlybird_concurrency_test') {
+            throw new Error('Refusing destructive PostgreSQL test against an unexpected database.');
+        }
         await pool.query(bootstrap);
         await pool.query(migration);
     }, 30_000);

@@ -358,21 +358,47 @@ describe('Groble earlybird database boundary', () => {
             preflightId: nextPreflightId,
         }, 'standard');
 
-        expect(second).toEqual({ order_id: first.order_id, created: false });
-        const order = (await db.query<{
+        expect(second.created).toBe(true);
+        expect(second.order_id).not.toBe(first.order_id);
+        const orders = (await db.query<{
+            id: string;
             preflight_id: string;
+            target_instagram_id: string;
             plan_id: string;
             expected_groble_product_id: string;
             status: string;
         }>(
-            'SELECT preflight_id, plan_id, expected_groble_product_id, status FROM public.earlybird_orders'
-        )).rows[0];
-        expect(order).toEqual({
+            `SELECT id, preflight_id, target_instagram_id, plan_id,
+                expected_groble_product_id, status
+             FROM public.earlybird_orders ORDER BY created_at`
+        )).rows;
+        expect(orders).toEqual([{
+            id: first.order_id,
+            preflight_id: seed.preflightId,
+            target_instagram_id: 'target_92',
+            plan_id: 'basic',
+            expected_groble_product_id: BASIC_PRODUCT_ID,
+            status: 'cancelled',
+        }, {
+            id: second.order_id,
             preflight_id: nextPreflightId,
+            target_instagram_id: 'target_93',
             plan_id: 'standard',
             expected_groble_product_id: STANDARD_PRODUCT_ID,
             status: 'payment_pending',
+        }]);
+
+        const lateOldPayment = await finalize(seed, 'basic', 92);
+        expect(lateOldPayment).toMatchObject({
+            disposition: 'late_cancelled_payment',
+            order_id: first.order_id,
+            status: 'refund_pending',
+            plan_sequence: null,
         });
+        expect((await db.query<{ status: string }>(
+            'SELECT status FROM public.earlybird_orders WHERE id = $1',
+            [second.order_id]
+        )).rows[0].status).toBe('payment_pending');
     });
 
     it('makes duplicate event and payment deliveries idempotent', async () => {
@@ -427,6 +453,26 @@ describe('Groble earlybird database boundary', () => {
         )).rows[0].sold_count).toBe(1);
     });
 
+    it('reconciles a cancellation delivered before payment completion without selling a slot', async () => {
+        const seed = await seedPreflight(6, 'basic');
+        await createCheckout(seed, 'basic');
+        const cancellation = await requestCancellation('payment_basic_6', 'basic', 6);
+        const completion = await finalize(seed, 'basic', 6);
+
+        expect(cancellation).toMatchObject({
+            disposition: 'cancel_unmatched',
+            order_id: null,
+        });
+        expect(completion).toMatchObject({
+            disposition: 'cancel_before_payment',
+            status: 'refund_pending',
+            plan_sequence: null,
+        });
+        expect((await db.query<{ sold_count: number }>(
+            `SELECT sold_count FROM public.earlybird_plan_inventory WHERE plan_id = 'basic'`
+        )).rows[0].sold_count).toBe(0);
+    });
+
     it.each([
         ['basic', 10] as const,
         ['standard', 30] as const,
@@ -461,13 +507,29 @@ describe('Groble earlybird database boundary', () => {
         expect(standardResult.plan_sequence).toBe(1);
     });
 
-    it.each([
-        { productId: 'wrong_product', amount: 14_900 },
-        { productId: BASIC_PRODUCT_ID, amount: 14_901 },
-    ])('rejects product or amount mismatch without consuming inventory', async mismatch => {
+    it('rejects an unknown product without mutating the pending order', async () => {
         const seed = await seedPreflight(70, 'basic');
         await createCheckout(seed, 'basic');
-        const result = await finalize(seed, 'basic', 70, mismatch);
+        const result = await finalize(seed, 'basic', 70, {
+            productId: 'wrong_product',
+            amount: 14_900,
+        });
+        expect(result).toMatchObject({ disposition: 'unmatched', status: null });
+        expect((await db.query<{ status: string }>(
+            'SELECT status FROM public.earlybird_orders'
+        )).rows[0].status).toBe('payment_pending');
+        expect((await db.query<{ sold_count: number }>(
+            `SELECT sold_count FROM public.earlybird_plan_inventory WHERE plan_id = 'basic'`
+        )).rows[0].sold_count).toBe(0);
+    });
+
+    it('rejects an amount mismatch without consuming inventory', async () => {
+        const seed = await seedPreflight(71, 'basic');
+        await createCheckout(seed, 'basic');
+        const result = await finalize(seed, 'basic', 71, {
+            productId: BASIC_PRODUCT_ID,
+            amount: 14_901,
+        });
         expect(result).toMatchObject({ disposition: 'mismatch', status: 'payment_failed' });
         expect((await db.query<{ sold_count: number }>(
             `SELECT sold_count FROM public.earlybird_plan_inventory WHERE plan_id = 'basic'`

@@ -184,6 +184,8 @@ describe('signed Groble webhook route', () => {
         ['mismatch', 'payment_failed'],
         ['duplicate_event', 'paid'],
         ['overflow_refund_required', 'overflow_refund_required'],
+        ['cancel_before_payment', 'refund_pending'],
+        ['late_cancelled_payment', 'refund_pending'],
     ])('acknowledges the %s disposition without asking Groble to retry', async (disposition, status) => {
         mocks.rpc.mockResolvedValue({
             data: [{

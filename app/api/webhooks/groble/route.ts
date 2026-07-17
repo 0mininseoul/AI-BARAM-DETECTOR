@@ -26,6 +26,8 @@ const finalizationResultSchema = z.array(z.object({
         'cancel_duplicate_event',
         'cancel_unmatched',
         'cancel_mismatch',
+        'cancel_before_payment',
+        'late_cancelled_payment',
     ]),
     order_id: z.string().uuid().nullable(),
     status: z.string().nullable(),

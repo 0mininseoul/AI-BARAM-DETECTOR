@@ -124,7 +124,9 @@ CREATE TABLE public.earlybird_webhook_events (
         'cancel_requested',
         'cancel_duplicate_event',
         'cancel_unmatched',
-        'cancel_mismatch'
+        'cancel_mismatch',
+        'cancel_before_payment',
+        'late_cancelled_payment'
     ))
 );
 
@@ -334,25 +336,9 @@ BEGIN
     FOR UPDATE;
     IF FOUND THEN
         UPDATE public.earlybird_orders AS superseded_order
-        SET preflight_id = p_preflight_id,
-            target_instagram_id = v_preflight.target_instagram_id,
-            target_followers_count = v_preflight.target_followers_count,
-            target_following_count = v_preflight.target_following_count,
-            exclusion_decision = v_preflight.exclusion_decision,
-            excluded_instagram_id = v_preflight.excluded_instagram_id,
-            plan_id = p_plan_id,
-            pricing_version = p_pricing_version,
-            expected_amount_krw = p_expected_amount_krw,
-            expected_groble_product_id = p_expected_product_id,
-            disclosure_version = p_disclosure_version,
-            disclosure_text = p_disclosure_text,
-            disclosure_accepted_at = p_disclosure_accepted_at,
+        SET status = 'cancelled',
             updated_at = pg_catalog.clock_timestamp()
-        WHERE superseded_order.id = v_existing.id
-        RETURNING superseded_order.id INTO v_order_id;
-
-        RETURN QUERY SELECT v_order_id, FALSE;
-        RETURN;
+        WHERE superseded_order.id = v_existing.id;
     END IF;
 
     INSERT INTO public.earlybird_orders (
@@ -493,6 +479,7 @@ DECLARE
     v_order public.earlybird_orders%ROWTYPE;
     v_candidate_count INTEGER;
     v_sequence SMALLINT;
+    v_user_id UUID;
 BEGIN
     IF p_event_type <> 'payment.completed'
        OR p_event_id IS NULL OR pg_catalog.char_length(p_event_id) NOT BETWEEN 1 AND 256
@@ -558,15 +545,67 @@ BEGIN
         RETURN;
     END IF;
 
-    SELECT pg_catalog.count(*)::INTEGER
-    INTO v_candidate_count
-    FROM public.earlybird_orders AS candidate
-    JOIN public.users AS buyer ON buyer.id = candidate.user_id
-    WHERE candidate.status = 'payment_pending'
-      AND pg_catalog.lower(pg_catalog.btrim(buyer.email))
-          = pg_catalog.lower(pg_catalog.btrim(p_buyer_email));
+    SELECT buyer.id
+    INTO v_user_id
+    FROM public.users AS buyer
+    WHERE pg_catalog.lower(pg_catalog.btrim(buyer.email))
+        = pg_catalog.lower(pg_catalog.btrim(p_buyer_email));
+
+    IF FOUND THEN
+        PERFORM pg_catalog.pg_advisory_xact_lock(
+            pg_catalog.hashtextextended(v_user_id::TEXT, 0)
+        );
+        SELECT pg_catalog.count(*)::INTEGER
+        INTO v_candidate_count
+        FROM public.earlybird_orders AS candidate
+        WHERE candidate.user_id = v_user_id
+          AND candidate.status = 'payment_pending'
+          AND candidate.expected_groble_product_id = p_product_id;
+    ELSE
+        v_candidate_count := 0;
+    END IF;
 
     IF v_candidate_count <> 1 THEN
+        IF v_candidate_count = 0 AND v_user_id IS NOT NULL THEN
+            SELECT cancelled_order.*
+            INTO v_order
+            FROM public.earlybird_orders AS cancelled_order
+            WHERE cancelled_order.user_id = v_user_id
+              AND cancelled_order.status = 'cancelled'
+              AND cancelled_order.payment_id IS NULL
+              AND cancelled_order.expected_groble_product_id = p_product_id
+              AND cancelled_order.expected_amount_krw = p_amount_krw
+            ORDER BY cancelled_order.updated_at DESC
+            LIMIT 1
+            FOR UPDATE;
+            IF FOUND THEN
+                UPDATE public.earlybird_orders AS late_order
+                SET status = 'refund_pending',
+                    payment_id = p_payment_id,
+                    actual_groble_product_id = p_product_id,
+                    actual_amount_krw = p_amount_krw,
+                    paid_at = p_paid_at,
+                    updated_at = pg_catalog.clock_timestamp()
+                WHERE late_order.id = v_order.id
+                RETURNING late_order.* INTO v_order;
+
+                INSERT INTO public.earlybird_webhook_events (
+                    event_id, idempotency_key, event_type, occurred_at,
+                    payment_id, product_id, amount_krw, disposition, order_id
+                ) VALUES (
+                    p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
+                    p_payment_id, p_product_id, p_amount_krw,
+                    'late_cancelled_payment', v_order.id
+                );
+                RETURN QUERY SELECT
+                    'late_cancelled_payment'::TEXT,
+                    v_order.id,
+                    v_order.status,
+                    NULL::SMALLINT;
+                RETURN;
+            END IF;
+        END IF;
+
         INSERT INTO public.earlybird_webhook_events (
             event_id, idempotency_key, event_type, occurred_at,
             payment_id, product_id, amount_krw, disposition
@@ -586,11 +625,10 @@ BEGIN
     SELECT candidate.*
     INTO v_order
     FROM public.earlybird_orders AS candidate
-    JOIN public.users AS buyer ON buyer.id = candidate.user_id
-    WHERE candidate.status = 'payment_pending'
-      AND pg_catalog.lower(pg_catalog.btrim(buyer.email))
-          = pg_catalog.lower(pg_catalog.btrim(p_buyer_email))
-    FOR UPDATE OF candidate;
+    WHERE candidate.user_id = v_user_id
+      AND candidate.status = 'payment_pending'
+      AND candidate.expected_groble_product_id = p_product_id
+    FOR UPDATE;
 
     IF v_order.expected_groble_product_id <> p_product_id
        OR v_order.expected_amount_krw <> p_amount_krw THEN
@@ -612,6 +650,44 @@ BEGIN
             p_payment_id, p_product_id, p_amount_krw, 'mismatch', v_order.id
         );
         RETURN QUERY SELECT 'mismatch'::TEXT, v_order.id, v_order.status, NULL::SMALLINT;
+        RETURN;
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.earlybird_webhook_events AS prior_cancellation
+        WHERE prior_cancellation.payment_id = p_payment_id
+          AND prior_cancellation.event_type = 'payment.cancel_requested'
+    ) THEN
+        UPDATE public.earlybird_orders AS cancelled_before_confirmation
+        SET status = 'refund_pending',
+            payment_id = p_payment_id,
+            actual_groble_product_id = p_product_id,
+            actual_amount_krw = p_amount_krw,
+            paid_at = p_paid_at,
+            updated_at = pg_catalog.clock_timestamp()
+        WHERE cancelled_before_confirmation.id = v_order.id
+        RETURNING cancelled_before_confirmation.* INTO v_order;
+
+        UPDATE public.earlybird_webhook_events AS prior_cancellation
+        SET disposition = 'cancel_requested',
+            order_id = v_order.id
+        WHERE prior_cancellation.payment_id = p_payment_id
+          AND prior_cancellation.event_type = 'payment.cancel_requested';
+
+        INSERT INTO public.earlybird_webhook_events (
+            event_id, idempotency_key, event_type, occurred_at,
+            payment_id, product_id, amount_krw, disposition, order_id
+        ) VALUES (
+            p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
+            p_payment_id, p_product_id, p_amount_krw,
+            'cancel_before_payment', v_order.id
+        );
+        RETURN QUERY SELECT
+            'cancel_before_payment'::TEXT,
+            v_order.id,
+            v_order.status,
+            NULL::SMALLINT;
         RETURN;
     END IF;
 
