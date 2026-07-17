@@ -105,6 +105,54 @@ describe('signed Groble webhook route', () => {
         expect(mocks.rpc).not.toHaveBeenCalled();
     });
 
+    it('returns only invalid field paths for a signed Groble test delivery', async () => {
+        const body = JSON.stringify(payload({
+            buyer: {
+                ...payload().data.object.buyer,
+                email: 'private-buyer@example.com',
+            },
+            pricing: {
+                ...payload().data.object.pricing,
+                finalAmount: '14900',
+            },
+        }));
+
+        const response = await POST(request(body));
+
+        expect(response.status).toBe(400);
+        await expect(response.json()).resolves.toEqual({
+            received: false,
+            code: 'INVALID_PAYMENT_PAYLOAD',
+            invalidFields: ['data.object.pricing.finalAmount'],
+        });
+        expect(await POST(request(JSON.stringify(payload({
+            pricing: {
+                ...payload().data.object.pricing,
+                finalAmount: 'private-value',
+            },
+        })))).then(result => result.text())).not.toContain('private-value');
+        expect(mocks.rpc).not.toHaveBeenCalled();
+    });
+
+    it('does not expose schema diagnostics for a non-test payment event', async () => {
+        const event = payload({
+            pricing: {
+                ...payload().data.object.pricing,
+                finalAmount: 'private-value',
+            },
+        });
+        event.id = 'evt_live_a1b2c3d4e5f60718293a4b5c';
+
+        const response = await POST(request(JSON.stringify(event)));
+
+        expect(response.status).toBe(400);
+        await expect(response.json()).resolves.toEqual({
+            received: false,
+            code: 'INVALID_PAYMENT_PAYLOAD',
+        });
+        expect(mocks.rpc).not.toHaveBeenCalled();
+    });
+
     it('returns a retryable response when webhook server configuration is unavailable', async () => {
         delete process.env.GROBLE_WEBHOOK_SECRET;
 
