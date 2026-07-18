@@ -171,6 +171,7 @@ const EVENT_SCHEMAS: Record<AnalyticsEvent, readonly PropertyName[]> = {
 
 interface QueuedEvent {
     eventName: AnalyticsEvent;
+    identityRevision: number;
     properties: AnalyticsProperties;
 }
 
@@ -182,6 +183,7 @@ let desiredUserId: string | undefined;
 let hasResolvedIdentity = false;
 let identityDeliveryBlocked = false;
 let identityReconciled = false;
+let identityRevision = 0;
 let hasInspectedSdkIdentity = false;
 let pendingIdentityReset = false;
 const queuedEvents: QueuedEvent[] = [];
@@ -245,7 +247,17 @@ function flushQueue(): void {
 
 function enqueue(eventName: AnalyticsEvent, properties: AnalyticsProperties): void {
     if (queuedEvents.length === MAX_QUEUED_EVENTS) queuedEvents.shift();
-    queuedEvents.push({ eventName, properties });
+    queuedEvents.push({ eventName, identityRevision, properties });
+}
+
+function pruneQueuedEventsForCurrentIdentity(): void {
+    let nextIndex = 0;
+    for (const event of queuedEvents) {
+        if (event.identityRevision !== identityRevision) continue;
+        queuedEvents[nextIndex] = event;
+        nextIndex += 1;
+    }
+    queuedEvents.length = nextIndex;
 }
 
 function setSdkUserId(sdk: UnifiedSdk, userId: string | undefined): void {
@@ -284,9 +296,9 @@ function reconcileInitializedIdentity(sdk: UnifiedSdk): boolean {
     }
 
     if (pendingIdentityReset) {
+        pruneQueuedEventsForCurrentIdentity();
         if (!resetSdkIdentity(sdk)) {
             identityDeliveryBlocked = true;
-            queuedEvents.length = 0;
             return false;
         }
 
@@ -318,6 +330,7 @@ function updateResolvedIdentity(userId: string | null): IdentityUpdateResult {
     const hadResolvedIdentity = hasResolvedIdentity;
     desiredUserId = nextUserId;
     hasResolvedIdentity = true;
+    identityRevision += 1;
     identityReady = false;
     if (
         hadResolvedIdentity

@@ -246,15 +246,35 @@ describe('Amplitude analytics adapter', () => {
         expect(amplitudeMocks.setUserId.mock.calls).toEqual([[SECOND_UUID]]);
     });
 
-    it('returns false for a failed boot reset and true after the same identity retries', async () => {
+    it('preserves only current-revision events across a failed boot reset retry', async () => {
         enableBrowser();
+        let resolveInitialization!: () => void;
+        amplitudeMocks.initAll.mockImplementationOnce(() => new Promise<void>((resolve) => {
+            resolveInitialization = resolve;
+        }));
         amplitudeMocks.reset.mockImplementationOnce(() => {
             throw new Error('reset failed');
         });
-        const { initAmplitude } = await loadAnalytics();
+        const analytics = await loadAnalytics();
 
-        await expect(initAmplitude(SECOND_UUID)).resolves.toBe(false);
-        await expect(initAmplitude(SECOND_UUID)).resolves.toBe(true);
+        const firstUserInitialization = analytics.initAmplitude(VALID_USER_ID);
+        await vi.waitFor(() => expect(amplitudeMocks.initAll).toHaveBeenCalledTimes(1));
+        analytics.trackEvent(analytics.EVENTS.ANALYSIS_STARTED, {
+            request_id: VALID_USER_ID,
+            plan_id: 'standard',
+        });
+        const nextUserInitialization = analytics.initAmplitude(SECOND_UUID);
+        analytics.trackEvent(analytics.EVENTS.ANALYSIS_STARTED, {
+            request_id: SECOND_UUID,
+            plan_id: 'basic',
+        });
+        resolveInitialization();
+        await expect(firstUserInitialization).resolves.toBe(false);
+        await expect(nextUserInitialization).resolves.toBe(false);
+
+        analytics.trackEvent(analytics.EVENTS.TARGET_SUBMITTED, { stage: 'authenticated' });
+        await expect(analytics.initAmplitude(SECOND_UUID)).resolves.toBe(true);
+        analytics.markAnalyticsIdentityReady();
 
         expect(amplitudeMocks.initAll).toHaveBeenCalledTimes(1);
         expect(amplitudeMocks.getUserId).toHaveBeenCalledTimes(1);
@@ -271,6 +291,11 @@ describe('Amplitude analytics adapter', () => {
             .toBeLessThan(amplitudeMocks.reset.mock.invocationCallOrder[1]);
         expect(amplitudeMocks.reset.mock.invocationCallOrder[1])
             .toBeLessThan(amplitudeMocks.setUserId.mock.invocationCallOrder[1]);
+        expect(amplitudeMocks.track.mock.calls).toEqual([[
+            'analysis_started',
+            { request_id: SECOND_UUID, plan_id: 'basic' },
+        ]]);
+        expect(JSON.stringify(amplitudeMocks.track.mock.calls)).not.toContain(VALID_USER_ID);
     });
 
     it('fails closed after the installed SDK joins deterministic replay remote config', async () => {
@@ -428,12 +453,11 @@ describe('Amplitude analytics adapter', () => {
         }));
         const analytics = await loadAnalytics();
 
-        analytics.trackEvent(analytics.EVENTS.TARGET_SUBMITTED, { stage: 'anonymous' });
-        analytics.trackEvent(analytics.EVENTS.TARGET_SUBMITTED, { stage: 'anonymous' });
-        expect(amplitudeMocks.initAll).not.toHaveBeenCalled();
-
         const initialization = analytics.initAmplitude(null);
         await vi.waitFor(() => expect(amplitudeMocks.initAll).toHaveBeenCalledTimes(1));
+        analytics.trackEvent(analytics.EVENTS.TARGET_SUBMITTED, { stage: 'anonymous' });
+        analytics.trackEvent(analytics.EVENTS.TARGET_SUBMITTED, { stage: 'anonymous' });
+
         analytics.markAnalyticsIdentityReady();
         expect(amplitudeMocks.track).not.toHaveBeenCalled();
 
@@ -446,9 +470,43 @@ describe('Amplitude analytics adapter', () => {
         ]);
     });
 
-    it('bounds the pre-init queue to the latest 50 validated invocations', async () => {
+    it('drops unresolved-revision events at the first anonymous reset boundary', async () => {
         enableBrowser();
+        let resolveInitialization!: () => void;
+        amplitudeMocks.initAll.mockImplementationOnce(() => new Promise<void>((resolve) => {
+            resolveInitialization = resolve;
+        }));
         const analytics = await loadAnalytics();
+        analytics.trackEvent(analytics.EVENTS.ANALYSIS_STARTED, {
+            request_id: VALID_USER_ID,
+            plan_id: 'standard',
+        });
+
+        const initialization = analytics.initAmplitude(null);
+        await vi.waitFor(() => expect(amplitudeMocks.initAll).toHaveBeenCalledTimes(1));
+        analytics.trackEvent(analytics.EVENTS.TARGET_SUBMITTED, { stage: 'anonymous' });
+        resolveInitialization();
+        await initialization;
+        analytics.markAnalyticsIdentityReady();
+
+        expect(amplitudeMocks.track.mock.calls).toEqual([[
+            'target_submitted',
+            { stage: 'anonymous' },
+        ]]);
+        expect(JSON.stringify(amplitudeMocks.track.mock.calls)).not.toContain(VALID_USER_ID);
+        expect(amplitudeMocks.reset.mock.invocationCallOrder[0])
+            .toBeLessThan(amplitudeMocks.track.mock.invocationCallOrder[0]);
+    });
+
+    it('bounds the pending current-identity queue to the latest 50 validated invocations', async () => {
+        enableBrowser();
+        let resolveInitialization!: () => void;
+        amplitudeMocks.initAll.mockImplementationOnce(() => new Promise<void>((resolve) => {
+            resolveInitialization = resolve;
+        }));
+        const analytics = await loadAnalytics();
+        const initialization = analytics.initAmplitude(null);
+        await vi.waitFor(() => expect(amplitudeMocks.initAll).toHaveBeenCalledTimes(1));
 
         for (let resultCount = 0; resultCount < 55; resultCount += 1) {
             analytics.trackEvent(analytics.EVENTS.RESULT_VIEWED, {
@@ -458,8 +516,8 @@ describe('Amplitude analytics adapter', () => {
             });
         }
 
-        expect(amplitudeMocks.initAll).not.toHaveBeenCalled();
-        await analytics.initAmplitude(null);
+        resolveInitialization();
+        await initialization;
         analytics.markAnalyticsIdentityReady();
 
         expect(amplitudeMocks.track).toHaveBeenCalledTimes(50);
@@ -487,18 +545,24 @@ describe('Amplitude analytics adapter', () => {
         expect(amplitudeMocks.track).not.toHaveBeenCalled();
     });
 
-    it('resets once after initialization when logout resolves during initialization', async () => {
+    it('drops authenticated events queued before logout resolves during initialization', async () => {
         enableBrowser();
         let resolveInitialization!: () => void;
         amplitudeMocks.initAll.mockImplementationOnce(() => new Promise<void>((resolve) => {
             resolveInitialization = resolve;
         }));
         const analytics = await loadAnalytics();
-        analytics.trackEvent(analytics.EVENTS.AUTH_COMPLETED, { provider: 'kakao' });
 
         const authenticatedInit = analytics.initAmplitude(VALID_USER_ID);
         await vi.waitFor(() => expect(amplitudeMocks.initAll).toHaveBeenCalledTimes(1));
+        analytics.trackEvent(analytics.EVENTS.PAYMENT_CONFIRMED_VIEWED, {
+            order_id: VALID_USER_ID,
+            plan_id: 'basic',
+            amount_krw: 14_900,
+            status: 'paid',
+        });
         const anonymousInit = analytics.initAmplitude(null);
+        analytics.trackEvent(analytics.EVENTS.TARGET_SUBMITTED, { stage: 'anonymous' });
 
         expect(amplitudeMocks.reset).not.toHaveBeenCalled();
         expect(amplitudeMocks.setUserId).not.toHaveBeenCalled();
@@ -511,10 +575,47 @@ describe('Amplitude analytics adapter', () => {
         expect(amplitudeMocks.track).not.toHaveBeenCalled();
 
         analytics.markAnalyticsIdentityReady();
-        expect(amplitudeMocks.track).toHaveBeenCalledWith('auth_completed', {
-            provider: 'kakao',
-        });
+        expect(amplitudeMocks.track.mock.calls).toEqual([[
+            'target_submitted',
+            { stage: 'anonymous' },
+        ]]);
+        expect(JSON.stringify(amplitudeMocks.track.mock.calls)).not.toContain(VALID_USER_ID);
         expect(amplitudeMocks.reset.mock.invocationCallOrder[0])
+            .toBeLessThan(amplitudeMocks.track.mock.invocationCallOrder[0]);
+    });
+
+    it('drops the old user event but preserves the new user event across an in-flight reset', async () => {
+        enableBrowser();
+        let resolveInitialization!: () => void;
+        amplitudeMocks.initAll.mockImplementationOnce(() => new Promise<void>((resolve) => {
+            resolveInitialization = resolve;
+        }));
+        const analytics = await loadAnalytics();
+
+        const firstUserInit = analytics.initAmplitude(VALID_USER_ID);
+        await vi.waitFor(() => expect(amplitudeMocks.initAll).toHaveBeenCalledTimes(1));
+        analytics.trackEvent(analytics.EVENTS.ANALYSIS_STARTED, {
+            request_id: VALID_USER_ID,
+            plan_id: 'basic',
+        });
+        const nextUserInit = analytics.initAmplitude(SECOND_UUID);
+        analytics.trackEvent(analytics.EVENTS.ANALYSIS_STARTED, {
+            request_id: SECOND_UUID,
+            plan_id: 'standard',
+        });
+
+        resolveInitialization();
+        await Promise.all([firstUserInit, nextUserInit]);
+        analytics.markAnalyticsIdentityReady();
+
+        expect(amplitudeMocks.track.mock.calls).toEqual([[
+            'analysis_started',
+            { request_id: SECOND_UUID, plan_id: 'standard' },
+        ]]);
+        expect(JSON.stringify(amplitudeMocks.track.mock.calls)).not.toContain(VALID_USER_ID);
+        expect(amplitudeMocks.reset.mock.invocationCallOrder[0])
+            .toBeLessThan(amplitudeMocks.setUserId.mock.invocationCallOrder[0]);
+        expect(amplitudeMocks.setUserId.mock.invocationCallOrder[0])
             .toBeLessThan(amplitudeMocks.track.mock.invocationCallOrder[0]);
     });
 
@@ -767,16 +868,27 @@ describe('Amplitude analytics adapter', () => {
             .toBeLessThan(amplitudeMocks.setUserId.mock.invocationCallOrder[0]);
     });
 
-    it('retains the reconciled anonymous device when the user authenticates', async () => {
+    it('retains the reconciled anonymous device and its queued events when the user authenticates', async () => {
         enableBrowser();
         const analytics = await loadAnalytics();
         await analytics.initAmplitude(null);
         amplitudeMocks.reset.mockClear();
+        analytics.markAnalyticsIdentityPending();
+        analytics.trackEvent(analytics.EVENTS.TARGET_SUBMITTED, { stage: 'anonymous' });
 
         await expect(analytics.initAmplitude(SECOND_UUID)).resolves.toBe(true);
+        analytics.trackEvent(analytics.EVENTS.ANALYSIS_STARTED, {
+            request_id: SECOND_UUID,
+            plan_id: 'basic',
+        });
+        analytics.markAnalyticsIdentityReady();
 
         expect(amplitudeMocks.reset).not.toHaveBeenCalled();
         expect(amplitudeMocks.setUserId.mock.calls).toEqual([[SECOND_UUID]]);
+        expect(amplitudeMocks.track.mock.calls).toEqual([
+            ['target_submitted', { stage: 'anonymous' }],
+            ['analysis_started', { request_id: SECOND_UUID, plan_id: 'basic' }],
+        ]);
     });
 
     it('contains reset failure, attempts to clear user ID, and keeps delivery closed', async () => {
