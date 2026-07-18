@@ -51,7 +51,7 @@ DECLARE
     v_email_user_count INTEGER;
     v_match_method TEXT;
 BEGIN
-    IF p_event_type <> 'payment.completed'
+    IF p_event_type IS DISTINCT FROM 'payment.completed'
        OR p_event_id IS NULL
           OR pg_catalog.char_length(p_event_id) NOT BETWEEN 1 AND 256
        OR p_idempotency_key IS NULL
@@ -629,7 +629,7 @@ DECLARE
 BEGIN
     -- Validate before deriving any advisory-lock key so invalid rolling calls keep
     -- the canonical error contract and cannot consume unbounded lock namespaces.
-    IF p_event_type <> 'payment.completed'
+    IF p_event_type IS DISTINCT FROM 'payment.completed'
        OR p_event_id IS NULL
           OR pg_catalog.char_length(p_event_id) NOT BETWEEN 1 AND 256
        OR p_idempotency_key IS NULL
@@ -656,8 +656,8 @@ BEGIN
     );
 
     -- The product lock prevents a new verified INSERT from appearing between the
-    -- owner scan and the authoritative gate. User locks remain deterministically
-    -- ordered for checkout/refund/finalizer compatibility.
+    -- owner scan and the authoritative gate. Product owners, the existing payment
+    -- owner, and the email candidate share one deterministic user-lock order.
     FOR v_lock_user_id IN
         SELECT potential_user.user_id
         FROM (
@@ -672,6 +672,12 @@ BEGIN
                       AND verified_order.payment_id IS NULL
                   )
               )
+
+            UNION
+
+            SELECT payment_order.user_id
+            FROM public.earlybird_orders AS payment_order
+            WHERE payment_order.payment_id = p_payment_id
 
             UNION
 

@@ -363,6 +363,12 @@ describe('Groble phone matching migration contract', () => {
         );
         const wrapperProductLock = wrapper.indexOf(productNamespace);
         const wrapperUserLock = wrapper.indexOf('FOR v_lock_user_id IN');
+        const wrapperPaymentOwner = wrapper.indexOf(
+            'payment_order.payment_id = p_payment_id'
+        );
+        const wrapperUserSort = wrapper.indexOf(
+            'ORDER BY potential_user.user_id::TEXT'
+        );
         const wrapperDuplicateRead = wrapper.indexOf(
             'FROM public.earlybird_webhook_events AS existing_event'
         );
@@ -373,8 +379,33 @@ describe('Groble phone matching migration contract', () => {
         expect(wrapperPaymentLock).toBeGreaterThan(wrapperValidation);
         expect(wrapperProductLock).toBeGreaterThan(wrapperPaymentLock);
         expect(wrapperUserLock).toBeGreaterThan(wrapperProductLock);
-        expect(wrapperDuplicateRead).toBeGreaterThan(wrapperUserLock);
+        expect(wrapperPaymentOwner).toBeGreaterThan(wrapperUserLock);
+        expect(wrapperUserSort).toBeGreaterThan(wrapperPaymentOwner);
+        expect(wrapperDuplicateRead).toBeGreaterThan(wrapperUserSort);
         expect(wrapperCanonicalCall).toBeGreaterThan(wrapperDuplicateRead);
+    });
+
+    it('rejects NULL event types in both finalizer overloads before lock derivation', () => {
+        const canonical = functionDefinitionIn(
+            finalizationMigration,
+            'finalize_earlybird_groble_payment'
+        );
+        const wrapperStart = finalizationMigration.lastIndexOf(
+            'CREATE OR REPLACE FUNCTION public.finalize_earlybird_groble_payment('
+        );
+        const wrapperEnd = finalizationMigration.indexOf('\n$$;', wrapperStart);
+        const wrapper = finalizationMigration.slice(wrapperStart, wrapperEnd + 4);
+
+        for (const definition of [canonical, wrapper]) {
+            expect(definition).toContain(
+                "p_event_type IS DISTINCT FROM 'payment.completed'"
+            );
+            expect(definition).not.toContain(
+                "p_event_type <> 'payment.completed'"
+            );
+            expect(definition.indexOf('GROBLE_PAYMENT_EVIDENCE_INVALID'))
+                .toBeLessThan(definition.indexOf('pg_advisory_xact_lock'));
+        }
     });
 
     it('keeps the Phase 1 legacy checkout body internal until a post-drain migration', () => {

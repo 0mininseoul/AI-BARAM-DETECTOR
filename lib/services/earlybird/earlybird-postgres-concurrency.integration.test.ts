@@ -224,6 +224,36 @@ async function seedNativeCheckout(
     return { userId, preflightId, email, rawPhone, phone };
 }
 
+async function seedNativePreflight(
+    pool: Pool,
+    userId: string,
+    index: number
+): Promise<string> {
+    const preflightId = uuid('2', index);
+    await pool.query(
+        `INSERT INTO public.analysis_preflights (
+            id, user_id, target_instagram_id, status, exclusion_decision,
+            excluded_instagram_id, access_mode, plan_cards_snapshot,
+            pricing_version, pricing_snapshot, target_followers_count,
+            target_following_count, required_plan_id, created_at, expires_at
+        ) VALUES (
+            $1, $2, $3, 'ready', 'skip', NULL, 'production', $4,
+            $5, $6, 300, 100, 'basic',
+            pg_catalog.clock_timestamp() + INTERVAL '1 second',
+            pg_catalog.clock_timestamp() + INTERVAL '30 minutes'
+        )`,
+        [
+            preflightId,
+            userId,
+            `native_lock_${index}`,
+            planCards('basic'),
+            EARLYBIRD_PRICING_VERSION,
+            pricingSnapshot,
+        ]
+    );
+    return preflightId;
+}
+
 async function createNativeCheckout(
     pool: Pool,
     seed: NativeCheckoutSeed,
@@ -845,6 +875,131 @@ describePostgres('earlybird real PostgreSQL concurrency', () => {
             blockerClient.release();
             wrapperClient.release();
             canonicalClient.release();
+        }
+    }, 20_000);
+
+    it('prelocks a duplicate-payment owner with cross-product wrapper candidates', async () => {
+        const owner = await seedNativeCheckout(
+            pool,
+            307,
+            'native-cross-lock-owner@example.com'
+        );
+        const emailCandidate = await seedNativeCheckout(
+            pool,
+            308,
+            'native-cross-lock-email@example.com'
+        );
+        const existingPaymentId = 'native-cross-lock-existing-payment';
+        const crossingProductId = 'native-cross-lock-product';
+        const duplicateProductId = 'native-cross-lock-other-product';
+        const paidOrderId = await createNativeCheckout(
+            pool,
+            owner,
+            duplicateProductId
+        );
+        await pool.query(
+            `UPDATE public.earlybird_orders
+             SET status = 'paid', payment_id = $1
+             WHERE id = $2`,
+            [existingPaymentId, paidOrderId]
+        );
+        const secondPreflightId = await seedNativePreflight(
+            pool,
+            owner.userId,
+            309
+        );
+        await createNativeCheckout(pool, {
+            ...owner,
+            preflightId: secondPreflightId,
+        }, crossingProductId);
+        await pool.query(
+            `INSERT INTO public.earlybird_webhook_events (
+                event_id, idempotency_key, event_type, occurred_at,
+                payment_id, product_id, amount_krw, disposition
+            ) VALUES (
+                'native-cross-lock-known-event',
+                'native-cross-lock-known-idem',
+                'payment.completed', pg_catalog.clock_timestamp(),
+                'native-cross-lock-known-payment', $1, 14900, 'unmatched'
+            )`,
+            [crossingProductId]
+        );
+
+        const blockerClient = await pool.connect();
+        const crossingClient = await pool.connect();
+        const duplicateClient = await pool.connect();
+        const crossingApplication = 'earlybird-cross-lock-known-wrapper';
+        const duplicateApplication = 'earlybird-cross-lock-duplicate-payment';
+        try {
+            await blockerClient.query('BEGIN');
+            await blockerClient.query(
+                `SELECT pg_catalog.pg_advisory_xact_lock(
+                    pg_catalog.hashtextextended($1::TEXT, 0)
+                )`,
+                [owner.userId]
+            );
+
+            await crossingClient.query(
+                `SELECT pg_catalog.set_config('application_name', $1, FALSE)`,
+                [crossingApplication]
+            );
+            const crossingPromise = runServiceQuery<{ disposition: string }>(
+                crossingClient,
+                `SELECT * FROM public.finalize_earlybird_groble_payment(
+                    'native-cross-lock-known-event',
+                    'native-cross-lock-known-idem',
+                    'payment.completed',
+                    '2026-07-18T21:00:00+09:00',
+                    'native-cross-lock-known-replay-payment',
+                    $1, $2, 14900,
+                    '2026-07-18T21:00:00+09:00'
+                )`,
+                [emailCandidate.email, crossingProductId]
+            );
+            expect(await waitForLockWait(pool, crossingApplication)).toBe(true);
+
+            await duplicateClient.query(
+                `SELECT pg_catalog.set_config('application_name', $1, FALSE)`,
+                [duplicateApplication]
+            );
+            const duplicatePromise = runServiceQuery<{ disposition: string }>(
+                duplicateClient,
+                `SELECT * FROM public.finalize_earlybird_groble_payment(
+                    'native-cross-lock-duplicate-event',
+                    'native-cross-lock-duplicate-idem',
+                    'payment.completed',
+                    '2026-07-18T21:00:00+09:00',
+                    $1, $2, $3, 14900,
+                    '2026-07-18T21:00:00+09:00'
+                )`,
+                [existingPaymentId, emailCandidate.email, duplicateProductId]
+            );
+            expect(await waitForLockWait(pool, duplicateApplication)).toBe(true);
+
+            await blockerClient.query('COMMIT');
+            const outcomes = await Promise.allSettled([
+                crossingPromise,
+                duplicatePromise,
+            ]);
+
+            const rejected = outcomes.find(outcome => outcome.status === 'rejected');
+            if (rejected?.status === 'rejected') throw rejected.reason;
+            const dispositions = outcomes.flatMap(outcome =>
+                outcome.status === 'fulfilled' ? outcome.value.disposition : []
+            );
+            expect(dispositions.sort()).toEqual([
+                'duplicate_event',
+                'duplicate_payment',
+            ]);
+        } catch (error) {
+            await blockerClient.query('ROLLBACK').catch(() => undefined);
+            await crossingClient.query('ROLLBACK').catch(() => undefined);
+            await duplicateClient.query('ROLLBACK').catch(() => undefined);
+            throw error;
+        } finally {
+            blockerClient.release();
+            crossingClient.release();
+            duplicateClient.release();
         }
     }, 20_000);
 

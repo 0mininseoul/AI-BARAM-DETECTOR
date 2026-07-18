@@ -1956,6 +1956,46 @@ describe('Groble phone checkout and finalizer behavior', () => {
         )).rejects.toThrow(/GROBLE_PAYMENT_EVIDENCE_INVALID/);
     });
 
+    it.each(['canonical', 'rolling'] as const)(
+        'rejects a NULL event type before known duplicate attribution in the %s overload',
+        async (signature) => {
+            const legacy = await seedPreflight(218);
+            const checkout = await createCheckout(legacy);
+            await forceLegacyOrder(checkout.order_id);
+            await finalizeRolling({
+                eventId: 'null-type-known-event',
+                idempotencyKey: 'null-type-known-idem',
+                paymentId: 'null-type-known-payment',
+                buyerEmail: legacy.email,
+            });
+
+            const invalidCall = signature === 'rolling'
+                ? asService(
+                    `SELECT * FROM public.finalize_earlybird_groble_payment(
+                        'null-type-known-event', 'null-type-known-idem',
+                        NULL::TEXT, '2026-07-18T21:00:00+09:00',
+                        'null-type-known-payment', $1, $2, 14900,
+                        '2026-07-18T21:00:00+09:00'
+                    )`,
+                    [legacy.email, BASIC_PRODUCT_ID]
+                )
+                : asService(
+                    `SELECT * FROM public.finalize_earlybird_groble_payment(
+                        'null-type-known-event', 'null-type-known-idem',
+                        NULL::TEXT, '2026-07-18T21:00:00+09:00',
+                        'null-type-known-payment', $1, NULL::TEXT, NULL::TEXT,
+                        NULL::TEXT, $2, 14900,
+                        '2026-07-18T21:00:00+09:00'
+                    )`,
+                    [legacy.email, BASIC_PRODUCT_ID]
+                );
+
+            await expect(invalidCall).rejects.toThrow(
+                /GROBLE_PAYMENT_EVIDENCE_INVALID/
+            );
+        }
+    );
+
     it('preserves rolling duplicate-event and duplicate-payment replay for accepted legacy orders', async () => {
         const legacy = await seedPreflight(214);
         const checkout = await createCheckout(legacy);

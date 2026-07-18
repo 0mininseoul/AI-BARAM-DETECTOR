@@ -120,6 +120,8 @@ describe('analytics and observability disclosure contract', () => {
         expect(operations).toContain('earlybird:groble:product:<product_id>');
         expect(operations).toMatch(/직접 INSERT[^\n]*trigger[^\n]*product lock/);
         expect(operations).toMatch(/canonical[^\n]*payment -> user/);
+        expect(operations).toMatch(/기존 payment ID 주문 owner/);
+        expect(operations).toMatch(/NULL[^\n]*event type[^\n]*GROBLE_PAYMENT_EVIDENCE_INVALID/);
         expect(operations).toMatch(/0 active writer/);
         expect(operations).toMatch(/Phase 1[^\n]*relation[^\n]*drain/);
         expect(operations).toMatch(/internal checkout body[^\n]*post-drain/);
