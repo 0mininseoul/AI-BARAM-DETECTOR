@@ -402,4 +402,3 @@ Do not create a Plus waitlist chart.
 git add app/privacy/page.tsx .env.example docs/amplitude-analytics-operations.md
 git commit -m "docs: add Amplitude analytics operations"
 ```
-

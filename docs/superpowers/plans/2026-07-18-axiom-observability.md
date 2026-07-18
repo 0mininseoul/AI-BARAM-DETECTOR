@@ -452,4 +452,3 @@ Configure the user's available Axiom notifier. If no notifier exists, create the
 git add app/privacy/page.tsx docs/axiom-observability-operations.md
 git commit -m "docs: add Axiom operations and privacy policy"
 ```
-
