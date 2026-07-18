@@ -10,8 +10,18 @@ const migration = readFileSync(
     'utf8'
 );
 
+const sourcePolicyFixMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260718124500_fix_profile_repair_canary_source_policy.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
+
 const OWNER_ID = '11111111-1111-4111-8111-111111111111';
 const SOURCE_REQUEST_ID = '22222222-2222-4222-8222-222222222222';
+const PREFLIGHT_ID = '99999999-9999-4999-8999-999999999999';
+const ALTERNATE_PREFLIGHT_ID = '88888888-8888-4888-8888-888888888888';
 const RESERVATION_ONE = '33333333-3333-4333-8333-333333333333';
 const RESERVATION_TWO = '44444444-4444-4444-8444-444444444444';
 const RUN_ONE = 'CanaryRun12345678';
@@ -29,9 +39,47 @@ CREATE TABLE public.users (
 CREATE TABLE public.analysis_requests (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+    preflight_id UUID,
     target_instagram_id TEXT NOT NULL,
     pipeline_version TEXT,
-    status TEXT NOT NULL
+    status TEXT NOT NULL,
+    selected_plan_id_snapshot TEXT,
+    plan_access_mode_snapshot TEXT,
+    test_entitlement_jti_hash TEXT
+);
+
+CREATE TABLE public.analysis_v2_provider_execution_policies (
+    request_id UUID PRIMARY KEY REFERENCES public.analysis_requests(id) ON DELETE CASCADE,
+    mode TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    entitlement_jti_hash TEXT NOT NULL,
+    target_instagram_id TEXT NOT NULL,
+    operation_slot_map JSONB NOT NULL
+);
+
+CREATE TABLE public.analysis_preflights (
+    id UUID PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+    target_instagram_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    access_mode TEXT NOT NULL,
+    consumed_request_id UUID REFERENCES public.analysis_requests(id) ON DELETE CASCADE,
+    pii_scrubbed_at TIMESTAMP WITH TIME ZONE
+);
+
+ALTER TABLE public.analysis_requests
+    ADD CONSTRAINT analysis_requests_preflight_id_fkey
+    FOREIGN KEY (preflight_id)
+    REFERENCES public.analysis_preflights(id) ON DELETE CASCADE;
+
+CREATE TABLE public.analysis_v2_test_entitlement_consumptions (
+    entitlement_jti_hash TEXT PRIMARY KEY,
+    preflight_id UUID NOT NULL UNIQUE
+        REFERENCES public.analysis_preflights(id) ON DELETE CASCADE,
+    request_id UUID NOT NULL UNIQUE
+        REFERENCES public.analysis_requests(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
+    selected_plan_id TEXT NOT NULL
 );
 
 CREATE TABLE public.analysis_v2_provider_runs (
@@ -80,10 +128,35 @@ async function serviceQuery<T>(sql: string, params: unknown[] = []): Promise<Res
     }
 }
 
+async function clearSourceFixture(): Promise<void> {
+    await db.exec(`
+        TRUNCATE public.analysis_v2_profile_repair_canary_runs,
+            public.analysis_v2_provider_runs,
+            public.analysis_v2_test_entitlement_consumptions,
+            public.analysis_v2_provider_execution_policies,
+            public.analysis_preflights,
+            public.analysis_requests,
+            public.users
+    `);
+}
+
 async function seedSource(input: {
     status?: string;
     pipelineVersion?: string;
-    target?: string;
+    requestTarget?: string;
+    policyTarget?: string;
+    withPolicy?: boolean;
+    entitlementMatches?: boolean;
+    withConsumption?: boolean;
+    consumptionEntitlementMatches?: boolean;
+    preflightRequestMatches?: boolean;
+    preflightScrubbed?: boolean;
+    preflightTarget?: string;
+    canonicalPreflightMatches?: boolean;
+    requestPlan?: string;
+    consumptionPlan?: string;
+    policySlot?: string;
+    ledgerSlot?: string;
     userId?: string;
 } = {}): Promise<void> {
     await db.query(
@@ -93,29 +166,103 @@ async function seedSource(input: {
         [input.userId ?? OWNER_ID]
     );
     await db.query(
+        `INSERT INTO public.analysis_preflights (
+            id, user_id, target_instagram_id, status, access_mode,
+            consumed_request_id, pii_scrubbed_at
+         ) VALUES ($1, $2, $3, 'consumed', 'test_entitlement', NULL, $4)`,
+        [
+            PREFLIGHT_ID,
+            input.userId ?? OWNER_ID,
+            input.preflightTarget ?? 'retained.99999999999949998999',
+            input.preflightScrubbed === false ? null : new Date().toISOString(),
+        ]
+    );
+    if (input.canonicalPreflightMatches === false) {
+        await db.query(
+            `INSERT INTO public.analysis_preflights (
+                id, user_id, target_instagram_id, status, access_mode,
+                consumed_request_id, pii_scrubbed_at
+             ) VALUES ($1, $2, 'retained.88888888888848888888',
+                'consumed', 'test_entitlement', NULL, $3)`,
+            [
+                ALTERNATE_PREFLIGHT_ID,
+                input.userId ?? OWNER_ID,
+                new Date().toISOString(),
+            ]
+        );
+    }
+    await db.query(
         `INSERT INTO public.analysis_requests (
-            id, user_id, target_instagram_id, pipeline_version, status
-         ) VALUES ($1, $2, $3, $4, $5)`,
+            id, user_id, preflight_id, target_instagram_id, pipeline_version,
+            status, selected_plan_id_snapshot, plan_access_mode_snapshot,
+            test_entitlement_jti_hash
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'test_entitlement', $8)`,
         [
             SOURCE_REQUEST_ID,
             input.userId ?? OWNER_ID,
-            input.target ?? '0_min._.00',
+            input.canonicalPreflightMatches === false
+                ? ALTERNATE_PREFLIGHT_ID
+                : PREFLIGHT_ID,
+            input.requestTarget ?? 'retained.22222222222242228222',
             input.pipelineVersion ?? 'v2',
             input.status ?? 'failed',
+            input.requestPlan ?? 'standard',
+            'a'.repeat(64),
         ]
     );
+    if (input.preflightRequestMatches !== false) {
+        await db.query(
+            `UPDATE public.analysis_preflights
+             SET consumed_request_id = $1
+             WHERE id = $2`,
+            [SOURCE_REQUEST_ID, PREFLIGHT_ID]
+        );
+    }
+    if (input.withPolicy !== false) {
+        await db.query(
+            `INSERT INTO public.analysis_v2_provider_execution_policies (
+                request_id, mode, policy_version, entitlement_jti_hash,
+                target_instagram_id, operation_slot_map
+             ) VALUES ($1, 'test_operation_split', 'authorized-free-e2e-v1',
+                $2, $3, jsonb_build_object('profile-fallback', $4::TEXT))`,
+            [
+                SOURCE_REQUEST_ID,
+                input.entitlementMatches === false ? 'b'.repeat(64) : 'a'.repeat(64),
+                input.policyTarget ?? '0_min._.00',
+                input.policySlot ?? 'tertiary',
+            ]
+        );
+    }
+    if (input.withConsumption !== false) {
+        await db.query(
+            `INSERT INTO public.analysis_v2_test_entitlement_consumptions (
+                entitlement_jti_hash, preflight_id, request_id, user_id,
+                selected_plan_id
+             ) VALUES ($1, $2, $3, $4, $5)`,
+            [
+                input.consumptionEntitlementMatches === false
+                    ? 'c'.repeat(64)
+                    : 'a'.repeat(64),
+                PREFLIGHT_ID,
+                SOURCE_REQUEST_ID,
+                input.userId ?? OWNER_ID,
+                input.consumptionPlan ?? 'standard',
+            ]
+        );
+    }
     for (let index = 0; index < 8; index++) {
         await db.query(
             `INSERT INTO public.analysis_v2_provider_runs (
                 request_id, job_key, operation_key, status, run_id,
                 actor_id, credential_slot, max_charge_usd
              ) VALUES ($1, $2, $3, 'succeeded', $4,
-                'apify/instagram-profile-scraper', 'tertiary', 0.078)`,
+                'apify/instagram-profile-scraper', $5, 0.078)`,
             [
                 SOURCE_REQUEST_ID,
                 `track:profiles:batch:${index}`,
                 `profile-fallback:${String(index).repeat(64)}`,
                 `SourceRun${String(index).padStart(8, '0')}`,
+                input.ledgerSlot ?? 'tertiary',
             ]
         );
     }
@@ -193,15 +340,11 @@ describe('profile repair canary journal PGlite contract', () => {
         db = await PGlite.create();
         await db.exec(bootstrap);
         await db.exec(migration);
+        await db.exec(sourcePolicyFixMigration);
     }, 30_000);
 
     beforeEach(async () => {
-        await db.exec(`
-            TRUNCATE public.analysis_v2_profile_repair_canary_runs,
-                public.analysis_v2_provider_runs,
-                public.analysis_requests,
-                public.users
-        `);
+        await clearSourceFixture();
     });
 
     afterAll(async () => {
@@ -215,7 +358,7 @@ describe('profile repair canary journal PGlite contract', () => {
             runs: Array<{ jobKey: string; runId: string }>;
         }>>(
             `SELECT public.load_analysis_v2_profile_repair_canary_source(
-                $1, $2, 'operator@example.test'
+                $1, $2, 'operator@example.test', 'tertiary'
             ) AS result`,
             [SOURCE_REQUEST_ID, OWNER_ID]
         );
@@ -227,10 +370,61 @@ describe('profile repair canary journal PGlite contract', () => {
 
         await expect(serviceQuery(
             `SELECT public.load_analysis_v2_profile_repair_canary_source(
-                $1, $2, 'wrong@example.test'
+                $1, $2, 'wrong@example.test', 'tertiary'
             )`,
             [SOURCE_REQUEST_ID, OWNER_ID]
         )).rejects.toThrow('PROFILE_REPAIR_CANARY_SOURCE_NOT_FOUND');
+    });
+
+    it.each([
+        ['missing policy', { withPolicy: false }],
+        ['wrong policy target', { policyTarget: 'different.target' }],
+        ['wrong policy entitlement', { entitlementMatches: false }],
+        ['missing consumption', { withConsumption: false }],
+        ['wrong consumption entitlement', { consumptionEntitlementMatches: false }],
+        ['broken preflight request link', { preflightRequestMatches: false }],
+        ['mismatched canonical preflight', { canonicalPreflightMatches: false }],
+        ['wrong request plan', { requestPlan: 'basic' }],
+        ['wrong consumption plan', { consumptionPlan: 'basic' }],
+        ['wrong policy slot', { policySlot: 'secondary' }],
+        ['wrong ledger slot', { ledgerSlot: 'secondary' }],
+        ['unscrubbed preflight', { preflightScrubbed: false }],
+        ['wrong preflight tombstone', { preflightTarget: 'retained.wrong' }],
+        ['wrong request tombstone', { requestTarget: 'retained.wrong' }],
+    ] as const)('rejects %s for both load and reservation without a journal row', async (
+        _label,
+        input
+    ) => {
+        await seedSource(input);
+        await expect(serviceQuery(
+            `SELECT public.load_analysis_v2_profile_repair_canary_source(
+                $1, $2, 'operator@example.test', 'tertiary'
+            )`,
+            [SOURCE_REQUEST_ID, OWNER_ID]
+        )).rejects.toThrow('PROFILE_REPAIR_CANARY_SOURCE_NOT_FOUND');
+        await expect(reserve()).rejects.toThrow('PROFILE_REPAIR_CANARY_RUN_NOT_FOUND');
+        const journal = await db.query<{ count: number }>(`
+            SELECT count(*)::INTEGER AS count
+            FROM public.analysis_v2_profile_repair_canary_runs
+        `);
+        expect(journal.rows[0].count).toBe(0);
+    });
+
+    it('rejects a selected slot that conflicts with both policy and ledger', async () => {
+        await seedSource();
+        await expect(serviceQuery(
+            `SELECT public.load_analysis_v2_profile_repair_canary_source(
+                $1, $2, 'operator@example.test', 'secondary'
+            )`,
+            [SOURCE_REQUEST_ID, OWNER_ID]
+        )).rejects.toThrow('PROFILE_REPAIR_CANARY_SOURCE_NOT_FOUND');
+        await expect(reserve(1, RESERVATION_ONE, 'secondary'))
+            .rejects.toThrow('PROFILE_REPAIR_CANARY_RUN_NOT_FOUND');
+        const journal = await db.query<{ count: number }>(`
+            SELECT count(*)::INTEGER AS count
+            FROM public.analysis_v2_profile_repair_canary_runs
+        `);
+        expect(journal.rows[0].count).toBe(0);
     });
 
     it('reserves once, checkpoints before waiting, and never replaces the identity', async () => {
@@ -249,7 +443,7 @@ describe('profile repair canary journal PGlite contract', () => {
         });
         expect(await reserve()).toMatchObject({ created: false });
         await expect(reserve(1, RESERVATION_TWO, 'secondary'))
-            .rejects.toThrow('PROFILE_REPAIR_CANARY_RUN_IDENTITY_CONFLICT');
+            .rejects.toThrow('PROFILE_REPAIR_CANARY_RUN_NOT_FOUND');
         expect(await checkpointStarted()).toMatchObject({
             state: 'running',
             runId: RUN_ONE,
@@ -329,7 +523,7 @@ describe('profile repair canary journal PGlite contract', () => {
                 )).rejects.toThrow(/permission denied/i);
                 await expect(db.query(
                     `SELECT public.load_analysis_v2_profile_repair_canary_source(
-                        $1, $2, 'operator@example.test'
+                        $1, $2, 'operator@example.test', 'tertiary'
                     )`,
                     [SOURCE_REQUEST_ID, OWNER_ID]
                 )).rejects.toThrow(/permission denied/i);
