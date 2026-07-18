@@ -60,6 +60,25 @@ FlashAPI, CoderX, Stable RapidAPI는 V2 production DAG에 포함하지 않는다
 - partner contact-sheet 캡션과 high-risk narrative dossier는 같은 결정적 정책에서 나온 발췌문을 재사용한다. partner 캡션 표시 문자 합계와 dossier 전체는 각각 최대 2,000자이다.
 - input token 과금은 이 고정 상한 안에서 변할 수 있으며, 문자 그대로 0원 증가를 보장하지 않는다. 출시는 유료 E2E의 전체 비용과 wall time p95 비회귀 gate를 통과해야 한다.
 
+## Profile fallback replacement canary 비용 경계
+
+공식 `apify/instagram-scraper` build `0.0.692`를 검증하는 replacement canary는 제품 건당
+원가가 아니라 별도 R&D 표본이다. Actor가 현재 표시하는 결과당 약 `$0.0027`은 계획값일
+뿐이며, 15개 입력의 예상액은 약 `$0.0405`다. 실행 직전 가격과 build를 다시 확인하고,
+코드에 고정된 최대 과금은 repetition당 `$0.05`, 두 repetition 합계 `$0.10`이다.
+
+- 각 repetition은 정확히 15개 공개 프로필만 받으며 15/15 strict 결과, critical 3/3,
+  60초 이하, exact build, `RESTRICTED` run access, stable actual cost를 모두 통과해야 한다.
+- 실제 사용액은 청구 진실을 보존하기 위해 run당 `$1.00` incident bound까지 기록한다.
+  `$0.05` 초과는 품질 gate 실패이고 다음 repetition을 금지하지만, 비용 대사와 KVS,
+  dataset, request queue 및 retained source storage 정리는 계속한다. `$1.00` 초과는
+  자동 분류하지 않고 incident로 중단한다.
+- 이전 `instagram-profile-scraper` canary repetition 1의 `$0.039`와 새 replacement canary
+  actual은 모두 `C_provider` 제품 원가에서 제외하고 R&D 비용으로 별도 보고한다.
+- 새 Actor를 V2 제품 원가의 `u_profile`로 반영하는 시점은 두 canary repetition 통과,
+  authorized Standard E2E 성공, 모든 provider actual 대사, storage cleanup 완료 이후다.
+  그 전까지 아래의 플랜별 비용 표는 계속 `미측정`이다.
+
 ## 건당 비용 식
 
 V2 E2E에서 아래 변수를 preflight별 원장과 분석 요청별 원장으로 측정한다.

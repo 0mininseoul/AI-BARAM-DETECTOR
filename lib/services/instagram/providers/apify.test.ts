@@ -1139,6 +1139,16 @@ describe('apifyProvider', () => {
         expect(call).toHaveBeenCalledOnce();
     });
 
+    it('rejects canonical duplicate profile requests before any cross-batch Actor start', async () => {
+        const { client, call } = mockClient([profileItem('alice')]);
+        const provider = makeApifyProvider({ client, env: {} });
+
+        await expect(provider.getProfilesBatchOutcomes!(['alice', 'ALICE'], 1))
+            .rejects.toThrow('SCRAPING_CONFIG_ERROR');
+
+        expect(call).not.toHaveBeenCalled();
+    });
+
     it('accepts unavailable only with explicit upstream not-found evidence', async () => {
         const { client } = mockClient([
             profileItem('alice'),
