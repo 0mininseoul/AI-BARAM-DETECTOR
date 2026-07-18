@@ -56,7 +56,7 @@ describe('sanitizeOperationalEvent', () => {
                 phase: 'terminalize',
                 attempt: 2,
                 result_count: 25,
-                error_name: 'ProviderError',
+                error_name: 'Error',
                 error_code: 'SCRAPING_PROVIDER_QUOTA_ERROR',
                 disposition: 'completed',
                 retryable: false,
@@ -102,7 +102,7 @@ describe('sanitizeOperationalEvent', () => {
             phase: 'terminalize',
             attempt: 2,
             result_count: 25,
-            error_name: 'ProviderError',
+            error_name: 'Error',
             error_code: 'SCRAPING_PROVIDER_QUOTA_ERROR',
             disposition: 'completed',
             retryable: false,
@@ -153,7 +153,7 @@ describe('sanitizeOperationalEvent', () => {
         };
 
         const sanitized = sanitizeOperationalEvent({
-            event: 'privacy.checked',
+            event: 'http.route_completed',
             severity: 'warn',
             fields: forbidden,
         });
@@ -162,7 +162,7 @@ describe('sanitizeOperationalEvent', () => {
             schema_version: 1,
             environment: process.env.VERCEL_ENV ?? process.env.NODE_ENV ?? 'development',
             service: 'yeosachin-web',
-            event: 'privacy.checked',
+            event: 'http.route_completed',
             severity: 'warn',
         });
         expect(JSON.stringify(sanitized)).not.toContain('secret');
@@ -202,7 +202,7 @@ describe('sanitizeOperationalEvent', () => {
 
     it('keeps only finite bounded numeric values and exact booleans', () => {
         const sanitized = sanitizeOperationalEvent({
-            event: 'numeric.checked',
+            event: 'gemini.stage_completed',
             severity: 'debug',
             fields: {
                 status: 600,
@@ -226,7 +226,7 @@ describe('sanitizeOperationalEvent', () => {
             schema_version: 1,
             environment: process.env.VERCEL_ENV ?? process.env.NODE_ENV ?? 'development',
             service: 'yeosachin-web',
-            event: 'numeric.checked',
+            event: 'gemini.stage_completed',
             severity: 'debug',
         });
     });
@@ -235,7 +235,7 @@ describe('sanitizeOperationalEvent', () => {
         const error = Object.assign(
             new Error('SCRAPING_TIMEOUT_ERROR: buyer@example.com token=secret'),
             {
-                name: 'ProviderTimeoutError',
+                name: 'TimeoutError',
                 code: 'SCRAPING_TIMEOUT_ERROR',
                 stack: 'private stack',
                 cause: new Error('private cause'),
@@ -254,7 +254,7 @@ describe('sanitizeOperationalEvent', () => {
         });
 
         expect(sanitized.fields).toMatchObject({
-            error_name: 'ProviderTimeoutError',
+            error_name: 'TimeoutError',
             error_code: 'SCRAPING_TIMEOUT_ERROR',
         });
         expect(Object.keys(sanitized.fields)).not.toContain('message');
@@ -267,12 +267,12 @@ describe('sanitizeOperationalEvent', () => {
 
     it('accepts a registered code prefix from an Error message but not an arbitrary uppercase prefix', () => {
         const known = sanitizeOperationalEvent({
-            event: 'scraper.failed',
+            event: 'scraper.batch_failed',
             severity: 'error',
             error: new Error('SCRAPING_SCHEMA_ERROR: raw provider response'),
         });
         const unknown = sanitizeOperationalEvent({
-            event: 'scraper.failed',
+            event: 'scraper.batch_failed',
             severity: 'error',
             error: new Error('BUYER_PRIVATE_SECRET: raw provider response'),
         });
@@ -290,7 +290,7 @@ describe('sanitizeOperationalEvent', () => {
             'PROVIDER_RATE_LIMITED',
         ]) {
             const sanitized = sanitizeOperationalEvent({
-                event: 'operation.failed',
+                event: 'analysis_v2.worker_failed',
                 severity: 'error',
                 fields: { error_code: errorCode },
             });
@@ -309,17 +309,17 @@ describe('sanitizeOperationalEvent', () => {
 
         for (const errorCode of registeredCodes) {
             const explicit = sanitizeOperationalEvent({
-                event: 'operation.failed',
+                event: 'analysis_v2.worker_failed',
                 severity: 'error',
                 fields: { error_code: errorCode },
             });
             const property = sanitizeOperationalEvent({
-                event: 'operation.failed',
+                event: 'analysis_v2.worker_failed',
                 severity: 'error',
                 error: Object.assign(new Error('safe failure'), { code: errorCode }),
             });
             const messagePrefix = sanitizeOperationalEvent({
-                event: 'operation.failed',
+                event: 'analysis_v2.worker_failed',
                 severity: 'error',
                 error: new Error(`${errorCode}: raw failure detail`),
             });
@@ -353,17 +353,17 @@ describe('sanitizeOperationalEvent', () => {
 
         for (const errorCode of sensitiveCodes) {
             const explicit = sanitizeOperationalEvent({
-                event: 'operation.failed',
+                event: 'analysis_v2.worker_failed',
                 severity: 'error',
                 fields: { error_code: errorCode },
             });
             const property = sanitizeOperationalEvent({
-                event: 'operation.failed',
+                event: 'analysis_v2.worker_failed',
                 severity: 'error',
                 error: Object.assign(new Error('safe failure'), { code: errorCode }),
             });
             const messagePrefix = sanitizeOperationalEvent({
-                event: 'operation.failed',
+                event: 'analysis_v2.worker_failed',
                 severity: 'error',
                 error: new Error(`${errorCode}: raw failure detail`),
             });
@@ -381,16 +381,102 @@ describe('sanitizeOperationalEvent', () => {
             'AI_RATE_LIMIT_ERROR',
         ]) {
             expect(sanitizeOperationalEvent({
-                event: 'operation.failed',
+                event: 'analysis_v2.worker_failed',
                 severity: 'error',
                 fields: { error_code: errorCode },
             }).fields.error_code).toBe(errorCode);
         }
     });
 
+    it('drops unregistered categorical values and broad-prefix error codes', () => {
+        const sanitized = sanitizeOperationalEvent({
+            event: 'attacker.secret_token',
+            severity: 'warn',
+            fields: {
+                request_id: 'xaat-secret-token',
+                provider: 'xaat-secret-token',
+                operation: 'xaat-secret-token',
+                phase: 'xaat-secret-token',
+                disposition: 'xaat-secret-token',
+                queue_name: 'xaat-secret-token',
+                model: 'gemini-secret-token',
+                thinking_level: 'secret',
+                plan_id: 'secret-plan',
+                error_name: 'SecretToken',
+                error_code: 'AUTH_SKLIVEABC123',
+            },
+        });
+
+        expect(sanitized.message).toBe('operational.invalid_event');
+        expect(sanitized.fields).not.toHaveProperty('request_id');
+        expect(sanitized.fields).not.toHaveProperty('provider');
+        expect(sanitized.fields).not.toHaveProperty('operation');
+        expect(sanitized.fields).not.toHaveProperty('phase');
+        expect(sanitized.fields).not.toHaveProperty('disposition');
+        expect(sanitized.fields).not.toHaveProperty('queue_name');
+        expect(sanitized.fields).not.toHaveProperty('model');
+        expect(sanitized.fields).not.toHaveProperty('thinking_level');
+        expect(sanitized.fields).not.toHaveProperty('plan_id');
+        expect(sanitized.fields).not.toHaveProperty('error_name');
+        expect(sanitized.fields).not.toHaveProperty('error_code');
+        expect(JSON.stringify(sanitized)).not.toContain('secret-token');
+    });
+
+    it('falls back from an unregistered runtime environment without reflecting it', () => {
+        process.env.VERCEL_ENV = 'xaat-secret-token';
+
+        const sanitized = sanitizeOperationalEvent({
+            event: 'http.route_completed',
+            severity: 'info',
+        });
+
+        expect(sanitized.fields.environment).toBe('development');
+        expect(JSON.stringify(sanitized)).not.toContain('secret-token');
+    });
+
+    it('accepts the complete planned operational event vocabulary', () => {
+        const eventNames = [
+            'operational.invalid_event',
+            'http.route_completed',
+            'http.route_failed',
+            'next.request_error',
+            'auth.callback_completed',
+            'auth.profile_sync_failed',
+            'preflight.requested',
+            'preflight.profile_collected',
+            'preflight.completed',
+            'preflight.failed',
+            'preflight.exclusion_decided',
+            'earlybird.checkout_created',
+            'earlybird.checkout_failed',
+            'groble.webhook_received',
+            'groble.webhook_finalized',
+            'groble.webhook_rejected',
+            'scraper.batch_completed',
+            'scraper.batch_failed',
+            'scraper.fallback_selected',
+            'scraper.candidate_failed',
+            'cloud_task.enqueue_completed',
+            'cloud_task.enqueue_failed',
+            'analysis_v2.worker_completed',
+            'analysis_v2.worker_retry',
+            'analysis_v2.worker_failed',
+            'gemini.stage_completed',
+            'gemini.stage_rate_limited',
+            'gemini.stage_failed',
+        ];
+
+        for (const event of eventNames) {
+            expect(sanitizeOperationalEvent({
+                event,
+                severity: 'info',
+            }).message).toBe(event);
+        }
+    });
+
     it('uses a safe runtime severity when untyped input bypasses TypeScript', () => {
         const input = {
-            event: 'runtime.checked',
+            event: 'next.request_error',
             severity: 'fatal',
         } as unknown as OperationalEvent;
 

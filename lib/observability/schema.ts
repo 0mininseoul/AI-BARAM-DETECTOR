@@ -56,19 +56,49 @@ export const ALLOWED_FIELD_NAMES = [
 
 type SanitizedValue = string | number | boolean | null;
 
-const EVENT_PATTERN = /^[a-z][a-z0-9_.]{0,63}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const REQUEST_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const TRACE_ID_PATTERN = /^[0-9a-f]{32}$/i;
 const JOB_KEY_PATTERN = /^[a-z0-9][a-z0-9:._-]{0,159}$/;
 const ROUTE_PATTERN = /^\/[A-Za-z0-9_./:\[\]-]{0,255}$/;
 const LABEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
-const PLAN_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
-const ERROR_NAME_PATTERN = /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/;
 const ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 
-const REGISTERED_ERROR_CODES = new Set([
+export const OPERATIONAL_EVENT_NAMES = [
+    'operational.invalid_event',
+    'http.route_completed',
+    'http.route_failed',
+    'next.request_error',
+    'auth.callback_completed',
+    'auth.profile_sync_failed',
+    'preflight.requested',
+    'preflight.profile_collected',
+    'preflight.completed',
+    'preflight.failed',
+    'preflight.exclusion_decided',
+    'earlybird.checkout_created',
+    'earlybird.checkout_failed',
+    'groble.webhook_received',
+    'groble.webhook_finalized',
+    'groble.webhook_rejected',
+    'scraper.batch_completed',
+    'scraper.batch_failed',
+    'scraper.fallback_selected',
+    'scraper.candidate_failed',
+    'cloud_task.enqueue_completed',
+    'cloud_task.enqueue_failed',
+    'analysis_v2.worker_completed',
+    'analysis_v2.worker_retry',
+    'analysis_v2.worker_failed',
+    'gemini.stage_completed',
+    'gemini.stage_rate_limited',
+    'gemini.stage_failed',
+] as const;
+
+export const OPERATIONAL_ERROR_CODES = [
+    'AUTH_USERNAME_INVALID',
     'INTERNAL_ERROR',
+    'INVALID_REQUEST',
+    'JOB_DISPATCH_NOT_READY',
     'NETWORK_ERROR',
     'NOT_FOUND',
     'PROVIDER_ERROR',
@@ -77,58 +107,207 @@ const REGISTERED_ERROR_CODES = new Set([
     'UNAUTHORIZED',
     'UNKNOWN',
     'VALIDATION_ERROR',
-]);
-
-const REGISTERED_ERROR_CODE_PREFIXES = [
-    'AI_',
-    'ANALYSIS_',
-    'APIFY_',
-    'AUTH_',
-    'CAROUSEL_',
-    'CLOUD_TASK_',
-    'DATABASE_',
-    'EARLYBIRD_',
-    'GEMINI_',
-    'GROBLE_',
-    'HTTP_',
-    'INTERACTION_',
-    'INVALID_',
-    'JOB_',
-    'NEXT_',
-    'OBSERVABILITY_',
-    'PARTNER_',
-    'PREFLIGHT_',
-    'PROFILE_FETCH_',
-    'PROVIDER_',
-    'QUEUE_',
-    'RISK_',
-    'SCRAPING_',
-    'SUPABASE_',
-    'TARGET_',
-    'UPSTREAM_',
-    'V2_',
 ] as const;
 
-const FORBIDDEN_ERROR_CODE_SEGMENTS = new Set([
-    'AUTHORIZATION',
-    'BIO',
-    'BODY',
-    'BUYER',
-    'CAPTION',
-    'COMMENT',
-    'COOKIE',
-    'EMAIL',
-    'IMAGE',
-    'MEDIA',
-    'NAME',
-    'PAYLOAD',
-    'PHONE',
-    'PROMPT',
-    'RESPONSE',
-    'SECRET',
-    'SIGNATURE',
-    'TOKEN',
-]);
+export const OPERATIONAL_ERROR_NAMES = [
+    'AbortError',
+    'AggregateError',
+    'AnalysisAlreadyInProgressError',
+    'AnalysisIdempotencyConflictError',
+    'AnalysisImagePreparationError',
+    'AnalysisLimitExceededError',
+    'AnalysisMediaPolicyError',
+    'AnalysisV2AiAttemptConflictError',
+    'AnalysisV2AiAttemptFenceError',
+    'AnalysisV2AiAttemptNotReadyError',
+    'AnalysisV2AiAttemptNotRetryableError',
+    'AnalysisV2AiResultConflictError',
+    'AnalysisV2AiResultFenceError',
+    'AnalysisV2AiResultNotReadyError',
+    'AnalysisV2AiResultRateLimitExhaustedError',
+    'AnalysisV2AiResultReplayBlockedError',
+    'AnalysisV2AiScoringStageConflictError',
+    'AnalysisV2AiScoringStageFenceError',
+    'AnalysisV2CollectionContextFenceError',
+    'AnalysisV2DagScopeMissingError',
+    'AnalysisV2DagStateConflictError',
+    'AnalysisV2DagStateFenceError',
+    'AnalysisV2EntitlementConsumptionError',
+    'AnalysisV2EvidenceConflictError',
+    'AnalysisV2EvidenceFenceError',
+    'AnalysisV2FreshAdmissionError',
+    'AnalysisV2FreshAdmissionLeaseBusyError',
+    'AnalysisV2JobDispatchNotReadyError',
+    'AnalysisV2JobExecutionError',
+    'AnalysisV2JobFenceError',
+    'AnalysisV2JobLeaseBusyError',
+    'AnalysisV2ProgressConflictError',
+    'AnalysisV2ProgressFenceError',
+    'AnalysisV2ProviderRunAlreadyReservedError',
+    'AnalysisV2ProviderRunConflictError',
+    'AnalysisV2ProviderRunFenceError',
+    'AnalysisV2ProviderRunReconciliationNotReadyError',
+    'AnalysisV2RelationshipIncompleteError',
+    'AnalysisV2ResultConflictError',
+    'AnalysisV2ResultFenceError',
+    'AnalysisV2ResultNotReadyError',
+    'AnalysisV2TransientMediaPreparationError',
+    'EarlybirdOrderLookupError',
+    'EarlybirdPersistenceError',
+    'EarlybirdWaitlistRequiredError',
+    'Error',
+    'EvalError',
+    'FlashApiRequestError',
+    'InvalidPreflightExclusionError',
+    'PreflightConsumedError',
+    'PreflightExpiredError',
+    'PreflightIdempotencyConflictError',
+    'PreflightImmutableError',
+    'PreflightLeaseBusyError',
+    'PreflightNotFoundError',
+    'PreflightRateLimitedError',
+    'PreflightTaskEnqueueError',
+    'PreflightWorkerRetryError',
+    'RangeError',
+    'ReferenceError',
+    'ResultPaginationError',
+    'RetryableGeminiRateLimitError',
+    'SecureImageFetchError',
+    'SyntaxError',
+    'TimeoutError',
+    'TypeError',
+    'URIError',
+    'WebProfileRequestError',
+    'ZodError',
+] as const;
+
+export const OPERATIONAL_ENVIRONMENTS = [
+    'development',
+    'test',
+    'preview',
+    'production',
+] as const;
+
+export const OPERATIONAL_PROVIDERS = [
+    'apify',
+    'coderx',
+    'flashapi',
+    'gemini',
+    'google',
+    'groble',
+    'kakao',
+    'rapidapi',
+    'selfhosted',
+    'supabase',
+] as const;
+
+export const OPERATIONAL_MODELS = [
+    'gemini-2.5-flash',
+    'gemini-3-flash-preview',
+    'gemini-3.1-flash-lite',
+] as const;
+
+export const OPERATIONAL_THINKING_LEVELS = [
+    'minimal',
+    'low',
+    'medium',
+    'high',
+] as const;
+
+export const OPERATIONAL_PLAN_IDS = ['basic', 'standard', 'plus'] as const;
+
+export const OPERATIONAL_OPERATIONS = [
+    'callback',
+    'profile_sync',
+    'preflight',
+    'profile',
+    'profilesBatch',
+    'profiles_batch',
+    'followers',
+    'following',
+    'exclusion',
+    'checkout',
+    'webhook',
+    'enqueue',
+    'worker',
+    'genderTriage',
+    'featureAnalysis',
+    'partnerSafety',
+    'highRiskNarrative',
+    'privateAccountName',
+] as const;
+
+export const OPERATIONAL_PHASES = [
+    'pending',
+    'collect',
+    'profiles',
+    'analyze',
+    'interactions',
+    'deep_analysis',
+    'finalize',
+    'completed',
+    'failed',
+    'gender',
+    'features',
+    'enqueue',
+    'dispatch',
+    'terminalize',
+] as const;
+
+export const OPERATIONAL_DISPOSITIONS = [
+    'success',
+    'failure',
+    'retry',
+    'fallback',
+    'completed',
+    'failed',
+    'error',
+    'requested',
+    'ready',
+    'blocked',
+    'enqueued',
+    'exists',
+    'disabled',
+    'transient',
+    'permanent',
+    'fence',
+    'rate_limited',
+    'ambiguous',
+    'rejected',
+    'response_rejected',
+    'accepted',
+    'ignored',
+    'unmatched',
+    'mismatch',
+    'duplicate_event',
+    'duplicate_payment',
+    'cancel_requested',
+    'cancel_duplicate_event',
+    'cancel_unmatched',
+    'cancel_before_payment',
+    'late_cancelled_payment',
+    'ambiguous_buyer',
+    'overflow_refund_required',
+] as const;
+
+export const OPERATIONAL_QUEUE_NAMES = [
+    'analysis-pipeline',
+    'analysis-v2',
+    'analysis-v2-pipeline',
+] as const;
+
+const REGISTERED_EVENT_NAMES = new Set<string>(OPERATIONAL_EVENT_NAMES);
+const REGISTERED_ERROR_CODES = new Set<string>(OPERATIONAL_ERROR_CODES);
+const REGISTERED_ERROR_NAMES = new Set<string>(OPERATIONAL_ERROR_NAMES);
+const REGISTERED_ENVIRONMENTS = new Set<string>(OPERATIONAL_ENVIRONMENTS);
+const REGISTERED_PROVIDERS = new Set<string>(OPERATIONAL_PROVIDERS);
+const REGISTERED_MODELS = new Set<string>(OPERATIONAL_MODELS);
+const REGISTERED_THINKING_LEVELS = new Set<string>(OPERATIONAL_THINKING_LEVELS);
+const REGISTERED_PLAN_IDS = new Set<string>(OPERATIONAL_PLAN_IDS);
+const REGISTERED_OPERATIONS = new Set<string>(OPERATIONAL_OPERATIONS);
+const REGISTERED_PHASES = new Set<string>(OPERATIONAL_PHASES);
+const REGISTERED_DISPOSITIONS = new Set<string>(OPERATIONAL_DISPOSITIONS);
+const REGISTERED_QUEUE_NAMES = new Set<string>(OPERATIONAL_QUEUE_NAMES);
 
 const METHODS = new Set([
     'CONNECT',
@@ -156,7 +335,7 @@ function safeString(
 
 function safeEnvironment(): string {
     const candidate = process.env.VERCEL_ENV ?? process.env.NODE_ENV ?? 'development';
-    return safeString(candidate) ?? 'development';
+    return REGISTERED_ENVIRONMENTS.has(candidate) ? candidate : 'development';
 }
 
 function safeSeverity(value: unknown): OperationalSeverity {
@@ -199,17 +378,27 @@ function safeErrorCode(value: unknown): string | undefined {
     if (!candidate) return undefined;
     const exactRegistryCandidate: unknown = candidate;
     if (isAnalysisV2WorkerErrorCode(exactRegistryCandidate)) return exactRegistryCandidate;
-    const registered = REGISTERED_ERROR_CODES.has(candidate)
-        || REGISTERED_ERROR_CODE_PREFIXES.some(prefix => candidate.startsWith(prefix));
-    if (!registered) return undefined;
-    if (candidate.split('_').some(segment => FORBIDDEN_ERROR_CODE_SEGMENTS.has(segment))) {
-        return undefined;
-    }
-    return candidate;
+    return REGISTERED_ERROR_CODES.has(candidate) ? candidate : undefined;
+}
+
+function safeLowercaseRegistryValue(
+    value: unknown,
+    registry: ReadonlySet<string>,
+): string | undefined {
+    const candidate = safeString(value)?.toLowerCase();
+    return candidate && registry.has(candidate) ? candidate : undefined;
+}
+
+function safeExactRegistryValue(
+    value: unknown,
+    registry: ReadonlySet<string>,
+): string | undefined {
+    const candidate = safeString(value);
+    return candidate && registry.has(candidate) ? candidate : undefined;
 }
 
 function safeErrorName(value: unknown): string | undefined {
-    return safeString(value, ERROR_NAME_PATTERN);
+    return safeExactRegistryValue(value, REGISTERED_ERROR_NAMES);
 }
 
 function sanitizeField(name: string, value: unknown): SanitizedValue | undefined {
@@ -217,7 +406,7 @@ function sanitizeField(name: string, value: unknown): SanitizedValue | undefined
 
     switch (name) {
         case 'request_id':
-            return safeString(value, REQUEST_ID_PATTERN);
+            return safeUuid(value);
         case 'trace_id':
             return safeString(value, TRACE_ID_PATTERN)?.toLowerCase();
         case 'route':
@@ -243,13 +432,19 @@ function sanitizeField(name: string, value: unknown): SanitizedValue | undefined
         case 'excluded_instagram_id':
             return safeInstagramId(value);
         case 'provider':
-        case 'operation':
-        case 'phase':
-        case 'disposition':
+            return safeLowercaseRegistryValue(value, REGISTERED_PROVIDERS);
         case 'model':
+            return safeLowercaseRegistryValue(value, REGISTERED_MODELS);
         case 'thinking_level':
+            return safeLowercaseRegistryValue(value, REGISTERED_THINKING_LEVELS);
+        case 'operation':
+            return safeExactRegistryValue(value, REGISTERED_OPERATIONS);
+        case 'phase':
+            return safeExactRegistryValue(value, REGISTERED_PHASES);
+        case 'disposition':
+            return safeExactRegistryValue(value, REGISTERED_DISPOSITIONS);
         case 'queue_name':
-            return safeString(value);
+            return safeExactRegistryValue(value, REGISTERED_QUEUE_NAMES);
         case 'attempt':
             return safeFiniteNumber(value, 0, 10_000, true);
         case 'result_count':
@@ -271,7 +466,7 @@ function sanitizeField(name: string, value: unknown): SanitizedValue | undefined
         case 'progress':
             return safeFiniteNumber(value, 0, 100);
         case 'plan_id':
-            return safeString(value, PLAN_ID_PATTERN);
+            return safeLowercaseRegistryValue(value, REGISTERED_PLAN_IDS);
         case 'amount_krw':
             return safeFiniteNumber(value, 0, 1_000_000_000, true);
         default:
@@ -300,7 +495,7 @@ export function sanitizeOperationalEvent(input: OperationalEvent): {
     message: string;
     fields: Record<string, SanitizedValue>;
 } {
-    const event = typeof input.event === 'string' && EVENT_PATTERN.test(input.event)
+    const event = typeof input.event === 'string' && REGISTERED_EVENT_NAMES.has(input.event)
         ? input.event
         : 'operational.invalid_event';
     const severity = safeSeverity(input.severity);

@@ -1,13 +1,9 @@
 import 'server-only';
 
-import { Axiom } from '@axiomhq/js';
-import {
-    AxiomJSTransport,
-    Logger,
-    type Formatter,
-    type LogEvent,
+import type {
+    Formatter,
+    LogEvent,
 } from '@axiomhq/logging';
-import { nextJsFormatters } from '@axiomhq/nextjs';
 
 import {
     sanitizeOperationalEvent,
@@ -43,6 +39,7 @@ export interface OperationalBatchOutcome {
 
 /** Prevents one batch from generating an unbounded tail of exceptional item logs. */
 export const MAX_BATCH_EXCEPTION_EVENTS = 25;
+export const OPERATIONAL_FLUSH_TIMEOUT_MS = 1_000;
 
 function swallowPossibleRejection(result: unknown): void {
     if (
@@ -51,6 +48,23 @@ function swallowPossibleRejection(result: unknown): void {
         && typeof (result as PromiseLike<unknown>).then === 'function'
     ) {
         void Promise.resolve(result).catch(() => undefined);
+    }
+}
+
+async function flushWithinDeadline(transport: OperationalTransport): Promise<void> {
+    const transportFlush = Promise.resolve().then(() => transport.flush());
+    void transportFlush.catch(() => undefined);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+
+    try {
+        await Promise.race([
+            transportFlush,
+            new Promise<void>(resolve => {
+                timeout = setTimeout(resolve, OPERATIONAL_FLUSH_TIMEOUT_MS);
+            }),
+        ]);
+    } finally {
+        if (timeout) clearTimeout(timeout);
     }
 }
 
@@ -75,7 +89,7 @@ export function createOperationalLogger(
         async flush() {
             if (!transport) return;
             try {
-                await transport.flush();
+                await flushWithinDeadline(transport);
             } catch {
                 // Observability must never change the product outcome.
             }
@@ -87,39 +101,69 @@ function formatterSeverity(value: unknown): OperationalSeverity {
     return value === 'debug' || value === 'warn' || value === 'error' ? value : 'info';
 }
 
-function safeNextJsVersion(value: unknown): string | undefined {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-    const version = (value as Record<string, unknown>)['next-axiom-version'];
-    return typeof version === 'string'
-        && version.length <= 32
-        && /^[0-9A-Za-z.+-]+$/.test(version)
-        ? version
-        : undefined;
-}
-
 const privacyBoundaryFormatter: Formatter = (logEvent): LogEvent => {
-    const severity = formatterSeverity(logEvent.level);
-    const event = typeof logEvent.message === 'string'
-        ? logEvent.message
+    const fields = logEvent.fields && typeof logEvent.fields === 'object'
+        ? logEvent.fields as Record<string, unknown>
+        : {};
+    const severity = formatterSeverity(fields.severity);
+    const event = typeof fields.event === 'string'
+        ? fields.event
         : 'operational.invalid_event';
     const sanitized = sanitizeOperationalEvent({
         event,
         severity,
-        fields: logEvent.fields && typeof logEvent.fields === 'object'
-            ? logEvent.fields as Record<string, unknown>
-            : undefined,
+        fields,
     });
-    const nextJsVersion = safeNextJsVersion(logEvent['@app']);
 
     return {
         level: severity,
         message: sanitized.message,
         fields: sanitized.fields,
         _time: new Date().toISOString(),
-        '@app': nextJsVersion ? { 'next-axiom-version': nextJsVersion } : {},
         source: 'server-log',
-    };
+    } as LogEvent;
 };
+
+interface AxiomRuntimeConfig {
+    token: string;
+    dataset: string;
+    orgId: string;
+}
+
+async function createAxiomRuntimeTransport(
+    config: AxiomRuntimeConfig,
+): Promise<OperationalTransport | undefined> {
+    const bigintToJson = Object.getOwnPropertyDescriptor(BigInt.prototype, 'toJSON');
+
+    try {
+        const { Axiom } = await import('@axiomhq/js');
+        const { AxiomJSTransport, Logger } = await import('@axiomhq/logging');
+        const axiom = new Axiom({ token: config.token, orgId: config.orgId });
+        const logger = new Logger({
+            transports: [new AxiomJSTransport({
+                axiom,
+                dataset: config.dataset,
+                logLevel: 'debug',
+            })],
+            logLevel: 'debug',
+            formatters: [privacyBoundaryFormatter],
+            overrideDefaultFormatters: true,
+        });
+
+        return {
+            log: (level, message, fields) => logger.log(level, message, fields),
+            flush: () => logger.flush(),
+        };
+    } catch {
+        return undefined;
+    } finally {
+        if (bigintToJson) {
+            Object.defineProperty(BigInt.prototype, 'toJSON', bigintToJson);
+        } else {
+            Reflect.deleteProperty(BigInt.prototype, 'toJSON');
+        }
+    }
+}
 
 function runtimeTransport(): OperationalTransport | undefined {
     const token = process.env.AXIOM_TOKEN?.trim();
@@ -127,16 +171,27 @@ function runtimeTransport(): OperationalTransport | undefined {
     const orgId = process.env.AXIOM_ORG_ID?.trim();
     if (!token || !dataset || !orgId) return undefined;
 
-    const axiom = new Axiom({ token, orgId });
-    const logger = new Logger({
-        transports: [new AxiomJSTransport({ axiom, dataset })],
-        formatters: [...nextJsFormatters, privacyBoundaryFormatter],
-        overrideDefaultFormatters: true,
-    });
+    let loadedTransport: Promise<OperationalTransport | undefined> | undefined;
+    const pendingLogs = new Set<Promise<void>>();
+    const load = () => {
+        loadedTransport ??= createAxiomRuntimeTransport({ token, dataset, orgId });
+        return loadedTransport;
+    };
 
     return {
-        log: (level, message, fields) => logger.log(level, message, fields),
-        flush: () => logger.flush(),
+        log(level, message, fields) {
+            const pending = load()
+                .then(transport => transport?.log(level, message, fields))
+                .then(() => undefined)
+                .catch(() => undefined);
+            pendingLogs.add(pending);
+            void pending.then(() => pendingLogs.delete(pending));
+        },
+        async flush() {
+            await Promise.allSettled([...pendingLogs]);
+            const transport = await load();
+            await transport?.flush();
+        },
     };
 }
 
