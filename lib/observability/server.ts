@@ -138,6 +138,7 @@ async function createAxiomRuntimeTransport(
     try {
         const { Axiom } = await import('@axiomhq/js');
         const { AxiomJSTransport, Logger } = await import('@axiomhq/logging');
+        const { frameworkIdentifierFormatter } = await import('@axiomhq/nextjs');
         const axiom = new Axiom({ token: config.token, orgId: config.orgId });
         const logger = new Logger({
             transports: [new AxiomJSTransport({
@@ -146,7 +147,7 @@ async function createAxiomRuntimeTransport(
                 logLevel: 'debug',
             })],
             logLevel: 'debug',
-            formatters: [privacyBoundaryFormatter],
+            formatters: [frameworkIdentifierFormatter, privacyBoundaryFormatter],
             overrideDefaultFormatters: true,
         });
 

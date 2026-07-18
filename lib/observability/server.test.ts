@@ -19,6 +19,10 @@ const axiomMocks = vi.hoisted(() => {
             flush: loggerFlush,
         };
     });
+    const frameworkIdentifierFormatter = vi.fn((event: Record<string, unknown>) => ({
+        ...event,
+        '@app': { 'next-axiom-version': '0.3.0' },
+    }));
     const unsafeContextFormatter = vi.fn((event: Record<string, unknown>) => ({
         ...event,
         message: 'context.secret_token',
@@ -44,6 +48,7 @@ const axiomMocks = vi.hoisted(() => {
         loggerConstructor,
         loggerLog,
         loggerFlush,
+        frameworkIdentifierFormatter,
         unsafeContextFormatter,
     };
 });
@@ -55,7 +60,12 @@ vi.mock('@axiomhq/logging', () => ({
     Logger: axiomMocks.loggerConstructor,
 }));
 vi.mock('@axiomhq/nextjs', () => ({
-    nextJsFormatters: [axiomMocks.unsafeContextFormatter],
+    frameworkIdentifierFormatter: axiomMocks.frameworkIdentifierFormatter,
+    serverContextFieldsFormatter: axiomMocks.unsafeContextFormatter,
+    nextJsFormatters: [
+        axiomMocks.frameworkIdentifierFormatter,
+        axiomMocks.unsafeContextFormatter,
+    ],
 }));
 
 import {
@@ -220,6 +230,9 @@ describe('server-only module boundary', () => {
         expect(source).not.toMatch(/^import .*['"]@axiomhq\/(?:js|logging|nextjs)['"];?$/m);
         expect(source).toContain("await import('@axiomhq/js')");
         expect(source).toContain("await import('@axiomhq/logging')");
+        expect(source).toContain("await import('@axiomhq/nextjs')");
+        expect(source).not.toContain('nextJsFormatters');
+        expect(source).not.toContain('serverContextFieldsFormatter');
         expect(source).not.toContain("typeof window !== 'undefined'");
         expect(packageJson.dependencies?.['server-only']).toBe('0.0.1');
     });
@@ -380,7 +393,9 @@ describe('operationalLogger runtime transport', () => {
             overrideDefaultFormatters: boolean;
         };
         expect(config.overrideDefaultFormatters).toBe(true);
-        expect(config.formatters).toHaveLength(1);
+        expect(config.formatters).toHaveLength(2);
+        expect(config.formatters[0]).toBe(axiomMocks.frameworkIdentifierFormatter);
+        expect(config.formatters[1]).not.toBe(axiomMocks.unsafeContextFormatter);
         const formatted = config.formatters.reduce<Record<string, unknown>>(
             (event, formatter) => formatter(event),
             {
@@ -405,6 +420,7 @@ describe('operationalLogger runtime transport', () => {
         expect(JSON.stringify(formatted)).not.toContain('xaat-secret-token');
         expect(JSON.stringify(formatted)).not.toContain('AUTH_SKLIVEABC123');
         expect(JSON.stringify(formatted)).not.toContain('secret-token');
+        expect(axiomMocks.frameworkIdentifierFormatter).toHaveBeenCalledTimes(1);
         expect(axiomMocks.unsafeContextFormatter).not.toHaveBeenCalled();
 
         const smuggled = config.formatters.reduce<Record<string, unknown>>(
@@ -431,6 +447,8 @@ describe('operationalLogger runtime transport', () => {
         expect(JSON.stringify(smuggled)).not.toContain('xaat-secret-token');
         expect(JSON.stringify(smuggled)).not.toContain('SecretToken');
         expect(JSON.stringify(smuggled)).not.toContain('AUTH_SKLIVEABC123');
+        expect(axiomMocks.frameworkIdentifierFormatter).toHaveBeenCalledTimes(2);
+        expect(axiomMocks.unsafeContextFormatter).not.toHaveBeenCalled();
 
         expect(axiomMocks.loggerFlush).toHaveBeenCalledTimes(1);
         operationalLogger.emit({ event: 'next.request_error', severity: 'debug' });
