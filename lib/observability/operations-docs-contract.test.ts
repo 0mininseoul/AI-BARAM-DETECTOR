@@ -18,11 +18,14 @@ describe('analytics and observability disclosure contract', () => {
             /인스타그램 계정 아이디[^<]*?장애[^<]*?진단|장애[^<]*?진단[^<]*?인스타그램 계정 아이디/
         );
         expect(disclosure).toMatch(/Axiom[^<]*?(30일|30 일)|30일[^<]*?Axiom/);
-        expect(disclosure).toMatch(/구매자[^<]*?이메일[^<]*?전화번호[^<]*?일시적/);
+        expect(disclosure).toMatch(/그로블 구매자[^<]*?주문자명[^<]*?이메일[^<]*?전화번호[^<]*?일시적/);
         expect(disclosure).toMatch(/결제 매칭[^<]*?(이행|결과 제공)[^<]*?(분쟁|환불)/);
         expect(disclosure).toMatch(/웹훅[^<]*?처리 트랜잭션[^<]*?영속[^<]*?저장하지/);
         expect(disclosure).not.toContain('메모리에서만');
         expect(disclosure).not.toMatch(/구매자[^<]*?(연락처|이메일|전화번호)[^<]*?(증거로 보관|결제 증거)/);
+        expect(disclosure).toMatch(
+            /주문자명[^<]*?이메일[^<]*?전화번호[^<]*?영속[^<]*?저장하지[^<]*?Amplitude[^<]*?Axiom[^<]*?전송하지/
+        );
         expect(disclosure).toMatch(/카드[^<]*?원문 웹훅[^<]*?보관하지/);
         expect(disclosure).toMatch(/Amplitude[^<]*?이용 통계[^<]*?Session Replay[^<]*?비활성화/);
         expect(disclosure).toMatch(/구매자[^<]*?연락처[^<]*?댓글[^<]*?소개글[^<]*?캡션[^<]*?(이미지|미디어) URL[^<]*?제외/);

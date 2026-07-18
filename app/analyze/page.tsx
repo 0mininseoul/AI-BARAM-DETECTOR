@@ -664,7 +664,7 @@ export default function AnalyzePage() {
                                                 </span>
                                             </label>
                                             <p className="mt-3 border-t border-amber/20 pt-3 text-[11px] leading-relaxed text-fg-mute">
-                                                Groble 결제창에는 현재 로그인한 계정과 같은 이메일을 사용해주세요.
+                                                Groble 결제창에는 카카오 로그인 계정과 같은 전화번호를 입력해주세요. Groble 이메일은 로그인 이메일과 달라도 됩니다.
                                             </p>
                                         </div>
                                     )}

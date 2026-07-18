@@ -353,6 +353,37 @@ describe('signed Groble webhook route', () => {
     });
 
     it.each([
+        ['absent', undefined],
+        ['empty', ''],
+        ['long', `private-name-${'x'.repeat(101)}`],
+    ])('finalizes a signed payment with %s displayName without forwarding or logging it', async (
+        _,
+        displayName
+    ) => {
+        const buyer: Record<string, unknown> = {
+            ...payload().data.object.buyer,
+        };
+        if (displayName === undefined) delete buyer.displayName;
+        else buyer.displayName = displayName;
+
+        const response = await POST(request(JSON.stringify(payload({ buyer }))));
+
+        expect(response.status).toBe(200);
+        expect(mocks.rpc).toHaveBeenCalledWith(
+            'finalize_earlybird_groble_payment',
+            expect.objectContaining({ p_buyer_display_name: null })
+        );
+        const observedOutput = JSON.stringify({
+            rpc: mocks.rpc.mock.calls,
+            logs: mocks.emit.mock.calls,
+            response: await response.text(),
+        });
+        if (typeof displayName === 'string' && displayName.length > 0) {
+            expect(observedOutput).not.toContain(displayName);
+        }
+    });
+
+    it.each([
         ['absent', undefined, null],
         ['invalid', 'not-a-korean-mobile', 'not-a-korean-mobile'],
     ])('uses a null normalized phone for %s phone evidence without forwarding it', async (

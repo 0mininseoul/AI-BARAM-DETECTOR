@@ -32,7 +32,6 @@ const paymentCompletedSchema = z.object({
             buyer: z.object({
                 email: z.string().trim().email().max(320),
                 phoneNumber: z.string().trim().min(1).max(64).optional(),
-                displayName: z.string().trim().min(1).max(100).optional(),
             }),
             content: z.object({
                 id: boundedIdentifier,

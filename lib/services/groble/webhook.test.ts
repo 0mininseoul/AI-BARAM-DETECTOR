@@ -157,7 +157,7 @@ describe('Groble payment.completed parser', () => {
         });
     });
 
-    it('returns null buyer phone and display name for legacy completed events', () => {
+    it('returns a null buyer phone for legacy completed events', () => {
         const event = paymentPayload({
             buyer: {
                 type: 'MEMBER',
@@ -177,11 +177,6 @@ describe('Groble payment.completed parser', () => {
         ['phoneNumber', '1'.repeat(65)],
         ['phoneNumber', 10_1234_5678],
         ['phoneNumber', null],
-        ['displayName', ''],
-        ['displayName', '   '],
-        ['displayName', 'a'.repeat(101)],
-        ['displayName', 1234],
-        ['displayName', null],
     ])('rejects an invalid completed buyer %s value', (field, invalidValue) => {
         const buyer = {
             ...paymentPayload().data.object.buyer,
@@ -191,6 +186,29 @@ describe('Groble payment.completed parser', () => {
         expect(() => parseGroblePaymentCompletedEvent(JSON.stringify(
             paymentPayload({ buyer })
         ))).toThrow();
+    });
+
+    it.each([
+        ['absent', undefined],
+        ['empty', ''],
+        ['long', 'a'.repeat(101)],
+        ['non-string', { unexpected: true }],
+    ])('ignores an irrelevant %s displayName', (_, displayName) => {
+        const buyer: Record<string, unknown> = {
+            ...paymentPayload().data.object.buyer,
+        };
+        if (displayName === undefined) delete buyer.displayName;
+        else buyer.displayName = displayName;
+
+        const parsed = parseGroblePaymentCompletedEvent(JSON.stringify(
+            paymentPayload({ buyer })
+        ));
+
+        expect(parsed).toMatchObject({
+            buyerEmail: 'buyer@example.com',
+            buyerPhoneNumber: '010-1234-5678',
+        });
+        expect(parsed).not.toHaveProperty('buyerDisplayName');
     });
 
     it('does not return or log unprojected raw payment fields', () => {
