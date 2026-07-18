@@ -20,7 +20,7 @@
     "canary:instagram-profile-provider:finalize": "tsx --env-file=.env.local scripts/finalize-profile-provider-canary.ts"
   },
   "dependencies": {
-    "@amplitude/analytics-browser": "^2.33.5",
+    "@amplitude/unified": "1.1.25",
     "@google-cloud/tasks": "6.2.3",
     "@google/genai": "^2.7.0",
     "@supabase/ssr": "^0.8.0",
