@@ -5,30 +5,22 @@ const analyticsMocks = vi.hoisted(() => ({
     identifyAnalyticsUser: vi.fn(),
     initAmplitude: vi.fn(),
     isCanonicalAnalyticsUserId: vi.fn(),
-    trackEvent: vi.fn(),
+    markAnalyticsIdentityPending: vi.fn(),
+    markAnalyticsIdentityReady: vi.fn(),
+}));
+
+const authMarkerMocks = vi.hoisted(() => ({
+    completePendingAuthEvent: vi.fn(),
 }));
 
 vi.mock('@/hooks/useAuth', () => ({
     useAuth: vi.fn(),
 }));
 
-vi.mock('@/lib/services/analytics', () => ({
-    EVENTS: { AUTH_COMPLETED: 'auth_completed' },
-    ...analyticsMocks,
-}));
+vi.mock('@/lib/services/analytics', () => analyticsMocks);
+vi.mock('@/lib/services/analytics-auth', () => authMarkerMocks);
 
 const VALID_USER_ID = '550e8400-e29b-41d4-a716-446655440000';
-
-function createStorage(marker: string | null = 'kakao') {
-    let currentMarker = marker;
-
-    return {
-        getItem: vi.fn(() => currentMarker),
-        removeItem: vi.fn(() => {
-            currentMarker = null;
-        }),
-    };
-}
 
 describe('AmplitudeProvider auth integration', () => {
     beforeEach(() => {
@@ -37,93 +29,103 @@ describe('AmplitudeProvider auth integration', () => {
         analyticsMocks.isCanonicalAnalyticsUserId
             .mockReset()
             .mockImplementation((userId: string) => userId === VALID_USER_ID);
-        analyticsMocks.trackEvent.mockReset();
+        analyticsMocks.markAnalyticsIdentityPending.mockReset();
+        analyticsMocks.markAnalyticsIdentityReady.mockReset();
+        authMarkerMocks.completePendingAuthEvent.mockReset();
     });
 
-    it('completes and removes a pending auth marker only once for a valid user', async () => {
-        const { completePendingAuthEvent } = await import('../../components/amplitude-provider');
-        const storage = createStorage();
-
-        expect(completePendingAuthEvent(VALID_USER_ID, storage)).toBe(true);
-        expect(completePendingAuthEvent(VALID_USER_ID, storage)).toBe(false);
-
-        expect(storage.removeItem).toHaveBeenCalledTimes(1);
-        expect(storage.removeItem).toHaveBeenCalledWith('amplitude_auth_started');
-        expect(analyticsMocks.trackEvent).toHaveBeenCalledTimes(1);
-        expect(analyticsMocks.trackEvent).toHaveBeenCalledWith('auth_completed');
-    });
-
-    it('ignores invalid users and fails open when storage is unavailable or throws', async () => {
-        const { completePendingAuthEvent } = await import('../../components/amplitude-provider');
-        const inaccessibleStorage = {
-            getItem: vi.fn(() => {
-                throw new Error('storage unavailable');
-            }),
-            removeItem: vi.fn(),
-        };
-        const nonRemovableStorage = {
-            getItem: vi.fn(() => 'kakao'),
-            removeItem: vi.fn(() => {
-                throw new Error('storage unavailable');
-            }),
-        };
-
-        expect(completePendingAuthEvent('person@example.com', createStorage())).toBe(false);
-        expect(completePendingAuthEvent(VALID_USER_ID, undefined)).toBe(false);
-        expect(completePendingAuthEvent(VALID_USER_ID, inaccessibleStorage)).toBe(false);
-        expect(completePendingAuthEvent(VALID_USER_ID, nonRemovableStorage)).toBe(false);
-        expect(analyticsMocks.trackEvent).not.toHaveBeenCalled();
-    });
-
-    it('identifies and resets once per resolved auth transition', async () => {
+    it('opens initial anonymous delivery without resetting identity', async () => {
         const {
             createAuthAnalyticsState,
             syncAnalyticsAuth,
         } = await import('../../components/amplitude-provider');
-        const storage = createStorage();
         let state = createAuthAnalyticsState();
 
         state = syncAnalyticsAuth(state, {
             loading: true,
+            provider: null,
             userId: null,
-            storage,
         });
-        expect(analyticsMocks.identifyAnalyticsUser).not.toHaveBeenCalled();
-
         state = syncAnalyticsAuth(state, {
             loading: false,
+            provider: null,
             userId: null,
-            storage,
         });
-        state = syncAnalyticsAuth(state, {
-            loading: false,
-            userId: null,
-            storage,
-        });
-        expect(analyticsMocks.identifyAnalyticsUser).toHaveBeenCalledTimes(1);
-        expect(analyticsMocks.identifyAnalyticsUser).toHaveBeenLastCalledWith(null);
-
-        state = syncAnalyticsAuth(state, {
-            loading: false,
-            userId: VALID_USER_ID,
-            storage,
-        });
-        state = syncAnalyticsAuth(state, {
-            loading: false,
-            userId: VALID_USER_ID,
-            storage,
-        });
-        expect(analyticsMocks.identifyAnalyticsUser).toHaveBeenCalledTimes(2);
-        expect(analyticsMocks.identifyAnalyticsUser).toHaveBeenLastCalledWith(VALID_USER_ID);
-        expect(analyticsMocks.trackEvent).toHaveBeenCalledTimes(1);
-
         syncAnalyticsAuth(state, {
             loading: false,
+            provider: null,
+            userId: null,
+        });
+
+        expect(analyticsMocks.identifyAnalyticsUser).not.toHaveBeenCalled();
+        expect(analyticsMocks.markAnalyticsIdentityPending).not.toHaveBeenCalled();
+        expect(analyticsMocks.markAnalyticsIdentityReady).toHaveBeenCalledTimes(1);
+        expect(authMarkerMocks.completePendingAuthEvent).not.toHaveBeenCalled();
+    });
+
+    it('identifies before completing auth and deduplicates login and logout transitions', async () => {
+        const {
+            createAuthAnalyticsState,
+            syncAnalyticsAuth,
+        } = await import('../../components/amplitude-provider');
+        const storage = { getItem: vi.fn(), removeItem: vi.fn(), setItem: vi.fn() };
+        let state = createAuthAnalyticsState();
+
+        state = syncAnalyticsAuth(state, {
+            loading: false,
+            provider: null,
             userId: null,
             storage,
         });
-        expect(analyticsMocks.identifyAnalyticsUser).toHaveBeenCalledTimes(3);
-        expect(analyticsMocks.identifyAnalyticsUser).toHaveBeenLastCalledWith(null);
+        vi.clearAllMocks();
+
+        state = syncAnalyticsAuth(state, {
+            loading: false,
+            provider: 'kakao',
+            userId: VALID_USER_ID,
+            storage,
+        });
+        state = syncAnalyticsAuth(state, {
+            loading: false,
+            provider: 'kakao',
+            userId: VALID_USER_ID,
+            storage,
+        });
+
+        expect(analyticsMocks.markAnalyticsIdentityPending).toHaveBeenCalledTimes(1);
+        expect(analyticsMocks.identifyAnalyticsUser).toHaveBeenCalledTimes(1);
+        expect(analyticsMocks.identifyAnalyticsUser).toHaveBeenCalledWith(VALID_USER_ID);
+        expect(authMarkerMocks.completePendingAuthEvent).toHaveBeenCalledTimes(1);
+        expect(authMarkerMocks.completePendingAuthEvent).toHaveBeenCalledWith({
+            provider: 'kakao',
+            storage,
+            userId: VALID_USER_ID,
+        });
+        expect(analyticsMocks.markAnalyticsIdentityReady).toHaveBeenCalledTimes(1);
+        expect(analyticsMocks.identifyAnalyticsUser.mock.invocationCallOrder[0])
+            .toBeLessThan(authMarkerMocks.completePendingAuthEvent.mock.invocationCallOrder[0]);
+        expect(authMarkerMocks.completePendingAuthEvent.mock.invocationCallOrder[0])
+            .toBeLessThan(analyticsMocks.markAnalyticsIdentityReady.mock.invocationCallOrder[0]);
+
+        vi.clearAllMocks();
+        state = syncAnalyticsAuth(state, {
+            loading: false,
+            provider: null,
+            userId: null,
+            storage,
+        });
+        syncAnalyticsAuth(state, {
+            loading: false,
+            provider: null,
+            userId: null,
+            storage,
+        });
+
+        expect(analyticsMocks.markAnalyticsIdentityPending).toHaveBeenCalledTimes(1);
+        expect(analyticsMocks.identifyAnalyticsUser).toHaveBeenCalledTimes(1);
+        expect(analyticsMocks.identifyAnalyticsUser).toHaveBeenCalledWith(null);
+        expect(analyticsMocks.markAnalyticsIdentityReady).toHaveBeenCalledTimes(1);
+        expect(authMarkerMocks.completePendingAuthEvent).not.toHaveBeenCalled();
     });
 
     it('keeps the SDK behind one client provider mounted once at the root', () => {
@@ -138,6 +140,7 @@ describe('AmplitudeProvider auth integration', () => {
 
         expect(providerSource.startsWith("'use client';")).toBe(true);
         expect(providerSource).not.toContain('@amplitude/unified');
+        expect(layoutSource).not.toContain('@amplitude/unified');
         expect(layoutSource).toContain(
             'import { AmplitudeProvider } from "@/components/amplitude-provider";',
         );

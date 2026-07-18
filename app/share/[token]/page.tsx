@@ -4,6 +4,7 @@ import { useEffect, useState, use } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
+import { shareResult } from '@/lib/services/result-share';
 import {
     TopBar,
     Eyebrow,
@@ -145,9 +146,9 @@ export default function ShareResultPage({ params }: PageProps) {
                 }
 
                 setData(result);
-                trackEvent(EVENTS.VIEW_RESULT, {
-                    femaleCount: result.femaleAccounts?.length,
-                    isShared: true,
+                trackEvent(EVENTS.RESULT_VIEWED, {
+                    result_count: result.femaleAccounts.length + result.privateAccounts.length,
+                    is_shared: true,
                 });
             } catch (err) {
                 setError(err instanceof Error ? err.message : '결과를 불러오는데 실패했습니다.');
@@ -160,8 +161,6 @@ export default function ShareResultPage({ params }: PageProps) {
     }, [token]);
 
     const handleShare = async () => {
-        trackEvent(EVENTS.CLICK_SHARE_KAKAO);
-
         const url = window.location.href;
         const shareData = {
             title: 'AI 위장 여사친 판독기 분석 결과',
@@ -169,19 +168,20 @@ export default function ShareResultPage({ params }: PageProps) {
             url: url,
         };
 
-        if (navigator.share) {
-            try {
-                await navigator.share(shareData);
-                return;
-            } catch {
-                // fallback
+        const shareChannel = await shareResult({
+            ...(navigator.share
+                ? { share: (payload) => navigator.share(payload) }
+                : {}),
+            ...(navigator.clipboard?.writeText
+                ? { writeText: (text) => navigator.clipboard.writeText(text) }
+                : {}),
+        }, shareData);
+        if (shareChannel) {
+            trackEvent(EVENTS.RESULT_SHARED, { share_channel: shareChannel });
+            if (shareChannel === 'clipboard') {
+                alert('링크가 클립보드에 복사되었습니다!');
             }
-        }
-
-        try {
-            await navigator.clipboard.writeText(url);
-            alert('링크가 클립보드에 복사되었습니다!');
-        } catch {
+        } else {
             alert('공유하기에 실패했습니다.');
         }
     };
@@ -219,7 +219,7 @@ export default function ShareResultPage({ params }: PageProps) {
                 }
             />
 
-            <main className="mx-auto max-w-[480px] px-5 pt-8">
+            <main data-amp-block className="mx-auto max-w-[480px] px-5 pt-8">
                 <div className="flex items-center justify-between gap-3">
                     <Eyebrow className="shrink-0">판독 리포트 · 공유본</Eyebrow>
                     <div className="flex min-w-0 max-w-[58%] items-center gap-2">

@@ -1,16 +1,22 @@
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const amplitudeMocks = vi.hoisted(() => ({
     initAll: vi.fn(),
+    moduleLoads: 0,
     reset: vi.fn(),
     setUserId: vi.fn(),
     track: vi.fn(),
 }));
 
-vi.mock('@amplitude/unified', () => amplitudeMocks);
+vi.mock('@amplitude/unified', () => {
+    amplitudeMocks.moduleLoads += 1;
+    return amplitudeMocks;
+});
 
-const API_KEY = 'test-key';
+const API_KEY = '0123456789abcdef0123456789abcdef';
 const VALID_USER_ID = '550e8400-e29b-41d4-a716-446655440000';
+const SECOND_UUID = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
 
 async function loadAnalytics() {
     return import('./analytics');
@@ -26,6 +32,7 @@ describe('Amplitude analytics adapter', () => {
         vi.resetModules();
         amplitudeMocks.initAll.mockReset();
         amplitudeMocks.initAll.mockResolvedValue(undefined);
+        amplitudeMocks.moduleLoads = 0;
         amplitudeMocks.reset.mockReset();
         amplitudeMocks.setUserId.mockReset();
         amplitudeMocks.track.mockReset();
@@ -36,7 +43,7 @@ describe('Amplitude analytics adapter', () => {
         vi.unstubAllGlobals();
     });
 
-    it('exports only the approved fixed event catalog', async () => {
+    it('exports only canonical approved events with no legacy aliases', async () => {
         const { EVENTS } = await loadAnalytics();
 
         expect(EVENTS).toEqual({
@@ -59,10 +66,13 @@ describe('Amplitude analytics adapter', () => {
             RESULT_VIEWED: 'result_viewed',
             RESULT_SHARED: 'result_shared',
         });
+        expect((EVENTS as Record<string, string>).CLICK_CTA_START).toBeUndefined();
+        expect((EVENTS as Record<string, string>).VIEW_RESULT).toBeUndefined();
+        expect((EVENTS as Record<string, string>).CLICK_SHARE_KAKAO).toBeUndefined();
     });
 
-    it('initializes once with the exact privacy-bounded Unified configuration', async () => {
-        enableBrowser('  test-key  ');
+    it('initializes once with granular safe autocapture and conservative replay', async () => {
+        enableBrowser();
         const { initAmplitude } = await loadAnalytics();
 
         const [firstResult, secondResult] = await Promise.all([
@@ -73,12 +83,28 @@ describe('Amplitude analytics adapter', () => {
         expect(firstResult).toBe(true);
         expect(secondResult).toBe(true);
         expect(amplitudeMocks.initAll).toHaveBeenCalledTimes(1);
-        expect(amplitudeMocks.initAll).toHaveBeenCalledWith('test-key', {
-            analytics: { autocapture: true },
+        expect(amplitudeMocks.initAll).toHaveBeenCalledWith(API_KEY, {
+            analytics: {
+                autocapture: {
+                    sessions: true,
+                    attribution: false,
+                    pageViews: false,
+                    formInteractions: false,
+                    fileDownloads: false,
+                    elementInteractions: false,
+                    frustrationInteractions: false,
+                    pageUrlEnrichment: false,
+                    networkTracking: false,
+                    webVitals: false,
+                    performanceTracking: false,
+                },
+                fetchRemoteConfig: false,
+                remoteConfig: { fetchRemoteConfig: false },
+            },
             sessionReplay: {
                 sampleRate: 1,
                 privacyConfig: {
-                    defaultMaskLevel: 'medium',
+                    defaultMaskLevel: 'conservative',
                     maskSelector: ['.amp-mask', '[data-amp-mask]'],
                     blockSelector: ['.amp-block', '[data-amp-block]'],
                 },
@@ -90,24 +116,36 @@ describe('Amplitude analytics adapter', () => {
         expect(amplitudeMocks.initAll).toHaveBeenCalledTimes(1);
     });
 
-    it('fails open on the server and for missing or blank keys', async () => {
+    it('never loads Unified on the server or with a missing key', async () => {
         vi.stubEnv('NEXT_PUBLIC_AMPLITUDE_API_KEY', API_KEY);
         const serverAnalytics = await loadAnalytics();
 
         await expect(serverAnalytics.initAmplitude()).resolves.toBe(false);
+        expect(amplitudeMocks.moduleLoads).toBe(0);
 
         vi.resetModules();
         vi.stubGlobal('window', {});
-        vi.stubEnv('NEXT_PUBLIC_AMPLITUDE_API_KEY', '   ');
-        const blankKeyAnalytics = await loadAnalytics();
-
-        await expect(blankKeyAnalytics.initAmplitude()).resolves.toBe(false);
-
-        vi.resetModules();
         vi.stubEnv('NEXT_PUBLIC_AMPLITUDE_API_KEY', '');
         const missingKeyAnalytics = await loadAnalytics();
 
         await expect(missingKeyAnalytics.initAmplitude()).resolves.toBe(false);
+        expect(amplitudeMocks.moduleLoads).toBe(0);
+        expect(amplitudeMocks.initAll).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        '   ',
+        'xxx',
+        'test-key',
+        '00000000000000000000000000000000',
+        '0123456789abcdef0123456789abcdeg',
+        '0123456789abcdef0123456789abcdef00',
+    ])('rejects malformed or placeholder API key %j before loading the SDK', async (apiKey) => {
+        enableBrowser(apiKey);
+        const { initAmplitude } = await loadAnalytics();
+
+        await expect(initAmplitude()).resolves.toBe(false);
+        expect(amplitudeMocks.moduleLoads).toBe(0);
         expect(amplitudeMocks.initAll).not.toHaveBeenCalled();
     });
 
@@ -124,151 +162,271 @@ describe('Amplitude analytics adapter', () => {
         expect(amplitudeMocks.initAll).toHaveBeenCalledTimes(2);
     });
 
-    it('does not track before initialization has resolved', async () => {
+    it('queues a valid child event until init and identity sync, coalescing StrictMode duplicates', async () => {
         enableBrowser();
         let resolveInitialization!: () => void;
         amplitudeMocks.initAll.mockImplementationOnce(() => new Promise<void>((resolve) => {
             resolveInitialization = resolve;
         }));
-        const { EVENTS, initAmplitude, trackEvent } = await loadAnalytics();
+        const {
+            EVENTS,
+            markAnalyticsIdentityReady,
+            trackEvent,
+        } = await loadAnalytics();
 
-        const initialization = initAmplitude();
-        trackEvent(EVENTS.LANDING_VIEWED, { source: 'direct' });
+        trackEvent(EVENTS.TARGET_SUBMITTED, { stage: 'anonymous' });
+        trackEvent(EVENTS.TARGET_SUBMITTED, { stage: 'anonymous' });
+
+        await vi.waitFor(() => expect(amplitudeMocks.initAll).toHaveBeenCalledTimes(1));
+        markAnalyticsIdentityReady();
         expect(amplitudeMocks.track).not.toHaveBeenCalled();
 
         resolveInitialization();
-        await expect(initialization).resolves.toBe(true);
-        trackEvent(EVENTS.LANDING_VIEWED, { source: 'direct' });
-
-        expect(amplitudeMocks.track).toHaveBeenCalledWith('landing_viewed', {
-            source: 'direct',
+        await vi.waitFor(() => expect(amplitudeMocks.track).toHaveBeenCalledTimes(1));
+        expect(amplitudeMocks.track).toHaveBeenCalledWith('target_submitted', {
+            stage: 'anonymous',
         });
     });
 
-    it('copies every allowlisted scalar property', async () => {
+    it('bounds the pre-init queue to the latest 50 validated events', async () => {
         enableBrowser();
-        const { EVENTS, initAmplitude, trackEvent } = await loadAnalytics();
-        await initAmplitude();
-        const properties = {
-            provider: 'kakao',
-            source: 'search',
-            medium: 'cpc',
-            campaign: 'launch',
-            content: 'hero',
-            term: 'detector',
-            plan_id: 'basic',
-            required_plan_id: 'standard',
-            amount_krw: 9900,
-            stage: 'preflight',
-            duration_ms: 42,
-            error_code: 'NONE',
-            followers_bucket: '0_400',
-            following_bucket: '401_800',
-            decision: 'eligible',
-            preflight_id: 'preflight-1',
-            order_id: 'order-1',
-            request_id: 'request-1',
-            status: 'ready',
-            share_channel: 'kakao',
+        let resolveInitialization!: () => void;
+        amplitudeMocks.initAll.mockImplementationOnce(() => new Promise<void>((resolve) => {
+            resolveInitialization = resolve;
+        }));
+        const {
+            EVENTS,
+            markAnalyticsIdentityReady,
+            trackEvent,
+        } = await loadAnalytics();
+
+        for (let resultCount = 0; resultCount < 55; resultCount += 1) {
+            trackEvent(EVENTS.RESULT_VIEWED, {
+                request_id: VALID_USER_ID,
+                result_count: resultCount,
+                is_shared: false,
+            });
+        }
+
+        await vi.waitFor(() => expect(amplitudeMocks.initAll).toHaveBeenCalledTimes(1));
+        markAnalyticsIdentityReady();
+        resolveInitialization();
+        await vi.waitFor(() => expect(amplitudeMocks.track).toHaveBeenCalledTimes(50));
+
+        expect(amplitudeMocks.track.mock.calls[0]).toEqual(['result_viewed', {
+            request_id: VALID_USER_ID,
+            result_count: 5,
             is_shared: false,
-            result_count: 0,
-        };
-
-        trackEvent(EVENTS.PREFLIGHT_SUCCEEDED, properties);
-
-        expect(amplitudeMocks.track).toHaveBeenCalledWith(
-            'preflight_succeeded',
-            properties,
-        );
+        }]);
+        expect(amplitudeMocks.track.mock.calls.at(-1)).toEqual(['result_viewed', {
+            request_id: VALID_USER_ID,
+            result_count: 54,
+            is_shared: false,
+        }]);
     });
 
-    it('discards forbidden fields and non-scalar or non-finite values', async () => {
-        enableBrowser();
-        const { EVENTS, initAmplitude, trackEvent } = await loadAnalytics();
-        await initAmplitude();
+    it('does not retain events when the API key is invalid', async () => {
+        enableBrowser('xxx');
+        const analytics = await loadAnalytics();
 
-        trackEvent(EVENTS.RESULT_VIEWED, {
-            provider: 'kakao',
-            duration_ms: 120,
-            is_shared: true,
-            amount_krw: Number.NaN,
-            source: Number.POSITIVE_INFINITY,
-            medium: Number.NEGATIVE_INFINITY,
-            stage: null,
-            status: ['paid'],
-            decision: { value: 'eligible' },
-            instagramId: 'raw-instagram-id',
-            targetInstagramId: 'another-instagram-id',
-            email: 'person@example.com',
-            phone: '01012345678',
-            bio: 'private bio',
-            caption: 'private caption',
-            comment: 'private comment',
-            imageUrl: 'https://example.com/private.jpg',
-            profileImage: 'https://example.com/profile.jpg',
-            token: 'secret-token',
-            unknown: 'not-approved',
-        });
+        analytics.trackEvent(analytics.EVENTS.LANDING_VIEWED, { source: 'direct' });
+        vi.stubEnv('NEXT_PUBLIC_AMPLITUDE_API_KEY', API_KEY);
+        await analytics.initAmplitude();
+        analytics.markAnalyticsIdentityReady();
 
-        expect(amplitudeMocks.track).toHaveBeenCalledWith('result_viewed', {
-            provider: 'kakao',
-            duration_ms: 120,
-            is_shared: true,
-        });
+        expect(amplitudeMocks.track).not.toHaveBeenCalled();
     });
 
-    it('ignores unapproved runtime event names and never lets SDK tracking errors escape', async () => {
+    it('applies identity recorded before init before flushing queued events', async () => {
         enableBrowser();
-        const { EVENTS, initAmplitude, trackEvent } = await loadAnalytics();
-        await initAmplitude();
+        const analytics = await loadAnalytics();
 
-        trackEvent('legacy_event' as never, { source: 'direct' });
+        analytics.identifyAnalyticsUser(VALID_USER_ID);
+        analytics.markAnalyticsIdentityReady();
+        analytics.trackEvent(analytics.EVENTS.TARGET_SUBMITTED, {
+            stage: 'authenticated',
+        });
+
+        await vi.waitFor(() => expect(amplitudeMocks.track).toHaveBeenCalledTimes(1));
+        expect(amplitudeMocks.setUserId).toHaveBeenCalledWith(VALID_USER_ID);
+        expect(amplitudeMocks.setUserId.mock.invocationCallOrder[0])
+            .toBeLessThan(amplitudeMocks.track.mock.invocationCallOrder[0]);
+    });
+
+    it('applies an event-specific property schema', async () => {
+        enableBrowser();
+        const analytics = await loadAnalytics();
+        await analytics.initAmplitude();
+        analytics.markAnalyticsIdentityReady();
+
+        analytics.trackEvent(analytics.EVENTS.AUTH_STARTED, {
+            provider: 'kakao',
+            source: 'must_not_cross_event_schema',
+            request_id: VALID_USER_ID,
+        });
+        analytics.trackEvent(analytics.EVENTS.RESULT_VIEWED, {
+            request_id: VALID_USER_ID,
+            result_count: 8,
+            is_shared: false,
+            provider: 'kakao',
+            share_channel: 'clipboard',
+            token: 'secret',
+        });
+        analytics.trackEvent(analytics.EVENTS.RESULT_SHARED, {
+            request_id: SECOND_UUID,
+            share_channel: 'web_share',
+            result_count: 8,
+        });
+
+        expect(amplitudeMocks.track.mock.calls).toEqual([
+            ['auth_started', { provider: 'kakao' }],
+            ['result_viewed', {
+                request_id: VALID_USER_ID,
+                result_count: 8,
+                is_shared: false,
+            }],
+            ['result_shared', {
+                request_id: SECOND_UUID,
+                share_channel: 'web_share',
+            }],
+        ]);
+    });
+
+    it('rejects PII-shaped marketing strings and invalid bounded values', async () => {
+        enableBrowser();
+        const analytics = await loadAnalytics();
+        await analytics.initAmplitude();
+        analytics.markAnalyticsIdentityReady();
+
+        analytics.trackEvent(analytics.EVENTS.LANDING_VIEWED, {
+            source: 'person@example.com',
+            medium: '01012345678',
+            campaign: 'https://example.com/path',
+            content: '@private_handle',
+            term: 'private.handle',
+        });
+        analytics.trackEvent(analytics.EVENTS.PLAN_SELECTED, {
+            plan_id: 'enterprise',
+            required_plan_id: 'basic',
+            amount_krw: Number.POSITIVE_INFINITY,
+            preflight_id: 'not-a-uuid',
+        });
+        analytics.trackEvent(analytics.EVENTS.PREFLIGHT_SUCCEEDED, {
+            duration_ms: -1,
+            followers_bucket: '400_exact',
+            following_bucket: 'unknown',
+            error_code: 'private@example.com',
+            preflight_id: VALID_USER_ID,
+        });
+
+        expect(amplitudeMocks.track.mock.calls).toEqual([
+            ['landing_viewed', {}],
+            ['plan_selected', { required_plan_id: 'basic' }],
+            ['preflight_succeeded', {
+                following_bucket: 'unknown',
+                preflight_id: VALID_USER_ID,
+            }],
+        ]);
+    });
+
+    it('accepts bounded scalar values for their authorized lifecycle events', async () => {
+        enableBrowser();
+        const analytics = await loadAnalytics();
+        await analytics.initAmplitude();
+        analytics.markAnalyticsIdentityReady();
+
+        analytics.trackEvent(analytics.EVENTS.LANDING_VIEWED, {
+            source: 'google',
+            medium: 'paid_social',
+            campaign: 'launch_2026',
+            content: 'hero-a',
+            term: 'detector',
+        });
+        analytics.trackEvent(analytics.EVENTS.PREFLIGHT_SUCCEEDED, {
+            duration_ms: 12_500,
+            required_plan_id: 'standard',
+            followers_bucket: '401_800',
+            following_bucket: '801_1200',
+            preflight_id: VALID_USER_ID,
+        });
+        analytics.trackEvent(analytics.EVENTS.PAYMENT_CONFIRMED_VIEWED, {
+            order_id: SECOND_UUID,
+            plan_id: 'basic',
+            amount_krw: 14_900,
+            status: 'paid',
+        });
+
+        expect(amplitudeMocks.track.mock.calls).toEqual([
+            ['landing_viewed', {
+                source: 'google',
+                medium: 'paid_social',
+                campaign: 'launch_2026',
+                content: 'hero-a',
+                term: 'detector',
+            }],
+            ['preflight_succeeded', {
+                duration_ms: 12_500,
+                required_plan_id: 'standard',
+                followers_bucket: '401_800',
+                following_bucket: '801_1200',
+                preflight_id: VALID_USER_ID,
+            }],
+            ['payment_confirmed_viewed', {
+                order_id: SECOND_UUID,
+                plan_id: 'basic',
+                amount_krw: 14_900,
+                status: 'paid',
+            }],
+        ]);
+    });
+
+    it('ignores unapproved runtime events and contains SDK tracking errors', async () => {
+        enableBrowser();
+        const analytics = await loadAnalytics();
+        await analytics.initAmplitude();
+        analytics.markAnalyticsIdentityReady();
+
+        analytics.trackEvent('legacy_event' as never, { source: 'direct' });
         expect(amplitudeMocks.track).not.toHaveBeenCalled();
 
         amplitudeMocks.track.mockImplementationOnce(() => {
             throw new Error('tracking failed');
         });
-        expect(() => trackEvent(EVENTS.LANDING_VIEWED)).not.toThrow();
+        expect(() => analytics.trackEvent(analytics.EVENTS.LANDING_VIEWED)).not.toThrow();
     });
 
-    it('identifies only canonical UUIDs and resets a signed-out identity', async () => {
+    it('identifies only canonical UUIDs and contains identity errors', async () => {
         enableBrowser();
-        const {
-            identifyAnalyticsUser,
-            initAmplitude,
-        } = await loadAnalytics();
-        await initAmplitude();
+        const analytics = await loadAnalytics();
 
-        identifyAnalyticsUser(VALID_USER_ID);
-        identifyAnalyticsUser('person@example.com');
-        identifyAnalyticsUser('010-1234-5678');
-        identifyAnalyticsUser('instagram_handle');
-        identifyAnalyticsUser('550e8400e29b41d4a716446655440000');
-        identifyAnalyticsUser(null);
+        analytics.identifyAnalyticsUser(VALID_USER_ID);
+        expect(amplitudeMocks.setUserId).not.toHaveBeenCalled();
 
-        expect(amplitudeMocks.setUserId).toHaveBeenCalledTimes(1);
+        await analytics.initAmplitude();
+        analytics.identifyAnalyticsUser(VALID_USER_ID);
+        analytics.identifyAnalyticsUser('person@example.com');
+        analytics.identifyAnalyticsUser('010-1234-5678');
+        analytics.identifyAnalyticsUser('instagram_handle');
+        analytics.identifyAnalyticsUser(null);
+
+        expect(amplitudeMocks.setUserId).toHaveBeenCalledTimes(2);
         expect(amplitudeMocks.setUserId).toHaveBeenCalledWith(VALID_USER_ID);
         expect(amplitudeMocks.reset).toHaveBeenCalledTimes(1);
-    });
 
-    it('does not identify before initialization and contains SDK identity errors', async () => {
-        enableBrowser();
-        const { identifyAnalyticsUser, initAmplitude } = await loadAnalytics();
-
-        identifyAnalyticsUser(VALID_USER_ID);
-        identifyAnalyticsUser(null);
-        expect(amplitudeMocks.setUserId).not.toHaveBeenCalled();
-        expect(amplitudeMocks.reset).not.toHaveBeenCalled();
-
-        await initAmplitude();
         amplitudeMocks.setUserId.mockImplementationOnce(() => {
             throw new Error('identity failed');
         });
         amplitudeMocks.reset.mockImplementationOnce(() => {
             throw new Error('reset failed');
         });
+        expect(() => analytics.identifyAnalyticsUser(VALID_USER_ID)).not.toThrow();
+        expect(() => analytics.identifyAnalyticsUser(null)).not.toThrow();
+    });
 
-        expect(() => identifyAnalyticsUser(VALID_USER_ID)).not.toThrow();
-        expect(() => identifyAnalyticsUser(null)).not.toThrow();
+    it('contains no static Unified SDK import', () => {
+        const source = readFileSync(new URL('./analytics.ts', import.meta.url), 'utf8');
+
+        expect(source).not.toMatch(/import\s+(?:\*|\{)[\s\S]*?from\s+['"]@amplitude\/unified['"]/);
+        expect(source).toContain("import('@amplitude/unified')");
     });
 });

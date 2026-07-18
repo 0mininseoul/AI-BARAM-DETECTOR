@@ -6,6 +6,52 @@ import {
     appOriginForRequest,
     appRedirectUrlForRequest,
 } from '@/lib/constants/app-url';
+import {
+    availableAnalyticsSessionStorage,
+    beginPendingAuthEvent,
+    clearPendingAuthEvent,
+    type AuthMarkerStorage,
+} from '@/lib/services/analytics-auth';
+
+type OAuthProvider = 'kakao' | 'google';
+
+interface OAuthOptions {
+    redirectTo: string;
+    scopes?: string;
+}
+
+interface OAuthResult {
+    error: unknown | null;
+}
+
+interface PerformOAuthSignInInput {
+    now?: number;
+    options: OAuthOptions;
+    provider: 'kakao' | 'google';
+    signInWithOAuth: (input: {
+        options: OAuthOptions;
+        provider: OAuthProvider;
+    }) => Promise<OAuthResult>;
+    storage?: AuthMarkerStorage;
+}
+
+export async function performOAuthSignIn({
+    now,
+    options,
+    provider,
+    signInWithOAuth,
+    storage,
+}: PerformOAuthSignInInput): Promise<OAuthResult> {
+    beginPendingAuthEvent({ now, provider, storage });
+    try {
+        const result = await signInWithOAuth({ provider, options });
+        if (result.error) clearPendingAuthEvent(storage);
+        return result;
+    } catch (error) {
+        clearPendingAuthEvent(storage);
+        throw error;
+    }
+}
 
 // Kakao OAuth button, shared by the /login 페이지·로그인 모달·회원가입 페이지.
 // 로그인 버튼만 필요하므로 full useAuth(유저 조회/구독) 대신 supabase를 직접 호출한다.
@@ -22,7 +68,7 @@ export function AuthButtons({
     const busy = disabled || pending !== null;
     const kakaoText = label === 'signup' ? '카카오로 회원가입' : '카카오로 3초 만에 시작하기';
 
-    const signIn = async (provider: 'kakao' | 'google') => {
+    const signIn = async (provider: OAuthProvider) => {
         setPending(provider);
         try {
             const supabase = createClient();
@@ -39,12 +85,14 @@ export function AuthButtons({
                 provider === 'kakao'
                     ? 'account_email profile_nickname profile_image name gender birthyear phone_number'
                     : undefined;
-            const { error } = await supabase.auth.signInWithOAuth({
+            const { error } = await performOAuthSignIn({
                 provider,
                 options: {
                     redirectTo: callbackUrl.toString(),
                     scopes,
                 },
+                signInWithOAuth: (input) => supabase.auth.signInWithOAuth(input),
+                storage: availableAnalyticsSessionStorage(),
             });
             if (error) {
                 console.error(`${provider} login error:`, error);

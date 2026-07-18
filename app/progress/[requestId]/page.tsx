@@ -294,7 +294,7 @@ export default function ProgressPage({ params }: PageProps) {
                 }
             />
 
-            <main className="mx-auto flex max-w-[460px] flex-col items-center px-5 pt-12">
+            <main data-amp-block className="mx-auto flex max-w-[460px] flex-col items-center px-5 pt-12">
                 <Eyebrow>판독 진행 중</Eyebrow>
 
                 {/* radar scope focal */}

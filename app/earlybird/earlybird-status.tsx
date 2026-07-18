@@ -35,7 +35,7 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
             </p>
 
             <CaseCard className="mt-8 p-5">
-                <dl>
+                <dl data-amp-block>
                     <DetailRow label="대상 계정" value={`@${order.targetInstagramId}`} />
                     <DetailRow label="구매 플랜" value={order.planName} />
                     <DetailRow

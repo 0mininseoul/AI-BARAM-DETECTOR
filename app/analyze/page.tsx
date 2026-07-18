@@ -18,6 +18,11 @@ import {
     parseEarlybirdPlanParam,
     resolveAvailableEarlybirdPlan,
 } from '@/lib/services/earlybird/ui-state';
+import {
+    clearPendingAnalysisTarget,
+    readPendingAnalysisTarget,
+    storePendingAnalysisTarget,
+} from '@/lib/services/pending-analysis-target';
 import { TopBar, BrandMark, Eyebrow, CaseCard, PrimaryButton } from '@/components/case-ui';
 
 const PLAN_NAMES: Readonly<Record<PlanId, string>> = {
@@ -82,17 +87,15 @@ export default function AnalyzePage() {
         const linkedPlan = parseEarlybirdPlanParam(params.get('plan'));
         if (linkedPlan) setSelectedPlan(linkedPlan);
         const resumablePreflightId = params.get('preflight');
-        const resumableTarget = params.get('target') ?? undefined;
-        if (resumablePreflightId && user) {
-            void resumePreflight(resumablePreflightId, resumableTarget);
-            return;
-        }
-
-        let pending = '';
+        let pending: string | null = null;
         try {
-            pending = sessionStorage.getItem('pending_ig') ?? '';
+            pending = readPendingAnalysisTarget(sessionStorage);
         } catch {
-            pending = '';
+            pending = null;
+        }
+        if (resumablePreflightId && user) {
+            void resumePreflight(resumablePreflightId, pending ?? undefined);
+            return;
         }
         if (pending) {
             window.setTimeout(() => setInstagramId(pending), 0);
@@ -108,21 +111,18 @@ export default function AnalyzePage() {
             const accepted = await startPreflight(pending);
             if (!accepted) return;
             try {
-                sessionStorage.removeItem('pending_ig');
+                storePendingAnalysisTarget(sessionStorage, pending);
             } catch {
                 /* ignore */
             }
-            router.replace(
-                `/analyze?preflight=${encodeURIComponent(accepted.preflightId)}`
-                + `&target=${encodeURIComponent(pending.replace(/^@+/, '').trim())}`
-            );
+            router.replace('/analyze?preflight=' + encodeURIComponent(accepted.preflightId));
         })();
     }, [authLoading, resumePreflight, router, startPreflight, user]);
 
     const handleStartPreflight = async () => {
         if (!user) {
             try {
-                sessionStorage.setItem('pending_ig', instagramId);
+                storePendingAnalysisTarget(sessionStorage, instagramId);
             } catch {
                 /* ignore */
             }
@@ -131,10 +131,12 @@ export default function AnalyzePage() {
         }
         const accepted = await startPreflight(instagramId);
         if (!accepted) return;
-        router.replace(
-            `/analyze?preflight=${encodeURIComponent(accepted.preflightId)}`
-            + `&target=${encodeURIComponent(instagramId.replace(/^@+/, '').trim())}`
-        );
+        try {
+            storePendingAnalysisTarget(sessionStorage, instagramId);
+        } catch {
+            /* ignore */
+        }
+        router.replace('/analyze?preflight=' + encodeURIComponent(accepted.preflightId));
     };
 
     const handleExclusion = async () => {
@@ -198,6 +200,11 @@ export default function AnalyzePage() {
     };
 
     const handleReset = () => {
+        try {
+            clearPendingAnalysisTarget(sessionStorage);
+        } catch {
+            /* ignore */
+        }
         reset();
         setInstagramId('');
         setGirlfriendInstagramId('');
@@ -254,7 +261,7 @@ export default function AnalyzePage() {
                             <label htmlFor="target-instagram" className="eyebrow mb-3 block">
                                 대상 인스타그램 아이디
                             </label>
-                            <div className="relative">
+                            <div className="relative" data-amp-mask>
                                 <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-fg-dim">@</span>
                                 <input
                                     id="target-instagram"
@@ -332,7 +339,7 @@ export default function AnalyzePage() {
                                 <label htmlFor="girlfriend-instagram" className="eyebrow mb-3 mt-5 block">
                                     본인 인스타그램 아이디
                                 </label>
-                                <div className="relative">
+                                <div className="relative" data-amp-mask>
                                     <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-fg-dim">@</span>
                                     <input
                                         id="girlfriend-instagram"
@@ -381,7 +388,7 @@ export default function AnalyzePage() {
                                 <div className="mx-auto flex h-14 w-14 items-center justify-center border border-line bg-ink">
                                     <BrandMark size={26} className="anim-blink text-blood" />
                                 </div>
-                                <h2 className="mt-5 text-[18px] font-extrabold text-fg">
+                                <h2 data-amp-block className="mt-5 text-[18px] font-extrabold text-fg">
                                     @{targetInstagramId ?? '대상 계정'} 조회 중
                                 </h2>
                                 <p className="mt-2 text-[13px] text-fg-dim" aria-live="polite">
@@ -393,7 +400,7 @@ export default function AnalyzePage() {
                         {exclusionDecided && readyPreflight && (
                             <>
                                 <CaseCard bracket="var(--color-blood)" className="mt-7 overflow-hidden">
-                                    <div className="flex items-center gap-4 p-5">
+                                    <div className="flex items-center gap-4 p-5" data-amp-block>
                                         <div className="relative h-16 w-16 shrink-0 overflow-hidden rounded-full border border-line-2 bg-panel">
                                             {readyPreflight.target.profileImage ? (
                                                 <Image

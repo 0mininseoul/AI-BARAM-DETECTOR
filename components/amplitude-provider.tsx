@@ -1,96 +1,87 @@
 'use client';
 
-import { type ReactNode, useEffect, useRef, useState } from 'react';
+import { type ReactNode, useEffect, useRef } from 'react';
 import { useAuth } from '@/hooks/useAuth';
 import {
-    EVENTS,
     identifyAnalyticsUser,
     initAmplitude,
     isCanonicalAnalyticsUserId,
-    trackEvent,
+    markAnalyticsIdentityPending,
+    markAnalyticsIdentityReady,
 } from '@/lib/services/analytics';
-
-const AUTH_STARTED_STORAGE_KEY = 'amplitude_auth_started';
-
-type AuthMarkerStorage = Pick<Storage, 'getItem' | 'removeItem'>;
+import {
+    analyticsAuthProvider,
+    availableAnalyticsSessionStorage,
+    completePendingAuthEvent,
+    type AuthMarkerStorage,
+} from '@/lib/services/analytics-auth';
 
 export interface AuthAnalyticsState {
-    userId: string | null | undefined;
+    provider: 'google' | 'kakao' | null;
+    resolved: boolean;
+    userId: string | null;
 }
 
 interface AuthAnalyticsSnapshot {
     loading: boolean;
-    userId: string | null;
+    provider: 'google' | 'kakao' | null;
     storage?: AuthMarkerStorage;
-}
-
-export function completePendingAuthEvent(
-    userId: string | null,
-    storage?: AuthMarkerStorage,
-): boolean {
-    if (!userId || !isCanonicalAnalyticsUserId(userId) || !storage) return false;
-
-    try {
-        if (storage.getItem(AUTH_STARTED_STORAGE_KEY) === null) return false;
-
-        storage.removeItem(AUTH_STARTED_STORAGE_KEY);
-        trackEvent(EVENTS.AUTH_COMPLETED);
-        return true;
-    } catch {
-        return false;
-    }
+    userId: string | null;
 }
 
 export function createAuthAnalyticsState(): AuthAnalyticsState {
-    return { userId: undefined };
+    return { provider: null, resolved: false, userId: null };
 }
 
 export function syncAnalyticsAuth(
     state: AuthAnalyticsState,
     snapshot: AuthAnalyticsSnapshot,
 ): AuthAnalyticsState {
-    if (snapshot.loading || state.userId === snapshot.userId) return state;
+    if (snapshot.loading) return state;
 
-    identifyAnalyticsUser(snapshot.userId);
-    completePendingAuthEvent(snapshot.userId, snapshot.storage);
+    const userId = snapshot.userId && isCanonicalAnalyticsUserId(snapshot.userId)
+        ? snapshot.userId
+        : null;
+    const provider = userId ? snapshot.provider : null;
+    if (state.resolved && state.userId === userId && state.provider === provider) return state;
 
-    return { userId: snapshot.userId };
-}
-
-function availableSessionStorage(): AuthMarkerStorage | undefined {
-    try {
-        return window.sessionStorage;
-    } catch {
-        return undefined;
+    if (!state.resolved && !userId) {
+        markAnalyticsIdentityReady();
+        return { provider: null, resolved: true, userId: null };
     }
+
+    markAnalyticsIdentityPending();
+    identifyAnalyticsUser(userId);
+    if (userId) {
+        completePendingAuthEvent({
+            provider,
+            storage: snapshot.storage,
+            userId,
+        });
+    }
+    markAnalyticsIdentityReady();
+
+    return { provider, resolved: true, userId };
 }
 
 export function AmplitudeProvider({ children }: { children: ReactNode }) {
     const { loading, user } = useAuth();
-    const [analyticsReady, setAnalyticsReady] = useState(false);
     const authState = useRef(createAuthAnalyticsState());
 
     useEffect(() => {
-        let active = true;
-
-        void initAmplitude().then((ready) => {
-            if (active && ready) setAnalyticsReady(true);
-        });
-
-        return () => {
-            active = false;
-        };
+        void initAmplitude();
     }, []);
 
     useEffect(() => {
-        if (!analyticsReady) return;
-
         authState.current = syncAnalyticsAuth(authState.current, {
             loading,
+            provider: analyticsAuthProvider(
+                user?.app_metadata?.provider ?? user?.identities?.[0]?.provider,
+            ),
+            storage: availableAnalyticsSessionStorage(),
             userId: user?.id ?? null,
-            storage: availableSessionStorage(),
         });
-    }, [analyticsReady, loading, user?.id]);
+    }, [loading, user?.id, user?.app_metadata?.provider, user?.identities]);
 
     return children;
 }
