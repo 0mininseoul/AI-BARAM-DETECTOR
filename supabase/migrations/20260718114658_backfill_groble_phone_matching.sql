@@ -17,7 +17,8 @@ WHERE (
       provider = 'kakao'
       AND phone_number IS NOT NULL
       AND phone_number_normalized IS NOT NULL
-      AND phone_number_verification_source = 'kakao_rest_api'
+      AND phone_number_verification_source
+            IS NOT DISTINCT FROM 'kakao_rest_api'
       AND phone_number_verified_at IS NOT NULL
       AND public.normalize_kr_mobile_e164(phone_number)
             IS NOT DISTINCT FROM phone_number_normalized

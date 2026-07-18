@@ -358,43 +358,70 @@ BEGIN
 
     IF v_candidate_count = 0 THEN
         IF v_user_id IS NOT NULL THEN
-            SELECT cancelled_order.*
-            INTO v_order
+            SELECT pg_catalog.count(*)::INTEGER
+            INTO v_candidate_count
             FROM public.earlybird_orders AS cancelled_order
             WHERE cancelled_order.user_id = v_user_id
               AND cancelled_order.status = 'cancelled'
               AND cancelled_order.payment_id IS NULL
               AND cancelled_order.buyer_match_policy = 'legacy_email'
               AND cancelled_order.expected_groble_product_id = p_product_id
-              AND cancelled_order.expected_amount_krw = p_amount_krw
-            ORDER BY cancelled_order.updated_at DESC
-            LIMIT 1
-            FOR UPDATE;
-            IF FOUND THEN
-                UPDATE public.earlybird_orders AS late_order
-                SET status = 'refund_pending',
-                    payment_id = p_payment_id,
-                    actual_groble_product_id = p_product_id,
-                    actual_amount_krw = p_amount_krw,
-                    paid_at = p_paid_at,
-                    updated_at = pg_catalog.clock_timestamp()
-                WHERE late_order.id = v_order.id
-                RETURNING late_order.* INTO v_order;
+              AND cancelled_order.expected_amount_krw = p_amount_krw;
 
+            IF v_candidate_count > 1 THEN
                 INSERT INTO public.earlybird_webhook_events (
                     event_id, idempotency_key, event_type, occurred_at,
-                    payment_id, product_id, amount_krw, disposition, order_id
+                    payment_id, product_id, amount_krw, disposition
                 ) VALUES (
                     p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
-                    p_payment_id, p_product_id, p_amount_krw,
-                    'late_cancelled_payment', v_order.id
+                    p_payment_id, p_product_id, p_amount_krw, 'ambiguous_buyer'
                 );
                 RETURN QUERY SELECT
-                    'late_cancelled_payment'::TEXT,
-                    v_order.id,
-                    v_order.status,
+                    'ambiguous_buyer'::TEXT,
+                    NULL::UUID,
+                    NULL::TEXT,
                     NULL::SMALLINT;
                 RETURN;
+            ELSIF v_candidate_count = 1 THEN
+                SELECT cancelled_order.*
+                INTO v_order
+                FROM public.earlybird_orders AS cancelled_order
+                WHERE cancelled_order.user_id = v_user_id
+                  AND cancelled_order.status = 'cancelled'
+                  AND cancelled_order.payment_id IS NULL
+                  AND cancelled_order.buyer_match_policy = 'legacy_email'
+                  AND cancelled_order.expected_groble_product_id = p_product_id
+                  AND cancelled_order.expected_amount_krw = p_amount_krw
+                FOR UPDATE;
+
+                IF NOT FOUND THEN
+                    v_candidate_count := 0;
+                ELSE
+                    UPDATE public.earlybird_orders AS late_order
+                    SET status = 'refund_pending',
+                        payment_id = p_payment_id,
+                        actual_groble_product_id = p_product_id,
+                        actual_amount_krw = p_amount_krw,
+                        paid_at = p_paid_at,
+                        updated_at = pg_catalog.clock_timestamp()
+                    WHERE late_order.id = v_order.id
+                    RETURNING late_order.* INTO v_order;
+
+                    INSERT INTO public.earlybird_webhook_events (
+                        event_id, idempotency_key, event_type, occurred_at,
+                        payment_id, product_id, amount_krw, disposition, order_id
+                    ) VALUES (
+                        p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
+                        p_payment_id, p_product_id, p_amount_krw,
+                        'late_cancelled_payment', v_order.id
+                    );
+                    RETURN QUERY SELECT
+                        'late_cancelled_payment'::TEXT,
+                        v_order.id,
+                        v_order.status,
+                        NULL::SMALLINT;
+                    RETURN;
+                END IF;
             END IF;
         END IF;
 
@@ -598,51 +625,89 @@ SET search_path = ''
 AS $$
 DECLARE
     v_lock_user_id UUID;
+    v_is_known_duplicate BOOLEAN;
 BEGIN
-    -- Serialize the rolling caller with checkout before deciding that email-only
-    -- attribution is safe. A verified-phone order must wait for a canonical retry.
-    FOR v_lock_user_id IN
-        SELECT buyer.id
-        FROM public.users AS buyer
-        WHERE pg_catalog.lower(pg_catalog.btrim(buyer.email))
-            = pg_catalog.lower(pg_catalog.btrim(p_buyer_email))
-        ORDER BY buyer.id::TEXT
-    LOOP
-        PERFORM pg_catalog.pg_advisory_xact_lock(
-            pg_catalog.hashtextextended(v_lock_user_id::TEXT, 0)
-        );
-    END LOOP;
+    -- Existing event/payment attribution is already immutable. Let the canonical
+    -- duplicate paths preserve their disposition before applying the new-event gate.
+    SELECT
+        EXISTS (
+            SELECT 1
+            FROM public.earlybird_webhook_events AS existing_event
+            WHERE existing_event.event_id = p_event_id
+               OR existing_event.idempotency_key = p_idempotency_key
+        )
+        OR EXISTS (
+            SELECT 1
+            FROM public.earlybird_orders AS existing_order
+            WHERE existing_order.payment_id = p_payment_id
+        )
+    INTO v_is_known_duplicate;
 
-    IF EXISTS (
-        SELECT 1
-        FROM public.earlybird_orders AS candidate
-        JOIN public.users AS buyer ON buyer.id = candidate.user_id
-        WHERE candidate.buyer_match_policy = 'verified_kakao_phone'
-          AND candidate.status IN ('payment_pending', 'cancelled')
-          AND candidate.payment_id IS NULL
-          AND candidate.expected_groble_product_id = p_product_id
-          AND pg_catalog.lower(pg_catalog.btrim(buyer.email))
-                = pg_catalog.lower(pg_catalog.btrim(p_buyer_email))
-    ) THEN
-        RAISE EXCEPTION 'GROBLE_CANONICAL_PHONE_REQUIRED';
-    END IF;
+    IF NOT v_is_known_duplicate THEN
+        -- Lock every unresolved verified order owner for the product, plus every
+        -- email candidate, in one stable order before the product-wide recheck.
+        FOR v_lock_user_id IN
+            SELECT potential_user.user_id
+            FROM (
+                SELECT verified_order.user_id
+                FROM public.earlybird_orders AS verified_order
+                WHERE verified_order.buyer_match_policy = 'verified_kakao_phone'
+                  AND verified_order.expected_groble_product_id = p_product_id
+                  AND (
+                      verified_order.status = 'payment_pending'
+                      OR (
+                          verified_order.status = 'cancelled'
+                          AND verified_order.payment_id IS NULL
+                      )
+                  )
 
-    IF NOT EXISTS (
-        SELECT 1
-        FROM public.earlybird_orders AS candidate
-        JOIN public.users AS buyer ON buyer.id = candidate.user_id
-        WHERE candidate.buyer_match_policy = 'legacy_email'
-          AND candidate.status IN ('payment_pending', 'cancelled')
-          AND candidate.payment_id IS NULL
-          AND candidate.expected_groble_product_id = p_product_id
-          AND (
-              candidate.status = 'payment_pending'
-              OR candidate.expected_amount_krw = p_amount_krw
-          )
-          AND pg_catalog.lower(pg_catalog.btrim(buyer.email))
-                = pg_catalog.lower(pg_catalog.btrim(p_buyer_email))
-    ) THEN
-        RAISE EXCEPTION 'GROBLE_CANONICAL_PHONE_REQUIRED';
+                UNION
+
+                SELECT buyer.id AS user_id
+                FROM public.users AS buyer
+                WHERE pg_catalog.lower(pg_catalog.btrim(buyer.email))
+                    = pg_catalog.lower(pg_catalog.btrim(p_buyer_email))
+            ) AS potential_user
+            ORDER BY potential_user.user_id::TEXT
+        LOOP
+            PERFORM pg_catalog.pg_advisory_xact_lock(
+                pg_catalog.hashtextextended(v_lock_user_id::TEXT, 0)
+            );
+        END LOOP;
+
+        IF EXISTS (
+            SELECT 1
+            FROM public.earlybird_orders AS candidate
+            WHERE candidate.buyer_match_policy = 'verified_kakao_phone'
+              AND candidate.expected_groble_product_id = p_product_id
+              AND (
+                  candidate.status = 'payment_pending'
+                  OR (
+                      candidate.status = 'cancelled'
+                      AND candidate.payment_id IS NULL
+                  )
+              )
+        ) THEN
+            RAISE EXCEPTION 'GROBLE_CANONICAL_PHONE_REQUIRED';
+        END IF;
+
+        IF NOT EXISTS (
+            SELECT 1
+            FROM public.earlybird_orders AS candidate
+            JOIN public.users AS buyer ON buyer.id = candidate.user_id
+            WHERE candidate.buyer_match_policy = 'legacy_email'
+              AND candidate.status IN ('payment_pending', 'cancelled')
+              AND candidate.payment_id IS NULL
+              AND candidate.expected_groble_product_id = p_product_id
+              AND (
+                  candidate.status = 'payment_pending'
+                  OR candidate.expected_amount_krw = p_amount_krw
+              )
+              AND pg_catalog.lower(pg_catalog.btrim(buyer.email))
+                    = pg_catalog.lower(pg_catalog.btrim(p_buyer_email))
+        ) THEN
+            RAISE EXCEPTION 'GROBLE_CANONICAL_PHONE_REQUIRED';
+        END IF;
     END IF;
 
     RETURN QUERY

@@ -86,13 +86,14 @@ ORDER BY xact_start;
 
 `lock_timeout` 또는 `statement_timeout`으로 특정 파일이 실패하면 그 파일의 transaction은 전체 롤백된다. 자동 반복하거나 migration history를 수동 완료 처리하지 않는다. `migration list --linked`로 완료된 이전 파일과 실패한 파일을 확인하고, 대기 transaction을 제거하거나 maintenance window를 잡은 뒤 미적용 파일부터 재시도한다. `DUPLICATE_NORMALIZED_PHONE_REQUIRES_REVIEW`는 검증된 전화번호가 여러 사용자에게 연결된 상태이므로 재시도 대상이 아니라 계정 소유권 확인 후 데이터를 해결해야 하는 중단 조건이다.
 
-9개 인자 finalizer wrapper는 같은 상품과 이메일의 검증 전화번호 후보가 있거나 처리 가능한 `legacy_email` 후보가 없으면, webhook event나 idempotency row를 쓰기 전에 `GROBLE_CANONICAL_PHONE_REQUIRED`로 롤백한다. 새 인스턴스의 12개 인자 canonical 호출이 같은 키로 재시도할 수 있어야 한다. 이전 인스턴스가 모두 drain된 후에도 wrapper를 즉시 삭제하지 않고, 호출 현황을 확인한 후 별도 post-drain forward migration으로만 제거한다.
+9개 인자 finalizer wrapper는 이미 처리된 event ID 또는 payment ID를 읽기 전용으로 먼저 확인하고, 알려진 재전송이면 canonical finalizer의 `duplicate_event` 또는 `duplicate_payment` 경로로 위임한다. 새 이벤트라면 구매자 이메일과 관계없이 같은 상품의 미해결 `verified_kakao_phone` 주문 전체를 안정적인 사용자 ID 순서로 잠그고 다시 확인한다. 하나라도 있으면 webhook event나 idempotency row를 쓰기 전에 `GROBLE_CANONICAL_PHONE_REQUIRED`로 롤백하며, 처리 가능한 `legacy_email` 후보가 없는 경우에도 같은 오류로 중단한다. 새 인스턴스의 12개 인자 canonical 호출이 같은 키로 재시도할 수 있어야 한다. 이전 인스턴스가 모두 drain된 후에도 wrapper를 즉시 삭제하지 않고, 호출 현황을 확인한 후 별도 post-drain forward migration으로만 제거한다.
 
 ## 결제 확정과 수량 운영
 
 - 성공 화면 진입이나 프론트 숫자로 접수 확정하지 않는다.
 - 공식 raw-body HMAC과 ±5분 timestamp를 통과한 `payment.completed`만 접수를 확정하며, `payment.cancel_requested`는 환불 검토 상태로만 전환한다.
 - `verified_kakao_phone` 주문의 결제 완료는 checkout 시점의 불변 정규화 전화번호 snapshot으로만 매칭한다. 사용자 프로필 전화번호가 이후 바뀌어도 주문 snapshot은 바뀌지 않으며 이메일로 fallback하지 않는다. 이메일 매칭은 migration 전에 생성된 `legacy_email` 주문에만 허용한다.
+- 같은 사용자·상품·금액에 해당하는 미결제 `legacy_email` 취소 주문이 여러 건이면 최신 주문을 임의로 고르지 않고 `ambiguous_buyer`로 격리한다.
 - Groble 구매자의 정규화 전화번호와 소문자 이메일은 signed webhook transaction의 전화번호 우선·이메일 fallback 매칭 RPC 입력으로만 일시 처리한다. raw 전화번호·표시 이름은 RPC에 전달하지 않고, 이메일·전화번호·표시 이름을 주문·웹훅 이벤트에 영속 저장하지 않으며 브라우저 응답·Amplitude·Axiom에 전송하지 않는다. 카드 정보와 원본 payload도 저장하지 않는다.
 - 다른 플랜의 최신 사전 점검으로 다시 시도하면 이전 미처리 주문은 snapshot을 변경하지 않고 `cancelled`로 남기며, 새 snapshot으로 별도 주문을 만든다. 이전 결제창에서 뒤늦게 결제된 건은 새 주문에 붙이지 않고 환불 검토 대상으로 격리한다.
 - Groble 완료 이벤트에는 앱의 주문 식별자가 없으므로, 같은 구매자가 같은 플랜을 새 snapshot으로 다시 열면 이전 주문과 구분할 수 없다. 현재 `payment_pending` 주문이나 같은 상품의 미해결 `cancelled` 주문이 있으면 새 주문을 만들지 않고 `EARLYBIRD_CHECKOUT_ALREADY_PENDING`으로 차단하여 기존 snapshot을 보존한다. 이미 종료 상태인 동일 주문은 결제창 재진입 대상으로 반환하지 않는다.

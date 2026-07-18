@@ -181,7 +181,10 @@ describe('Groble phone matching migration contract', () => {
             /phone_number_verification_source IS NULL\s+OR phone_number_verification_source = 'kakao_rest_api'/
         );
         expect(ddlMigration).toMatch(
-            /phone_number_normalized IS NULL[\s\S]*?phone_number_verification_source IS NULL[\s\S]*?phone_number_verified_at IS NULL[\s\S]*?OR[\s\S]*?provider = 'kakao'[\s\S]*?phone_number IS NOT NULL[\s\S]*?phone_number_normalized IS NOT NULL[\s\S]*?phone_number_verification_source = 'kakao_rest_api'[\s\S]*?phone_number_verified_at IS NOT NULL[\s\S]*?normalize_kr_mobile_e164\(phone_number\)[\s\S]*?IS NOT DISTINCT FROM phone_number_normalized/
+            /phone_number_normalized IS NULL[\s\S]*?phone_number_verification_source IS NULL[\s\S]*?phone_number_verified_at IS NULL[\s\S]*?OR[\s\S]*?provider = 'kakao'[\s\S]*?phone_number IS NOT NULL[\s\S]*?phone_number_normalized IS NOT NULL[\s\S]*?phone_number_verification_source[\s\S]*?IS NOT DISTINCT FROM 'kakao_rest_api'[\s\S]*?phone_number_verified_at IS NOT NULL[\s\S]*?normalize_kr_mobile_e164\(phone_number\)[\s\S]*?IS NOT DISTINCT FROM phone_number_normalized/
+        );
+        expect(ddlMigration).toMatch(
+            /users_phone_number_provenance_check[\s\S]*?phone_number_verification_source\s+IS NOT DISTINCT FROM 'kakao_rest_api'/
         );
         expect(migration).toMatch(
             /CREATE OR REPLACE FUNCTION public\.normalize_kr_mobile_e164\(p_value TEXT\)[\s\S]*?IMMUTABLE[\s\S]*?(?:STRICT|RETURNS NULL ON NULL INPUT)[\s\S]*?SET search_path = ''/
@@ -207,8 +210,8 @@ describe('Groble phone matching migration contract', () => {
         expect(backfillMigration).toContain(
             'phone_number_normalized IS NOT NULL'
         );
-        expect(backfillMigration).toContain(
-            "phone_number_verification_source = 'kakao_rest_api'"
+        expect(backfillMigration).toMatch(
+            /phone_number_verification_source\s+IS NOT DISTINCT FROM 'kakao_rest_api'/
         );
         expect(backfillMigration).not.toMatch(
             /SET phone_number_normalized = COALESCE|normalize_kr_mobile_e164\(phone_number\),/
@@ -305,8 +308,11 @@ describe('Groble phone matching migration contract', () => {
         expect(migration).toContain('expected_buyer_phone_number_normalized TEXT');
         expect(migration).toContain('buyer_match_policy TEXT');
         expect(ddlMigration).toContain('buyer_match_policy IS NOT NULL');
+        expect(ddlMigration).toMatch(
+            /buyer_match_policy = 'verified_kakao_phone'[\s\S]*?expected_buyer_phone_verification_source\s+IS NOT DISTINCT FROM 'kakao_rest_api'/
+        );
         expect(migration).toMatch(
-            /buyer_match_policy = 'legacy_email'[\s\S]*?expected_buyer_phone_number_normalized IS NULL[\s\S]*?expected_buyer_phone_verification_source IS NULL[\s\S]*?expected_buyer_phone_verified_at IS NULL[\s\S]*?OR[\s\S]*?buyer_match_policy = 'verified_kakao_phone'[\s\S]*?expected_buyer_phone_number_normalized IS NOT NULL[\s\S]*?expected_buyer_phone_verification_source = 'kakao_rest_api'[\s\S]*?expected_buyer_phone_verified_at IS NOT NULL/
+            /buyer_match_policy = 'legacy_email'[\s\S]*?expected_buyer_phone_number_normalized IS NULL[\s\S]*?expected_buyer_phone_verification_source IS NULL[\s\S]*?expected_buyer_phone_verified_at IS NULL[\s\S]*?OR[\s\S]*?buyer_match_policy = 'verified_kakao_phone'[\s\S]*?expected_buyer_phone_number_normalized IS NOT NULL[\s\S]*?expected_buyer_phone_verification_source[\s\S]*?IS NOT DISTINCT FROM 'kakao_rest_api'[\s\S]*?expected_buyer_phone_verified_at IS NOT NULL/
         );
         for (const column of [
             'groble_buyer_email TEXT',
@@ -429,20 +435,74 @@ describe('Groble phone matching migration contract', () => {
         const wrapper = finalizationMigration.slice(wrapperStart, wrapperEnd + 4);
 
         expect(wrapper).toContain('LANGUAGE plpgsql');
+        const duplicateRead = wrapper.indexOf('earlybird_webhook_events');
+        const wrapperLock = wrapper.indexOf('FOR v_lock_user_id IN');
+        expect(duplicateRead).toBeGreaterThanOrEqual(0);
+        expect(duplicateRead).toBeLessThan(wrapperLock);
+        expect(wrapper.slice(duplicateRead, wrapperLock)).toContain(
+            'earlybird_orders'
+        );
+        expect(wrapper.slice(duplicateRead, wrapperLock)).toContain(
+            'payment_id = p_payment_id'
+        );
+        const lockQuery = wrapper.slice(wrapperLock, wrapper.indexOf('LOOP', wrapperLock));
+        expect(lockQuery).toContain('public.earlybird_orders');
+        expect(lockQuery).toContain(
+            "buyer_match_policy = 'verified_kakao_phone'"
+        );
+        expect(lockQuery).toContain(
+            'expected_groble_product_id = p_product_id'
+        );
+        expect(lockQuery).toContain('ORDER BY potential_user.user_id::TEXT');
         expect(wrapper).toMatch(
             /buyer_match_policy = 'verified_kakao_phone'[\s\S]*?GROBLE_CANONICAL_PHONE_REQUIRED/
         );
+        const productWideGuard = wrapper.indexOf(
+            "WHERE candidate.buyer_match_policy = 'verified_kakao_phone'",
+            wrapperLock
+        );
         const verifiedGuard = wrapper.slice(
-            wrapper.indexOf("buyer_match_policy = 'verified_kakao_phone'"),
+            productWideGuard,
             wrapper.indexOf("RAISE EXCEPTION 'GROBLE_CANONICAL_PHONE_REQUIRED'")
         );
+        expect(productWideGuard).toBeGreaterThan(wrapperLock);
         expect(verifiedGuard).not.toContain('expected_amount_krw');
+        expect(verifiedGuard).not.toContain('buyer.email');
+        expect(verifiedGuard).not.toContain('p_buyer_email');
         expect(wrapper).toMatch(
             /buyer_match_policy = 'legacy_email'/
         );
         expect(wrapper.indexOf('GROBLE_CANONICAL_PHONE_REQUIRED')).toBeLessThan(
             wrapper.indexOf('RETURN QUERY')
         );
+    });
+
+    it('counts same-user cancelled legacy candidates instead of choosing the latest', () => {
+        const definition = functionDefinition('finalize_earlybird_groble_payment');
+        const cancelledFallback = definition.indexOf(
+            'IF v_candidate_count = 0 THEN'
+        );
+        const cancelledLegacyStart = definition.indexOf(
+            'SELECT pg_catalog.count(*)::INTEGER',
+            cancelledFallback
+        );
+        const cancelledLegacyEnd = definition.indexOf(
+            "p_amount_krw, 'unmatched'",
+            cancelledLegacyStart
+        );
+        const cancelledLegacy = definition.slice(
+            cancelledLegacyStart,
+            cancelledLegacyEnd
+        );
+
+        expect(cancelledFallback).toBeGreaterThanOrEqual(0);
+        expect(cancelledLegacyStart).toBeGreaterThan(cancelledFallback);
+        expect(cancelledLegacy).toContain('pg_catalog.count(*)::INTEGER');
+        expect(cancelledLegacy).toContain("'ambiguous_buyer'");
+        expect(cancelledLegacy).not.toContain(
+            'ORDER BY cancelled_order.updated_at DESC'
+        );
+        expect(cancelledLegacy).not.toContain('LIMIT 1');
     });
 
     it('locks every potential user deterministically before authoritative matching', () => {

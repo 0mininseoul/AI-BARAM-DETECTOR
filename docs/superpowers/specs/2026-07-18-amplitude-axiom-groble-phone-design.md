@@ -1,6 +1,6 @@
 # Amplitude, Axiom, Groble 전화번호 매칭 설계
 
-> 역사적 설계 문서: 구매자 연락처 보관 계획은 그로블 판매자 약관 검토 후 폐기되었다. 현재 계약은 `20260719130000_stop_persisting_groble_buyer_contacts.sql`이 기존 값을 삭제하고 이후 쓰기를 NULL로 강제하며, 매칭에 필요한 연락처는 signed webhook transaction 동안만 일시 처리하고 보관하지 않는다. 아래 보관 서술은 구현 결정의 이력으로만 남겨둔다.
+> 역사적 설계 문서의 보존본이며, 폐기된 연락처 보관 지시를 현행 보안 계약으로 정정했다. `20260719130000_stop_persisting_groble_buyer_contacts.sql`은 기존 연락처를 삭제하고 old/new writer의 저장을 막는다. 전화번호 신뢰는 Kakao REST callback이 원자적으로 기록한 provenance에만 기반하고, 주문은 checkout 시점의 불변 매칭 정책과 전화번호 증거를 사용한다. 이메일 fallback은 migration 전에 생성된 `legacy_email` 주문에만 허용한다. Groble 구매자 연락처는 signed webhook transaction 동안만 처리하며 보관하지 않는다. 배포 기준은 [Groble 얼리버드 운영 문서](../../groble-earlybird-operations.md)를 따른다.
 
 ## 목표
 
@@ -10,7 +10,7 @@
 
 - 새 사용자에게는 카카오 로그인만 노출한다.
 - Groble 구매자 전화번호가 정규화된 카카오 전화번호와 일치하면, Groble 이메일과 서비스 로그인 이메일이 달라도 결제를 자동 확정한다.
-- Groble 구매자 이메일·전화번호·표시 이름은 Supabase에 운영자 전용 결제 증거로 보관한다.
+- Groble 구매자 이메일·전화번호는 매칭 transaction 밖에 저장하지 않는다.
 - Amplitude Analytics와 Session Replay가 클라이언트에서 한 번만 초기화되고 핵심 전환 이벤트를 수집한다.
 - Axiom에서 인증, 사전 검사, 크롤러, Gemini, Cloud Tasks, Groble, 분석 파이프라인의 구조화된 로그를 조회한다.
 - Axiom 로그에 대상·후보·제외 인스타그램 아이디를 포함하되, 이메일·전화번호·토큰·쿠키·댓글·bio·이미지 URL과 외부 API 원문은 제외한다.
@@ -28,7 +28,7 @@
 
 `AuthButtons`의 신규 회원가입·로그인 UI에서 Google 버튼을 숨기고 카카오만 노출한다. Supabase Google provider, Google 사용자 레코드, 기존 세션, 공용 callback 처리는 삭제하지 않는다. 이는 기존 Google 사용자의 소유 데이터를 보전하는 레거시 호환 경로다.
 
-카카오 callback은 `/v2/user/me`를 통해 이름과 전화번호를 매 로그인 시점에 최신화한다. 사용자가 카카오톡을 사용하지 않아 전화번호가 제공되지 않는 등의 예외를 필수 케이스로 다룬다.
+카카오 callback은 `/v2/user/me`를 통해 이름과 전화번호를 매 로그인 시점에 최신화한다. 유효한 전화번호는 raw 값, E.164 normalized 값, `kakao_rest_api` source, DB clock 기반 verified-at을 한 쓰기로 기록한다. 이 callback만 전화번호 provenance를 쓰며 `/api/user/me`와 Supabase auth metadata는 전화번호를 동기화하지 않는다. 사용자가 카카오톡을 사용하지 않아 전화번호가 제공되지 않는 등의 예외를 필수 케이스로 다룬다.
 
 ### 전화번호 정규화
 
@@ -43,51 +43,48 @@
 
 ### 결제 시작 규칙
 
-- 카카오 사용자의 정규화 전화번호가 없으면 checkout 스냅샷을 생성하지 않고 재로그인 또는 고객 지원 안내를 표시한다.
-- checkout RPC는 현재 프로필에서 파생한 정규화 전화번호를 주문의 `expected_buyer_phone_number_normalized`로 스냅샷한다. webhook은 로그인 프로필의 사후 변경이 아니라 이 불변 checkout 증거와 매칭한다.
-- migration 1번의 `earlybird_orders` `BEFORE INSERT` trigger는 snapshot이 null이고 사용자가 Kakao일 때만 유효한 raw `phone_number`를 먼저 정규화하고, raw 값이 무효할 때만 저장된 normalized 값으로 fallback한다. UPDATE에는 동작하지 않는다. 따라서 2번 RPC 교체 전에 시작해 사용자 advisory lock에서 대기하다가 3번 백필 후 이전 본문으로 INSERT하는 checkout도 snapshot 공백을 만들지 않는다. 2번 RPC도 같은 파생 규칙을 적용하고 전화번호 없는 새 Kakao 호출을 INSERT 전에 거부한다.
-- 기존 Google 사용자의 활성 세션은 기존 이메일 매칭 계약으로 checkout을 완료할 수 있다.
+- checkout에는 24시간 이내에 Kakao REST로 검증된 atomic raw/normalized/source/verified-at provenance가 필요하다. raw 값에서 즉석 파생하거나 저장된 normalized 값으로 fallback하지 않는다.
+- checkout RPC와 모든 주문 INSERT에 적용되는 trigger는 caller가 제공한 매칭 값을 덮어쓰고 `buyer_match_policy = 'verified_kakao_phone'`과 normalized/source/verified-at을 snapshot한다. 이 네 필드는 이후 UPDATE할 수 없고, webhook은 현재 사용자 프로필이 아니라 주문 snapshot과 매칭한다.
+- migration 적용 전에 존재한 주문만 `legacy_email`로 분류한다. Phase 3은 legacy raw 전화번호를 승격하거나 기존 주문에 전화번호를 백필하지 않는다.
+- 기존 Google 세션은 소유 데이터 조회를 유지하지만 신규 checkout을 만들 수 없다. 신규 주문은 provider와 무관하게 verified Kakao provenance가 없으면 `CHECKOUT_PHONE_REQUIRED`로 실패한다.
 - 새 Google 로그인 진입점은 UI에 노출하지 않는다.
 
 ## 2. Groble webhook 매칭
 
 ### 파싱
 
-`payment.completed` parser는 `buyer.email` 외에 다음 공식 필드를 검증하고 반환한다.
+`payment.completed` parser는 `buyer.email`과 공식 `buyer.phoneNumber` 필드를 검증하고 반환한다. 표시 이름은 application event로 반환하지 않는다.
 
-- `buyer.displayName`
-- `buyer.phoneNumber`
-
-전화번호는 현재 Groble 계약에서 제공되지만, 이전 테스트 payload 호환을 위해 parser 입력에서는 부재할 수 있다. 부재하면 이메일 fallback으로 진입한다.
+전화번호는 현재 Groble 계약에서 제공되지만 이전 signed payload 호환을 위해 parser 입력에서는 부재할 수 있다. 부재한 전화번호는 `legacy_email` 주문에 대해서만 이메일 매칭을 허용하며, `verified_kakao_phone` 주문은 이메일로 fallback하지 않는다.
 
 ### 자동 매칭 순서
 
 1. 결제 ID와 webhook 이벤트 ID로 기존 멱등 처리를 먼저 확인한다.
 2. Groble 구매자 전화번호를 정규화한다.
-3. `expected_buyer_phone_number_normalized + expected_groble_product_id + payment_pending`에 일치하는 주문이 정확히 하나면 선택한다.
-4. 3번이 성공하면 Groble 이메일과 서비스 이메일이 달라도 결제를 자동 확정한다. 표시 이름은 매칭 필수 조건이 아니다.
+3. `verified_kakao_phone + expected_buyer_phone_number_normalized + expected_groble_product_id + payment_pending`에 일치하는 주문이 정확히 하나면 선택한다.
+4. 3번이 성공하면 Groble 이메일과 서비스 이메일이 달라도 결제를 자동 확정한다.
 5. pending 전화번호 후보가 0개이면 이메일보다 먼저 `cancelled + payment_id IS NULL` 스냅샷을 전화번호, 상품, 금액으로 조회한다.
 6. 5번 후보가 하나면 이메일이 달라도 `late_cancelled_payment`/`refund_pending`으로 격리하고, 둘 이상이면 `ambiguous_buyer`로 보관한다. 둘 다 재고를 차감하지 않는다.
-7. pending과 cancelled 전화번호 후보가 모두 0개일 때만 기존 `buyer.email + product + payment_pending` 규칙과 기존 late-cancelled 규칙으로 fallback한다.
-8. 전화번호 또는 이메일 fallback 후보가 0개이거나 2개 이상이면 재고를 차감하지 않고 `unmatched` 또는 `ambiguous_buyer`로 보관한다.
+7. pending과 cancelled 전화번호 후보가 모두 0개일 때만 `legacy_email` 정책의 `buyer.email + product` 규칙과 late-cancelled 규칙을 사용한다. 동일 user/product/amount의 cancelled legacy 후보도 복수이면 `ambiguous_buyer`이며 최신 한 건을 임의 선택하지 않는다.
+8. 전화번호 또는 허용된 legacy 이메일 후보가 0개이거나 2개 이상이면 재고를 차감하지 않고 `unmatched` 또는 `ambiguous_buyer`로 기록한다.
 9. 후보 선택 후에 상품과 금액이 스냅샷과 다르면 기존 `mismatch` 처리를 유지한다.
 
 이 규칙에서 전화번호는 이메일보다 우선한다. 유저가 본인 전화번호로 다른 이메일을 사용해 결제하는 것이 정상 케이스이기 때문이다.
 
 ### 데이터 모델
 
-`users`에 `phone_number_normalized`를 추가하고 널이 아닌 값에 대한 유일 인덱스를 둔다. 5개의 순차 migration이 nullable DDL·짧은 order INSERT trigger, checkout snapshot RPC, 백필·중복 중단, check validation·index, finalization RPC를 각 implicit transaction으로 분리한다. 1번 커밋 후의 null Kakao INSERT는 호출이 사용하는 RPC 본문 버전과 무관하게 trigger가 snapshot을 채우며, 1번 전에 존재한 null snapshot은 3번이 채운다. trigger function은 `SECURITY DEFINER`와 빈 search path를 사용하고 application role의 직접 실행 권한은 없으며, 임의 metadata를 `users`에 쓰는 trigger는 두지 않는다. 백필은 유효한 raw 번호를 우선하되 raw 값이 무효하면 기존 trusted normalized 값을 지우지 않는다. 중복이 발견되면 자동으로 하나를 선택하지 않고 3번 transaction을 중단해 운영자가 계정 소유권을 확인하게 한다.
+`users`에 `phone_number_normalized`, `phone_number_verification_source`, `phone_number_verified_at`을 추가하고 세 provenance 값이 전부 NULL이거나 완전한 verified Kakao 묶음인 atomic check를 둔다. 널이 아닌 normalized 값은 유일해야 한다. 사용자 trigger는 callback의 verified-at을 DB clock으로 확정하고, 검증 시각 없이 raw/profile 전화번호를 바꾸는 이전 writer의 provenance를 제거한다. Phase 3은 불완전한 provenance를 제거할 뿐 raw 전화번호를 normalized identity로 승격하지 않는다. 중복이 발견되면 3번 transaction을 중단해 운영자가 계정 소유권을 확인한다.
 
 `earlybird_orders`에 다음 운영자 전용 컬럼을 추가한다.
 
 - `expected_buyer_phone_number_normalized`
-- `groble_buyer_email`
-- `groble_buyer_phone_number`
-- `groble_buyer_display_name`
+- `buyer_match_policy`
+- `expected_buyer_phone_verification_source`
+- `expected_buyer_phone_verified_at`
 
-`earlybird_webhook_events`에도 일치하지 않은 결제를 후속 확인할 수 있게 같은 구매자 증거 컬럼을 추가한다. 이 컬럼들은 `anon`과 `authenticated`에 GRANT하지 않고, API DTO와 Axiom·Amplitude에 전달하지 않는다. 기존 필드별 authenticated SELECT grant 목록도 변경하지 않는다.
+주문 snapshot check는 `legacy_email`이면 전화번호 증거가 모두 NULL이고, `verified_kakao_phone`이면 normalized/source/verified-at이 모두 완전하도록 강제한다. 호환용 `groble_buyer_*` 컬럼은 주문과 webhook event에 남아 있지만 `20260719130000_stop_persisting_groble_buyer_contacts.sql`이 기존 값을 삭제하고 old/new writer의 INSERT·UPDATE를 모두 NULL로 만든다. 이 컬럼들은 `anon`과 `authenticated`에 GRANT하지 않고 API DTO와 Axiom·Amplitude에 전달하지 않는다.
 
-Supabase RPC는 여전히 service role만 실행할 수 있고, 결제 ID 잠금·사용자 잠금·주문 잠금·재고 잠금 순서와 멱등성을 유지한다. 5번 활성화 migration은 12개 인자 canonical finalizer와 함께, 전화번호 증거를 `NULL`로 위임하는 9개 인자 service-only wrapper를 유지한다. wrapper는 모든 이전 인스턴스가 drain된 후 별도 post-drain migration으로만 제거한다.
+Supabase RPC는 service role만 실행할 수 있고 결제 ID 잠금·사용자 잠금·주문 잠금·재고 잠금 순서와 멱등성을 유지한다. 9개 인자 rolling wrapper는 기존 event/payment를 read-only로 먼저 확인해 canonical duplicate path를 보존한다. 신규 event는 동일 상품의 모든 unresolved verified 주문 owner를 안정 순서로 잠근 뒤 하나라도 남아 있으면 쓰기 전에 `GROBLE_CANONICAL_PHONE_REQUIRED`로 롤백한다. verified 후보가 없고 처리 가능한 legacy 후보가 있을 때만 이메일-only canonical 호출을 허용한다.
 
 ## 3. Amplitude
 
@@ -220,8 +217,8 @@ Axiom 공식 Next.js SDK를 사용해 다음 경계를 만든다.
 
 ## 5. 개인정보와 보안
 
-- 개인정보 처리방침에 Axiom 위탁·국외 이전과 Groble에서 수신한 구매자 연락처 보관 목적을 반영한다.
-- Groble PII 컬럼은 service role 전용으로 유지하고 고객 응답 DTO에서 제외한다.
+- 개인정보 처리방침에 Axiom 위탁·국외 이전과 Groble 구매자 연락처의 결제 매칭 중 일시 처리를 반영한다.
+- Groble 구매자 연락처는 매칭 transaction 밖에 저장하지 않고 고객 응답 DTO에서도 제외한다.
 - Axiom PAT와 runtime ingest token은 로그, 에러 메시지, 테스트 snapshot, Git 산출물에 포함하지 않는다.
 - Axiom runtime token은 `yeosachin-logs` ingest만 허용한다.
 - Amplitude Session Replay와 Axiom 로그의 마스킹 규칙을 서로 별도로 테스트한다.
@@ -231,7 +228,7 @@ Axiom 공식 Next.js SDK를 사용해 다음 경계를 만든다.
 
 - Axiom 설정 누락·ingest 실패는 서비스 요청을 실패시키지 않는다.
 - Amplitude key 누락·SDK 실패는 UI 흐름을 실패시키지 않는다.
-- Groble 전화번호가 부재하거나 파싱되지 않으면 이메일 fallback을 적용한다.
+- Groble 전화번호가 부재하거나 파싱되지 않으면 `legacy_email` 주문에만 이메일 fallback을 적용한다. verified 주문은 `unmatched`로 남긴다.
 - Groble 전화번호 후보가 정확히 하나이면 이메일 불일치는 실패 사유가 아니다.
 - 전화번호 후보가 없고 이메일 fallback도 실패하면 webhook을 2xx로 멱등 수신하되 재고를 차감하지 않고 운영 경고를 발생시킨다.
 - 전화번호 정규화 중복이 발생하면 자동 확정하지 않는다.
@@ -242,11 +239,12 @@ Axiom 공식 Next.js SDK를 사용해 다음 경계를 만든다.
 
 - 한국 국내 번호, `+82` 번호, 공백·하이픈, 잘못된 번호 정규화 테스트
 - 전화번호 일치 + 이메일 불일치 결제 자동 확정
-- 전화번호 미제공 + 이메일 일치 fallback
+- 전화번호 미제공 + migration 전 legacy 주문의 이메일 일치 fallback
+- verified 주문의 전화번호 미제공/불일치 시 이메일 fallback 금지
 - 전화번호·이메일 모두 불일치한 unmatched
 - 중복 전화번호 안전 실패
 - 상품·금액 mismatch, 중복 event, 중복 payment, 재고 동시성 회귀
-- Groble PII 컬럼이 authenticated SELECT grant와 DTO에서 제외되는 계약 테스트
+- Groble PII가 주문·event에 저장되지 않고 authenticated SELECT grant와 DTO에서도 제외되는 계약 테스트
 
 ### Amplitude
 
