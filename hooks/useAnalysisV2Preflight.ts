@@ -22,6 +22,11 @@ import {
     readTestAdmissionCredential,
     readTestEntitlementToken,
 } from '@/lib/services/analysis/v2-client-credentials';
+import {
+    availablePendingTargetStorage,
+    clearPendingAnalysisTargetForTerminalState,
+    type PendingTargetStorage,
+} from '@/lib/services/pending-analysis-target';
 
 export type ExclusionState = 'undecided' | 'saving' | 'excluded' | 'skipped';
 
@@ -50,6 +55,21 @@ export function mergeLoadedPreflight(
         ...incoming,
         exclusionDecision: current.exclusionDecision,
     });
+}
+
+interface ConsumedPreflightRedirectDependencies {
+    replace: (href: string) => void;
+    storage: PendingTargetStorage | undefined;
+}
+
+export function redirectConsumedPreflight(
+    status: PreflightStatusV1,
+    { replace, storage }: ConsumedPreflightRedirectDependencies,
+): boolean {
+    if (status.status !== 'consumed') return false;
+    if (storage) clearPendingAnalysisTargetForTerminalState(storage, status.status);
+    replace(`/progress/${encodeURIComponent(status.requestId)}`);
+    return true;
 }
 
 interface ApiErrorPayload {
@@ -240,10 +260,10 @@ export function useAnalysisV2Preflight() {
             throw new Error('사전 점검 응답을 확인할 수 없습니다.');
         }
         if (!scope.isCurrent()) return null;
-        if (parsed.data.status === 'consumed') {
-            window.location.replace(
-                `/progress/${encodeURIComponent(parsed.data.requestId)}`
-            );
+        if (redirectConsumedPreflight(parsed.data, {
+            storage: availablePendingTargetStorage(),
+            replace: href => window.location.replace(href),
+        })) {
             return parsed.data;
         }
         setPreflight(current => mergeLoadedPreflight(current, parsed.data));

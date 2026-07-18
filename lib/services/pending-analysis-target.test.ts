@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     bindPendingAnalysisTarget,
     clearPendingAnalysisTarget,
@@ -8,6 +8,19 @@ import {
     signOutAndClearPendingAnalysisTarget,
     storePendingAnalysisTarget,
 } from './pending-analysis-target';
+
+const analyticsMocks = vi.hoisted(() => ({
+    initAmplitude: vi.fn(),
+    markAnalyticsIdentityPending: vi.fn(),
+    markAnalyticsIdentityReady: vi.fn(),
+}));
+const browserAuthMocks = vi.hoisted(() => ({
+    createClient: vi.fn(),
+    signOut: vi.fn(),
+}));
+
+vi.mock('./analytics', () => analyticsMocks);
+vi.mock('@/lib/supabase/client', () => ({ createClient: browserAuthMocks.createClient }));
 
 const NOW = 1_750_000_000_000;
 const OWNER_A = '550e8400-e29b-41d4-a716-446655440000';
@@ -25,6 +38,16 @@ function createStorage() {
 }
 
 describe('pending analysis target ownership', () => {
+    beforeEach(() => {
+        analyticsMocks.initAmplitude.mockReset().mockResolvedValue(true);
+        analyticsMocks.markAnalyticsIdentityPending.mockReset();
+        analyticsMocks.markAnalyticsIdentityReady.mockReset();
+        browserAuthMocks.signOut.mockReset().mockResolvedValue({ error: null });
+        browserAuthMocks.createClient.mockReset().mockReturnValue({
+            auth: { signOut: browserAuthMocks.signOut },
+        });
+    });
+
     it('stores an unbound target only for the immediate autostart handoff', () => {
         const storage = createStorage();
 
@@ -174,22 +197,46 @@ describe('pending analysis target ownership', () => {
         expect(storage.getItem('pending_ig')).not.toBeNull();
     });
 
-    it('clears only after a real successful logout response', async () => {
+    it('uses browser auth and anonymizes analytics before clearing a successful logout', async () => {
         const successStorage = createStorage();
         storePendingAnalysisTarget(successStorage, 'safe_handle', NOW);
-        const successRequest = vi.fn().mockResolvedValue({ ok: true });
+        successStorage.removeItem.mockClear();
 
-        await expect(signOutAndClearPendingAnalysisTarget(successStorage, successRequest))
+        await expect(signOutAndClearPendingAnalysisTarget(successStorage))
             .resolves.toBe(true);
-        expect(successRequest).toHaveBeenCalledWith('/api/auth/signout', { method: 'POST' });
+        expect(browserAuthMocks.createClient).toHaveBeenCalledTimes(1);
+        expect(browserAuthMocks.signOut).toHaveBeenCalledTimes(1);
+        expect(analyticsMocks.markAnalyticsIdentityPending).toHaveBeenCalledTimes(1);
+        expect(analyticsMocks.initAmplitude).toHaveBeenCalledWith(null);
+        expect(analyticsMocks.markAnalyticsIdentityReady).toHaveBeenCalledTimes(1);
         expect(successStorage.getItem('pending_ig')).toBeNull();
 
+        expect(browserAuthMocks.signOut.mock.invocationCallOrder[0])
+            .toBeLessThan(analyticsMocks.markAnalyticsIdentityPending.mock.invocationCallOrder[0]);
+        expect(analyticsMocks.markAnalyticsIdentityPending.mock.invocationCallOrder[0])
+            .toBeLessThan(analyticsMocks.initAmplitude.mock.invocationCallOrder[0]);
+        expect(analyticsMocks.initAmplitude.mock.invocationCallOrder[0])
+            .toBeLessThan(analyticsMocks.markAnalyticsIdentityReady.mock.invocationCallOrder[0]);
+        expect(analyticsMocks.markAnalyticsIdentityReady.mock.invocationCallOrder[0])
+            .toBeLessThan(successStorage.removeItem.mock.invocationCallOrder[0]);
+    });
+
+    it('leaves target and analytics identity untouched when browser sign out fails', async () => {
         const failureStorage = createStorage();
         storePendingAnalysisTarget(failureStorage, 'safe_handle', NOW);
-        const failureRequest = vi.fn().mockResolvedValue({ ok: false });
-        await expect(signOutAndClearPendingAnalysisTarget(failureStorage, failureRequest))
+        failureStorage.removeItem.mockClear();
+        const signOut = vi.fn().mockResolvedValue({
+            error: new Error('private provider detail'),
+        });
+
+        await expect(signOutAndClearPendingAnalysisTarget(failureStorage, signOut))
             .resolves.toBe(false);
+        expect(signOut).toHaveBeenCalledWith();
         expect(failureStorage.getItem('pending_ig')).not.toBeNull();
+        expect(failureStorage.removeItem).not.toHaveBeenCalled();
+        expect(analyticsMocks.markAnalyticsIdentityPending).not.toHaveBeenCalled();
+        expect(analyticsMocks.initAmplitude).not.toHaveBeenCalled();
+        expect(analyticsMocks.markAnalyticsIdentityReady).not.toHaveBeenCalled();
     });
 
     it('clears without throwing when storage is unavailable', () => {

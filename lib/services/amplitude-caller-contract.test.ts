@@ -93,6 +93,7 @@ describe('Amplitude caller privacy contract', () => {
 
         const myPage = source('app/mypage/page.tsx');
         const logoutButton = optionalSource('components/logout-button.tsx');
+        const pendingTarget = source('lib/services/pending-analysis-target.ts');
 
         expect(myPage.startsWith("'use client';")).toBe(false);
         expect(myPage).toContain("import { LogoutButton } from '@/components/logout-button';");
@@ -106,6 +107,12 @@ describe('Amplitude caller privacy contract', () => {
             'className="text-[13px] font-medium text-fg-dim transition-colors hover:text-fg"',
         );
         expect(logoutButton).toContain('로그아웃');
+        expect(pendingTarget).not.toContain("fetch('/api/auth/signout'");
+        expect(pendingTarget).toContain("import('@/lib/supabase/client')");
+        expect(pendingTarget).toMatch(
+            /markAnalyticsIdentityPending\(\);[\s\S]*?await initAmplitude\(null\);[\s\S]*?markAnalyticsIdentityReady\(\);/,
+        );
+        expect(pendingTarget).not.toContain('.reset(');
     });
 
     it('clears terminal login state without sending the error to analytics', () => {

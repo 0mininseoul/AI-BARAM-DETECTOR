@@ -1,3 +1,9 @@
+import {
+    initAmplitude,
+    markAnalyticsIdentityPending,
+    markAnalyticsIdentityReady,
+} from './analytics';
+
 const PENDING_TARGET_KEY = 'pending_ig';
 const PENDING_TARGET_TTL_MS = 30 * 60_000;
 const TARGET_PATTERN = /^[A-Za-z0-9._]{1,30}$/;
@@ -33,10 +39,12 @@ interface ReadBoundPendingTargetInput {
     preflightId: string;
 }
 
-type SignOutRequest = (
-    input: RequestInfo | URL,
-    init?: RequestInit,
-) => Promise<Pick<Response, 'ok'>>;
+type BrowserSignOut = () => Promise<{ error: unknown | null }>;
+
+async function browserSignOut(): Promise<{ error: unknown | null }> {
+    const { createClient } = await import('@/lib/supabase/client');
+    return createClient().auth.signOut();
+}
 
 function normalizePendingTarget(value: string): string | null {
     const normalized = value.trim().replace(/^@+/, '');
@@ -203,10 +211,14 @@ export function clearPendingAnalysisTargetForTerminalState(
 
 export async function signOutAndClearPendingAnalysisTarget(
     storage: PendingTargetStorage | undefined,
-    request: SignOutRequest = fetch,
+    signOut: BrowserSignOut = browserSignOut,
 ): Promise<boolean> {
-    const response = await request('/api/auth/signout', { method: 'POST' });
-    if (!response.ok) return false;
+    const { error } = await signOut();
+    if (error) return false;
+
+    markAnalyticsIdentityPending();
+    await initAmplitude(null);
+    markAnalyticsIdentityReady();
     if (storage) clearPendingAnalysisTarget(storage);
     return true;
 }
