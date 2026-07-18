@@ -7,6 +7,11 @@ import {
     appRedirectUrlForRequest,
 } from '@/lib/constants/app-url';
 import { buildAuthProfilePatch } from '@/lib/services/identity/auth-profile';
+import {
+    observeRoute,
+    type OperationalRequestContext,
+} from '@/lib/observability/request';
+import { operationalLogger } from '@/lib/observability/server';
 
 function asRecord(value: unknown): Record<string, unknown> {
     return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -20,14 +25,14 @@ async function syncKakaoProfile(
     userId: string,
     email: string | undefined,
     providerToken: string
-) {
+): Promise<'PROVIDER_ERROR' | 'INTERNAL_ERROR' | null> {
     const res = await fetch('https://kapi.kakao.com/v2/user/me', {
         headers: { Authorization: `Bearer ${providerToken}` },
         cache: 'no-store',
     });
     if (!res.ok) {
         console.error('Kakao /v2/user/me failed:', res.status);
-        return;
+        return 'PROVIDER_ERROR';
     }
     const data: unknown = await res.json();
     const account = asRecord(asRecord(data).kakao_account);
@@ -52,16 +57,37 @@ async function syncKakaoProfile(
             provider: 'kakao',
             ...profilePatch,
         }, { onConflict: 'id' });
-    if (error) console.error('users upsert (kakao profile) failed:', error.code);
+    if (error) {
+        console.error('users upsert (kakao profile) failed:', error.code);
+        return 'INTERNAL_ERROR';
+    }
+    return null;
 }
 
-export async function GET(request: Request) {
+function authProvider(value: unknown): 'google' | 'kakao' | undefined {
+    return value === 'google' || value === 'kakao' ? value : undefined;
+}
+
+async function handleGET(
+    request: Request,
+    context: OperationalRequestContext,
+): Promise<NextResponse> {
     const { searchParams } = new URL(request.url);
     const code = searchParams.get('code');
     const appOrigin = appOriginForRequest(request.url);
 
     if (!code) {
         console.error('Auth callback: No code provided');
+        operationalLogger.emit({
+            event: 'auth.callback_completed',
+            severity: 'warn',
+            fields: {
+                ...context,
+                operation: 'callback',
+                disposition: 'rejected',
+                error_code: 'INVALID_REQUEST',
+            },
+        });
         return NextResponse.redirect(new URL('/login?error=no_code', appOrigin));
     }
 
@@ -90,6 +116,16 @@ export async function GET(request: Request) {
 
     if (!exchangeResult || exchangeResult.error) {
         console.error('Auth callback exchange failed');
+        operationalLogger.emit({
+            event: 'auth.callback_completed',
+            severity: 'warn',
+            fields: {
+                ...context,
+                operation: 'callback',
+                disposition: 'rejected',
+                error_code: 'PROVIDER_ERROR',
+            },
+        });
         const loginUrl = new URL('/login', appOrigin);
         loginUrl.searchParams.set('error', 'exchange_failed');
         return NextResponse.redirect(loginUrl);
@@ -102,20 +138,57 @@ export async function GET(request: Request) {
     // 카카오: REST API로 성별·출생연도·전화번호 등 보강 저장
     const session = exchange?.session;
     const authedUser = exchange?.user;
+    const provider = authProvider(authedUser?.app_metadata?.provider);
     if (
         authedUser &&
         session?.provider_token &&
-        authedUser.app_metadata?.provider === 'kakao'
+        provider === 'kakao'
     ) {
+        let errorCode: 'PROVIDER_ERROR' | 'INTERNAL_ERROR' | null;
         try {
-            await syncKakaoProfile(authedUser.id, authedUser.email ?? undefined, session.provider_token);
+            errorCode = await syncKakaoProfile(
+                authedUser.id,
+                authedUser.email ?? undefined,
+                session.provider_token
+            );
         } catch {
             console.error('Kakao profile sync failed');
+            errorCode = 'INTERNAL_ERROR';
+        }
+        if (errorCode) {
+            operationalLogger.emit({
+                event: 'auth.profile_sync_failed',
+                severity: 'warn',
+                fields: {
+                    ...context,
+                    user_id: authedUser.id,
+                    provider,
+                    operation: 'profile_sync',
+                    disposition: 'failed',
+                    error_code: errorCode,
+                },
+            });
         }
     }
 
     const redirectUrl = appRedirectUrlForRequest(request.url, searchParams.get('next'));
     redirectUrl.searchParams.set('verified', 'true');
 
+    operationalLogger.emit({
+        event: 'auth.callback_completed',
+        severity: 'info',
+        fields: {
+            ...context,
+            ...(authedUser ? { user_id: authedUser.id } : {}),
+            ...(provider ? { provider } : {}),
+            operation: 'callback',
+            disposition: 'completed',
+        },
+    });
+
     return NextResponse.redirect(redirectUrl);
+}
+
+export async function GET(request: Request): Promise<NextResponse> {
+    return observeRoute(request, '/auth/callback', context => handleGET(request, context));
 }

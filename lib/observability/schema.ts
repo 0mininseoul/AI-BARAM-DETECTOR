@@ -52,6 +52,7 @@ export const ALLOWED_FIELD_NAMES = [
     'progress',
     'plan_id',
     'amount_krw',
+    'webhook_event_type',
 ] as const;
 
 type SanitizedValue = string | number | boolean | null;
@@ -228,6 +229,7 @@ export const OPERATIONAL_OPERATIONS = [
     'exclusion',
     'checkout',
     'webhook',
+    'fresh_admission',
     'enqueue',
     'worker',
     'genderTriage',
@@ -284,10 +286,17 @@ export const OPERATIONAL_DISPOSITIONS = [
     'cancel_requested',
     'cancel_duplicate_event',
     'cancel_unmatched',
+    'cancel_mismatch',
     'cancel_before_payment',
     'late_cancelled_payment',
     'ambiguous_buyer',
     'overflow_refund_required',
+] as const;
+
+export const OPERATIONAL_WEBHOOK_EVENT_TYPES = [
+    'payment.completed',
+    'payment.cancel_requested',
+    'other',
 ] as const;
 
 export const OPERATIONAL_QUEUE_NAMES = [
@@ -308,6 +317,7 @@ const REGISTERED_OPERATIONS = new Set<string>(OPERATIONAL_OPERATIONS);
 const REGISTERED_PHASES = new Set<string>(OPERATIONAL_PHASES);
 const REGISTERED_DISPOSITIONS = new Set<string>(OPERATIONAL_DISPOSITIONS);
 const REGISTERED_QUEUE_NAMES = new Set<string>(OPERATIONAL_QUEUE_NAMES);
+const REGISTERED_WEBHOOK_EVENT_TYPES = new Set<string>(OPERATIONAL_WEBHOOK_EVENT_TYPES);
 
 const METHODS = new Set([
     'CONNECT',
@@ -469,6 +479,8 @@ function sanitizeField(name: string, value: unknown): SanitizedValue | undefined
             return safeLowercaseRegistryValue(value, REGISTERED_PLAN_IDS);
         case 'amount_krw':
             return safeFiniteNumber(value, 0, 1_000_000_000, true);
+        case 'webhook_event_type':
+            return safeExactRegistryValue(value, REGISTERED_WEBHOOK_EVENT_TYPES);
         default:
             return undefined;
     }

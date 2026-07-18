@@ -6,6 +6,17 @@ const mocks = vi.hoisted(() => ({
     createClient: vi.fn(),
     enqueue: vi.fn(),
     getUser: vi.fn(),
+    emit: vi.fn(),
+    observeRoute: vi.fn((
+        _request: Request,
+        _route: string,
+        operation: (context: Record<string, unknown>) => Promise<Response>,
+    ) => operation({
+        request_id: '423e4567-e89b-42d3-a456-426614174000',
+        trace_id: null,
+        route: '/api/analysis/preflight',
+        method: _request.method,
+    })),
     process: vi.fn(),
     resolveDispatch: vi.fn(),
     trustedAccessMode: vi.fn(),
@@ -33,6 +44,10 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: mocks.admin }));
 vi.mock('@/lib/supabase/server', () => ({ createClient: mocks.createClient }));
+vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute }));
+vi.mock('@/lib/observability/server', () => ({
+    operationalLogger: { emit: mocks.emit },
+}));
 vi.mock('next/server', async (importOriginal) => {
     const actual = await importOriginal<typeof import('next/server')>();
     return { ...actual, after: mocks.after };
@@ -245,6 +260,18 @@ describe('preflight owner routes', () => {
         });
         expect(mocks.store.reserveDispatch).not.toHaveBeenCalled();
         expect(mocks.enqueue).not.toHaveBeenCalled();
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'preflight.failed',
+            severity: 'warn',
+            fields: expect.objectContaining({
+                user_id: userId,
+                target_instagram_id: 'target.name',
+                operation: 'preflight',
+                disposition: 'rate_limited',
+                error_code: 'RATE_LIMITED',
+            }),
+        });
+        expect(JSON.stringify(mocks.emit.mock.calls)).not.toContain('owner@example.com');
     });
 
     it('fails closed before persistence when no queue or explicit local runner is available', async () => {
@@ -280,6 +307,21 @@ describe('preflight owner routes', () => {
             generation: 1,
             reservationToken: '323e4567-e89b-42d3-a456-426614174000', // gitleaks:allow -- UUID fixture
         });
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'preflight.requested',
+            severity: 'info',
+            fields: expect.objectContaining({
+                user_id: userId,
+                preflight_id: preflightId,
+                target_instagram_id: 'target.name',
+                provider: 'google',
+                operation: 'preflight',
+                disposition: 'requested',
+            }),
+        });
+        expect(JSON.stringify(mocks.emit.mock.calls)).not.toMatch(
+            /owner@example|preflight-key-000000000000/
+        );
     });
 
     it('terminalizes only a definitive deterministic task rejection', async () => {
@@ -425,6 +467,17 @@ describe('preflight owner routes', () => {
             userId,
             decision: 'exclude',
             excludedInstagramId: 'girlfriend.name',
+        });
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'preflight.exclusion_decided',
+            severity: 'info',
+            fields: expect.objectContaining({
+                user_id: userId,
+                preflight_id: preflightId,
+                excluded_instagram_id: 'girlfriend.name',
+                operation: 'exclusion',
+                disposition: 'accepted',
+            }),
         });
 
         mocks.store.setExclusion.mockRejectedValueOnce(new InvalidPreflightExclusionError());

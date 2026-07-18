@@ -2,10 +2,27 @@ import { createHmac } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ rpc: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+    rpc: vi.fn(),
+    emit: vi.fn(),
+    observeRoute: vi.fn((
+        _request: Request,
+        _route: string,
+        operation: (context: Record<string, unknown>) => Promise<Response>,
+    ) => operation({
+        request_id: '423e4567-e89b-42d3-a456-426614174003',
+        trace_id: null,
+        route: '/api/webhooks/groble',
+        method: 'POST',
+    })),
+}));
 
 vi.mock('@/lib/supabase/admin', () => ({
     supabaseAdmin: { rpc: mocks.rpc },
+}));
+vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute }));
+vi.mock('@/lib/observability/server', () => ({
+    operationalLogger: { emit: mocks.emit },
 }));
 
 import { POST } from '@/app/api/webhooks/groble/route';
@@ -103,6 +120,21 @@ describe('signed Groble webhook route', () => {
         }))).status).toBe(401);
         expect((await POST(request('{'))).status).toBe(400);
         expect(mocks.rpc).not.toHaveBeenCalled();
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'groble.webhook_rejected',
+            severity: 'warn',
+            fields: {
+                request_id: '423e4567-e89b-42d3-a456-426614174003',
+                trace_id: null,
+                route: '/api/webhooks/groble',
+                method: 'POST',
+                provider: 'groble',
+                operation: 'webhook',
+                disposition: 'rejected',
+                error_code: 'UNAUTHORIZED',
+            },
+        });
+        expect(JSON.stringify(mocks.emit.mock.calls)).not.toContain('delivery_0001');
     });
 
     it('returns only invalid field paths for a signed Groble test delivery', async () => {
@@ -250,6 +282,40 @@ describe('signed Groble webhook route', () => {
         expect(responseText).toContain('accepted');
         expect(responseText).not.toMatch(
             /different-groble-buyer|010-1234-5678|결제 구매자|merchant_0001|basic_product-01/
+        );
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'groble.webhook_received',
+            severity: 'info',
+            fields: {
+                request_id: '423e4567-e89b-42d3-a456-426614174003',
+                trace_id: null,
+                route: '/api/webhooks/groble',
+                method: 'POST',
+                provider: 'groble',
+                operation: 'webhook',
+                webhook_event_type: 'payment.completed',
+                disposition: 'accepted',
+            },
+        });
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'groble.webhook_finalized',
+            severity: 'info',
+            fields: {
+                request_id: '423e4567-e89b-42d3-a456-426614174003',
+                trace_id: null,
+                route: '/api/webhooks/groble',
+                method: 'POST',
+                provider: 'groble',
+                operation: 'webhook',
+                webhook_event_type: 'payment.completed',
+                order_id: '123e4567-e89b-42d3-a456-426614174000',
+                plan_id: 'basic',
+                amount_krw: 14_900,
+                disposition: 'accepted',
+            },
+        });
+        expect(JSON.stringify(mocks.emit.mock.calls)).not.toMatch(
+            /different-groble-buyer|010-1234-5678|결제 구매자|merchant_0001|basic_product-01|delivery_0001|evt_test_/
         );
     });
 

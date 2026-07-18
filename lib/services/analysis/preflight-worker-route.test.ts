@@ -5,9 +5,24 @@ const mocks = vi.hoisted(() => ({
     process: vi.fn(),
     processAdmission: vi.fn(),
     verify: vi.fn(),
+    emit: vi.fn(),
+    observeRoute: vi.fn((
+        _request: Request,
+        _route: string,
+        operation: (context: Record<string, unknown>) => Promise<Response>,
+    ) => operation({
+        request_id: '423e4567-e89b-42d3-a456-426614174001',
+        trace_id: null,
+        route: '/api/analysis/preflight/worker',
+        method: 'POST',
+    })),
 }));
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
+vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute }));
+vi.mock('@/lib/observability/server', () => ({
+    operationalLogger: { emit: mocks.emit },
+}));
 vi.mock('@/lib/services/analysis/preflight', async (importOriginal) => {
     const actual = await importOriginal<typeof import('./preflight')>();
     return { ...actual, processPreflight: mocks.process };
@@ -70,6 +85,24 @@ describe('preflight worker route', () => {
         expect(mocks.verify).toHaveBeenCalledWith('Bearer signed', { config });
         expect(mocks.process).toHaveBeenCalledWith(preflightId);
         await expect(response.json()).resolves.toEqual({ status: 'ready' });
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'preflight.profile_collected',
+            severity: 'info',
+            fields: expect.objectContaining({
+                preflight_id: preflightId,
+                operation: 'profile',
+                disposition: 'ready',
+            }),
+        });
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'preflight.completed',
+            severity: 'info',
+            fields: expect.objectContaining({
+                preflight_id: preflightId,
+                operation: 'profile',
+                disposition: 'ready',
+            }),
+        });
     });
 
     it('runs a fenced fresh-admission generation in the same durable Cloud Run worker', async () => {
@@ -127,6 +160,22 @@ describe('preflight worker route', () => {
         });
         expect(record).not.toContain('target.name');
         expect(record).not.toContain('bearer-secret');
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'preflight.failed',
+            severity: 'error',
+            fields: expect.objectContaining({
+                preflight_id: preflightId,
+                operation: 'profile',
+                disposition: 'failed',
+                retryable: true,
+                attempt: 2,
+                status: 429,
+                error_code: 'RATE_LIMITED',
+            }),
+        });
+        expect(JSON.stringify(mocks.emit.mock.calls)).not.toMatch(
+            /target.name|bearer-secret|Bearer signed/
+        );
     });
 
     it('logs only sanitized fresh-admission failure metadata and its bounded attempt', async () => {

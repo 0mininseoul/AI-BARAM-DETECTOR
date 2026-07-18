@@ -4,6 +4,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({
     createServerClient: vi.fn(),
     rpc: vi.fn(),
+    emit: vi.fn(),
+    observeRoute: vi.fn((
+        _request: Request,
+        _route: string,
+        operation: (context: Record<string, unknown>) => Promise<Response>,
+    ) => operation({
+        request_id: '423e4567-e89b-42d3-a456-426614174002',
+        trace_id: null,
+        route: '/api/earlybird/checkout',
+        method: 'POST',
+    })),
 }));
 
 vi.mock('@/lib/supabase/server', () => ({
@@ -11,6 +22,10 @@ vi.mock('@/lib/supabase/server', () => ({
 }));
 vi.mock('@/lib/supabase/admin', () => ({
     supabaseAdmin: { rpc: mocks.rpc },
+}));
+vi.mock('@/lib/observability/request', () => ({ observeRoute: mocks.observeRoute }));
+vi.mock('@/lib/observability/server', () => ({
+    operationalLogger: { emit: mocks.emit },
 }));
 
 import { POST as checkout } from '@/app/api/earlybird/checkout/route';
@@ -104,6 +119,26 @@ describe('earlybird checkout and waitlist routes', () => {
             p_pricing_version: 'earlybird-2026-07-v1',
             p_disclosure_version: 'earlybird-48h-v1',
         }));
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'earlybird.checkout_created',
+            severity: 'info',
+            fields: {
+                request_id: '423e4567-e89b-42d3-a456-426614174002',
+                trace_id: null,
+                route: '/api/earlybird/checkout',
+                method: 'POST',
+                user_id: USER_ID,
+                preflight_id: PREFLIGHT_ID,
+                order_id: ORDER_ID,
+                plan_id: 'basic',
+                amount_krw: 14_900,
+                operation: 'checkout',
+                disposition: 'accepted',
+            },
+        });
+        expect(JSON.stringify(mocks.emit.mock.calls)).not.toMatch(
+            /basic_product-01|basic-checkout-a1/
+        );
     });
 
     it('restores the same pending order on idempotent checkout replay', async () => {
@@ -178,6 +213,19 @@ describe('earlybird checkout and waitlist routes', () => {
             error: '카카오 계정의 전화번호 동의 정보를 확인한 뒤 다시 로그인해주세요.',
         });
         expect(JSON.stringify(body)).not.toMatch(/\+?82?10[0-9-]+/);
+        expect(mocks.emit).toHaveBeenCalledWith({
+            event: 'earlybird.checkout_failed',
+            severity: 'warn',
+            fields: expect.objectContaining({
+                user_id: USER_ID,
+                preflight_id: PREFLIGHT_ID,
+                plan_id: 'basic',
+                amount_krw: 14_900,
+                operation: 'checkout',
+                disposition: 'rejected',
+                error_code: 'VALIDATION_ERROR',
+            }),
+        });
     });
 
     it('creates only a Plus waitlist row through the service-only RPC', async () => {
