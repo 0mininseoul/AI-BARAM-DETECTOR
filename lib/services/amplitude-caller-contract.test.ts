@@ -5,6 +5,14 @@ function source(relativePath: string): string {
     return readFileSync(new URL(`../../${relativePath}`, import.meta.url), 'utf8');
 }
 
+function optionalSource(relativePath: string): string {
+    try {
+        return source(relativePath);
+    } catch {
+        return '';
+    }
+}
+
 describe('Amplitude caller privacy contract', () => {
     it('uses canonical event constants and snake_case properties only', () => {
         const callers = [
@@ -82,6 +90,22 @@ describe('Amplitude caller privacy contract', () => {
             expect(page).toContain('signOutAndClearPendingAnalysisTarget');
             expect(page).not.toContain("fetch('/api/auth/signout'");
         }
+
+        const myPage = source('app/mypage/page.tsx');
+        const logoutButton = optionalSource('components/logout-button.tsx');
+
+        expect(myPage.startsWith("'use client';")).toBe(false);
+        expect(myPage).toContain("import { LogoutButton } from '@/components/logout-button';");
+        expect(myPage).toContain('<LogoutButton />');
+        expect(myPage).not.toContain('action="/api/auth/signout"');
+        expect(logoutButton.startsWith("'use client';")).toBe(true);
+        expect(logoutButton).toContain('signOutAndClearPendingAnalysisTarget');
+        expect(logoutButton).toContain('availablePendingTargetStorage()');
+        expect(logoutButton).toMatch(/if \(signedOut\) router\.push\('\/'\);/);
+        expect(logoutButton).toContain(
+            'className="text-[13px] font-medium text-fg-dim transition-colors hover:text-fg"',
+        );
+        expect(logoutButton).toContain('로그아웃');
     });
 
     it('clears terminal login state without sending the error to analytics', () => {
