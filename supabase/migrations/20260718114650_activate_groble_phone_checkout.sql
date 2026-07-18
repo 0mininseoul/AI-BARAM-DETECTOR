@@ -50,6 +50,15 @@ BEGIN
         RAISE EXCEPTION 'EARLYBIRD_PRICE_INVALID';
     END IF;
 
+    -- Product precedes user everywhere an order can be inserted. The INSERT
+    -- trigger re-enters this transaction-scoped lock before snapshotting.
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(
+            'earlybird:groble:product:' || p_expected_product_id,
+            0
+        )
+    );
+
     PERFORM pg_catalog.pg_advisory_xact_lock(
         pg_catalog.hashtextextended(p_user_id::TEXT, 0)
     );

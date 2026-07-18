@@ -43,9 +43,13 @@ const AUTHENTICATED_ORDER_COLUMNS = [
 ];
 
 function functionDefinition(name: string): string {
-    const start = migration.indexOf(`CREATE OR REPLACE FUNCTION public.${name}(`);
-    const end = migration.indexOf('\n$$;', start);
-    return start >= 0 && end >= 0 ? migration.slice(start, end + 4) : '';
+    return functionDefinitionIn(migration, name);
+}
+
+function functionDefinitionIn(source: string, name: string): string {
+    const start = source.indexOf(`CREATE OR REPLACE FUNCTION public.${name}(`);
+    const end = source.indexOf('\n$$;', start);
+    return start >= 0 && end >= 0 ? source.slice(start, end + 4) : '';
 }
 
 describe('Groble phone matching migration contract', () => {
@@ -103,7 +107,12 @@ describe('Groble phone matching migration contract', () => {
         expect(ddlMigration).not.toContain('DUPLICATE_NORMALIZED_PHONE_REQUIRES_REVIEW');
         expect(ddlMigration).not.toContain('VALIDATE CONSTRAINT');
         expect(ddlMigration).not.toMatch(/^CREATE (?:UNIQUE )?INDEX/m);
-        expect(ddlMigration).not.toContain('create_earlybird_checkout');
+        expect(ddlMigration).toContain(
+            'RENAME TO create_earlybird_checkout_before_product_fence'
+        );
+        expect(ddlMigration).toContain(
+            'CREATE OR REPLACE FUNCTION public.create_earlybird_checkout'
+        );
 
         expect(checkoutMigration).toContain(
             'CREATE OR REPLACE FUNCTION public.create_earlybird_checkout'
@@ -298,6 +307,92 @@ describe('Groble phone matching migration contract', () => {
         );
     });
 
+    it('shares one namespaced product fence in payment-product-user lock order', () => {
+        const bridge = functionDefinitionIn(
+            ddlMigration,
+            'create_earlybird_checkout'
+        );
+        const trigger = functionDefinitionIn(
+            ddlMigration,
+            'set_earlybird_order_phone_snapshot'
+        );
+        const checkout = functionDefinitionIn(
+            checkoutMigration,
+            'create_earlybird_checkout'
+        );
+        const wrapperStart = finalizationMigration.lastIndexOf(
+            'CREATE OR REPLACE FUNCTION public.finalize_earlybird_groble_payment('
+        );
+        const wrapperEnd = finalizationMigration.indexOf('\n$$;', wrapperStart);
+        const wrapper = finalizationMigration.slice(wrapperStart, wrapperEnd + 4);
+        const productNamespace = 'earlybird:groble:product:';
+
+        for (const definition of [bridge, trigger, checkout, wrapper]) {
+            expect(definition).toContain(productNamespace);
+            expect(definition).toContain('pg_advisory_xact_lock');
+            expect(definition).toContain('pg_catalog.hashtextextended');
+        }
+
+        const bridgeValidation = bridge.indexOf('EARLYBIRD_PRODUCT_INVALID');
+        const bridgeProductLock = bridge.indexOf(productNamespace);
+        const bridgeDelegate = bridge.indexOf(
+            'create_earlybird_checkout_before_product_fence'
+        );
+        expect(bridgeValidation).toBeGreaterThanOrEqual(0);
+        expect(bridgeProductLock).toBeGreaterThan(bridgeValidation);
+        expect(bridgeDelegate).toBeGreaterThan(bridgeProductLock);
+
+        const triggerProductLock = trigger.indexOf(productNamespace);
+        const triggerSnapshotRead = trigger.indexOf(
+            'FROM public.users AS buyer'
+        );
+        expect(triggerProductLock).toBeGreaterThanOrEqual(0);
+        expect(triggerSnapshotRead).toBeGreaterThan(triggerProductLock);
+
+        const checkoutValidation = checkout.indexOf('EARLYBIRD_PRODUCT_INVALID');
+        const checkoutProductLock = checkout.indexOf(productNamespace);
+        const checkoutUserLock = checkout.indexOf('p_user_id::TEXT');
+        expect(checkoutProductLock).toBeGreaterThan(checkoutValidation);
+        expect(checkoutUserLock).toBeGreaterThan(checkoutProductLock);
+
+        const wrapperValidation = wrapper.indexOf(
+            'GROBLE_PAYMENT_EVIDENCE_INVALID'
+        );
+        const wrapperPaymentLock = wrapper.indexOf(
+            'pg_catalog.hashtextextended(p_payment_id, 0)'
+        );
+        const wrapperProductLock = wrapper.indexOf(productNamespace);
+        const wrapperUserLock = wrapper.indexOf('FOR v_lock_user_id IN');
+        const wrapperDuplicateRead = wrapper.indexOf(
+            'FROM public.earlybird_webhook_events AS existing_event'
+        );
+        const wrapperCanonicalCall = wrapper.indexOf(
+            'FROM public.finalize_earlybird_groble_payment(',
+            wrapperDuplicateRead
+        );
+        expect(wrapperPaymentLock).toBeGreaterThan(wrapperValidation);
+        expect(wrapperProductLock).toBeGreaterThan(wrapperPaymentLock);
+        expect(wrapperUserLock).toBeGreaterThan(wrapperProductLock);
+        expect(wrapperDuplicateRead).toBeGreaterThan(wrapperUserLock);
+        expect(wrapperCanonicalCall).toBeGreaterThan(wrapperDuplicateRead);
+    });
+
+    it('keeps the Phase 1 legacy checkout body internal until a post-drain migration', () => {
+        expect(ddlMigration).toContain(
+            'RENAME TO create_earlybird_checkout_before_product_fence'
+        );
+        expect(ddlMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.create_earlybird_checkout_before_product_fence\([\s\S]*?FROM PUBLIC, anon, authenticated, service_role/
+        );
+        expect(ddlMigration).not.toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.create_earlybird_checkout_before_product_fence/
+        );
+        expect(migration).not.toMatch(
+            /DROP FUNCTION public\.create_earlybird_checkout_before_product_fence/
+        );
+        expect(ddlMigration).toMatch(/post-drain migration/i);
+    });
+
     it('bounds migration locks and defers table scans until constraint validation', () => {
         expect(migration).not.toContain('LOCK TABLE public.users');
         expect(validationMigration).toMatch(/row-count[\s\S]*?maintenance window/i);
@@ -438,11 +533,11 @@ describe('Groble phone matching migration contract', () => {
         const duplicateRead = wrapper.indexOf('earlybird_webhook_events');
         const wrapperLock = wrapper.indexOf('FOR v_lock_user_id IN');
         expect(duplicateRead).toBeGreaterThanOrEqual(0);
-        expect(duplicateRead).toBeLessThan(wrapperLock);
-        expect(wrapper.slice(duplicateRead, wrapperLock)).toContain(
+        expect(duplicateRead).toBeGreaterThan(wrapperLock);
+        expect(wrapper.slice(duplicateRead)).toContain(
             'earlybird_orders'
         );
-        expect(wrapper.slice(duplicateRead, wrapperLock)).toContain(
+        expect(wrapper.slice(duplicateRead)).toContain(
             'payment_id = p_payment_id'
         );
         const lockQuery = wrapper.slice(wrapperLock, wrapper.indexOf('LOOP', wrapperLock));
@@ -539,7 +634,10 @@ describe('Groble phone matching migration contract', () => {
     });
 
     it('serializes profile snapshots and refund transitions with the user lock', () => {
-        const checkout = functionDefinition('create_earlybird_checkout');
+        const checkout = functionDefinitionIn(
+            checkoutMigration,
+            'create_earlybird_checkout'
+        );
         expect(checkout).toMatch(
             /SELECT buyer\.provider, buyer\.phone_number, buyer\.phone_number_normalized,[\s\S]*?buyer\.phone_number_verification_source,[\s\S]*?buyer\.phone_number_verified_at[\s\S]*?WHERE buyer\.id = p_user_id\s+FOR UPDATE/
         );

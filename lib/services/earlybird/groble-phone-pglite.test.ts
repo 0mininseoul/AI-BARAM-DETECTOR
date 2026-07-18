@@ -909,6 +909,31 @@ describe('Groble phone migration upgrade behavior', () => {
                 service_can_execute: false,
             });
 
+            expect((await database.query<{
+                internal_exists: boolean;
+                service_can_execute_internal: boolean;
+                service_can_execute_bridge: boolean;
+            }>(
+                `SELECT
+                    pg_catalog.to_regprocedure(
+                        'public.create_earlybird_checkout_before_product_fence(uuid,uuid,text,text,integer,text,text,text,timestamp with time zone)'
+                    ) IS NOT NULL AS internal_exists,
+                    pg_catalog.has_function_privilege(
+                        'service_role',
+                        'public.create_earlybird_checkout_before_product_fence(uuid,uuid,text,text,integer,text,text,text,timestamp with time zone)',
+                        'EXECUTE'
+                    ) AS service_can_execute_internal,
+                    pg_catalog.has_function_privilege(
+                        'service_role',
+                        'public.create_earlybird_checkout(uuid,uuid,text,text,integer,text,text,text,timestamp with time zone)',
+                        'EXECUTE'
+                    ) AS service_can_execute_bridge`
+            )).rows[0]).toEqual({
+                internal_exists: true,
+                service_can_execute_internal: false,
+                service_can_execute_bridge: true,
+            });
+
             await expect(createTransitionCheckout(
                 908,
                 '010-5555-6666'
@@ -1912,6 +1937,23 @@ describe('Groble phone checkout and finalizer behavior', () => {
             'payment_pending',
             'payment_pending',
         ]);
+    });
+
+    it('validates rolling input before payment, product, or user attribution locks', async () => {
+        const verified = await seedPreflight(217, 'basic', {
+            email: 'rolling-invalid-verified@example.com',
+        });
+        await createCheckout(verified);
+
+        await expect(asService(
+            `SELECT * FROM public.finalize_earlybird_groble_payment(
+                'rolling-invalid-event', 'rolling-invalid-idem',
+                'payment.failed', '2026-07-18T21:00:00+09:00',
+                'rolling-invalid-payment', $1, $2, 14900,
+                '2026-07-18T21:00:00+09:00'
+            )`,
+            [verified.email, BASIC_PRODUCT_ID]
+        )).rejects.toThrow(/GROBLE_PAYMENT_EVIDENCE_INVALID/);
     });
 
     it('preserves rolling duplicate-event and duplicate-payment replay for accepted legacy orders', async () => {

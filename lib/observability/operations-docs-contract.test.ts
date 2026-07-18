@@ -112,6 +112,19 @@ describe('analytics and observability disclosure contract', () => {
         }
     });
 
+    it('documents the Groble product fence and rolling-deploy drain contract', () => {
+        const operations = source('docs/groble-earlybird-operations.md');
+
+        expect(operations).toContain('payment -> product -> user ID 오름차순');
+        expect(operations).toContain('product -> user');
+        expect(operations).toContain('earlybird:groble:product:<product_id>');
+        expect(operations).toMatch(/직접 INSERT[^\n]*trigger[^\n]*product lock/);
+        expect(operations).toMatch(/canonical[^\n]*payment -> user/);
+        expect(operations).toMatch(/0 active writer/);
+        expect(operations).toMatch(/Phase 1[^\n]*relation[^\n]*drain/);
+        expect(operations).toMatch(/internal checkout body[^\n]*post-drain/);
+    });
+
     it('documents the closed Amplitude schema with replay disabled and eight event panels', () => {
         const operations = source('docs/amplitude-analytics-operations.md');
 

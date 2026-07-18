@@ -193,6 +193,15 @@ DECLARE
     v_phone_verification_source TEXT;
     v_phone_verified_at TIMESTAMP WITH TIME ZONE;
 BEGIN
+    -- The same namespaced product fence is also taken by checkout and the rolling
+    -- finalizer. Direct service-role INSERTs cannot create a verified-order phantom.
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(
+            'earlybird:groble:product:' || NEW.expected_groble_product_id,
+            0
+        )
+    );
+
     SELECT buyer.phone_number_normalized,
         buyer.phone_number_verification_source,
         buyer.phone_number_verified_at
@@ -262,3 +271,80 @@ BEFORE UPDATE OF buyer_match_policy,
 ON public.earlybird_orders
 FOR EACH ROW
 EXECUTE FUNCTION public.protect_earlybird_order_buyer_match_snapshot();
+
+-- Establish product -> user ordering before Phase 2 replaces the checkout body.
+-- The renamed body stays executable only by this SECURITY DEFINER bridge so a
+-- transaction that entered during Phase 1 can finish after Phase 2 commits. Remove
+-- it only in a separately reviewed post-drain migration.
+ALTER FUNCTION public.create_earlybird_checkout(
+    UUID, UUID, TEXT, TEXT, INTEGER, TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE
+) RENAME TO create_earlybird_checkout_before_product_fence;
+
+REVOKE ALL ON FUNCTION public.create_earlybird_checkout_before_product_fence(
+    UUID, UUID, TEXT, TEXT, INTEGER, TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE
+) FROM PUBLIC, anon, authenticated, service_role;
+
+CREATE OR REPLACE FUNCTION public.create_earlybird_checkout(
+    p_user_id UUID,
+    p_preflight_id UUID,
+    p_plan_id TEXT,
+    p_expected_product_id TEXT,
+    p_expected_amount_krw INTEGER,
+    p_pricing_version TEXT,
+    p_disclosure_version TEXT,
+    p_disclosure_text TEXT,
+    p_disclosure_accepted_at TIMESTAMP WITH TIME ZONE
+)
+RETURNS TABLE(order_id UUID, created BOOLEAN)
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+BEGIN
+    IF p_plan_id NOT IN ('basic', 'standard') THEN
+        RAISE EXCEPTION 'EARLYBIRD_PAID_PLAN_REQUIRED';
+    END IF;
+    IF p_pricing_version <> 'earlybird-2026-07-v1'
+       OR p_disclosure_version <> 'earlybird-48h-v1'
+       OR p_disclosure_text <> '현재 얼리버드 기간에는 즉시 자동 판독이 아닌, 결제 완료 후 48시간 이내 판독 결과를 제공합니다.'
+       OR p_disclosure_accepted_at IS NULL THEN
+        RAISE EXCEPTION 'EARLYBIRD_CONSENT_INVALID';
+    END IF;
+    IF p_expected_product_id IS NULL
+       OR p_expected_product_id !~ '^[A-Za-z0-9_-]{1,128}$' THEN
+        RAISE EXCEPTION 'EARLYBIRD_PRODUCT_INVALID';
+    END IF;
+    IF (p_plan_id = 'basic' AND p_expected_amount_krw <> 14900)
+       OR (p_plan_id = 'standard' AND p_expected_amount_krw <> 19900) THEN
+        RAISE EXCEPTION 'EARLYBIRD_PRICE_INVALID';
+    END IF;
+
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(
+            'earlybird:groble:product:' || p_expected_product_id,
+            0
+        )
+    );
+
+    RETURN QUERY
+    SELECT legacy_checkout.order_id, legacy_checkout.created
+    FROM public.create_earlybird_checkout_before_product_fence(
+        p_user_id,
+        p_preflight_id,
+        p_plan_id,
+        p_expected_product_id,
+        p_expected_amount_krw,
+        p_pricing_version,
+        p_disclosure_version,
+        p_disclosure_text,
+        p_disclosure_accepted_at
+    ) AS legacy_checkout;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.create_earlybird_checkout(
+    UUID, UUID, TEXT, TEXT, INTEGER, TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE
+) FROM PUBLIC, anon, authenticated, service_role;
+GRANT EXECUTE ON FUNCTION public.create_earlybird_checkout(
+    UUID, UUID, TEXT, TEXT, INTEGER, TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE
+) TO service_role;

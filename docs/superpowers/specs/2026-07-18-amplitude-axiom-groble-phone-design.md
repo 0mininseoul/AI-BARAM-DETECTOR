@@ -44,7 +44,8 @@
 ### 결제 시작 규칙
 
 - checkout에는 24시간 이내에 Kakao REST로 검증된 atomic raw/normalized/source/verified-at provenance가 필요하다. raw 값에서 즉석 파생하거나 저장된 normalized 값으로 fallback하지 않는다.
-- checkout RPC와 모든 주문 INSERT에 적용되는 trigger는 caller가 제공한 매칭 값을 덮어쓰고 `buyer_match_policy = 'verified_kakao_phone'`과 normalized/source/verified-at을 snapshot한다. 이 네 필드는 이후 UPDATE할 수 없고, webhook은 현재 사용자 프로필이 아니라 주문 snapshot과 매칭한다.
+- checkout RPC는 bounded 상품 검증 후 `earlybird:groble:product:<product_id>` namespaced advisory lock, user lock 순서로 획득한다. 모든 주문 INSERT에 적용되는 trigger도 snapshot 조회 전에 같은 product lock을 획득하고, RPC 경로에서는 같은 transaction lock을 재진입한다. caller가 제공한 매칭 값을 덮어쓰고 `buyer_match_policy = 'verified_kakao_phone'`과 normalized/source/verified-at을 snapshot한다. 이 네 필드는 이후 UPDATE할 수 없고, webhook은 현재 사용자 프로필이 아니라 주문 snapshot과 매칭한다.
+- Phase 1은 기존 checkout body를 application role에서 revoke된 내부 이름으로 보존하고, product lock을 먼저 획득하는 bridge를 설치한다. Phase 2가 새 body로 교체된 뒤에도 Phase 1에서 시작한 호출이 끝날 수 있도록 내부 body는 즉시 drop하지 않고 별도 post-drain migration에서만 제거한다.
 - migration 적용 전에 존재한 주문만 `legacy_email`로 분류한다. Phase 3은 legacy raw 전화번호를 승격하거나 기존 주문에 전화번호를 백필하지 않는다.
 - 기존 Google 세션은 소유 데이터 조회를 유지하지만 신규 checkout을 만들 수 없다. 신규 주문은 provider와 무관하게 verified Kakao provenance가 없으면 `CHECKOUT_PHONE_REQUIRED`로 실패한다.
 - 새 Google 로그인 진입점은 UI에 노출하지 않는다.
@@ -84,7 +85,7 @@
 
 주문 snapshot check는 `legacy_email`이면 전화번호 증거가 모두 NULL이고, `verified_kakao_phone`이면 normalized/source/verified-at이 모두 완전하도록 강제한다. 호환용 `groble_buyer_*` 컬럼은 주문과 webhook event에 남아 있지만 `20260719130000_stop_persisting_groble_buyer_contacts.sql`이 기존 값을 삭제하고 old/new writer의 INSERT·UPDATE를 모두 NULL로 만든다. 이 컬럼들은 `anon`과 `authenticated`에 GRANT하지 않고 API DTO와 Axiom·Amplitude에 전달하지 않는다.
 
-Supabase RPC는 service role만 실행할 수 있고 결제 ID 잠금·사용자 잠금·주문 잠금·재고 잠금 순서와 멱등성을 유지한다. 9개 인자 rolling wrapper는 기존 event/payment를 read-only로 먼저 확인해 canonical duplicate path를 보존한다. 신규 event는 동일 상품의 모든 unresolved verified 주문 owner를 안정 순서로 잠근 뒤 하나라도 남아 있으면 쓰기 전에 `GROBLE_CANONICAL_PHONE_REQUIRED`로 롤백한다. verified 후보가 없고 처리 가능한 legacy 후보가 있을 때만 이메일-only canonical 호출을 허용한다.
+Supabase RPC는 service role만 실행할 수 있고 멱등성을 유지한다. advisory lock 순서는 rolling wrapper의 `payment -> namespaced product -> user ID 오름차순`, checkout/trigger의 `product -> user`이며, canonical은 기존 `payment -> user`를 유지한다. 9개 인자 rolling wrapper는 bounded 입력을 검증하고 이 순서의 lock을 모두 얻은 뒤 existing event/payment를 read-only로 확인해 canonical duplicate path를 보존한다. product lock은 wrapper의 판정과 모든 verified order INSERT를 직렬화하므로 신규 event의 product-wide recheck 뒤 다른 사용자의 same-product snapshot이 끼어들 수 없다. unresolved verified 주문이 하나라도 남아 있으면 쓰기 전에 `GROBLE_CANONICAL_PHONE_REQUIRED`로 롤백하고, verified 후보가 없고 처리 가능한 legacy 후보가 있을 때만 이메일-only canonical 호출을 허용한다. 같은 payment ID의 old/new finalizer도 payment lock에서 먼저 직렬화되어 user/payment 역순 교착을 만들지 않는다.
 
 ## 3. Amplitude
 
@@ -275,11 +276,11 @@ Axiom 공식 Next.js SDK를 사용해 다음 경계를 만든다.
 
 ## 8. 배포 순서
 
-1. 통합 테스트가 가능한 5개의 순차 Supabase migration을 CLI로 생성한다. 1번의 nullable DDL·짧은 order INSERT trigger, checkout 활성화, DML, validation/index, finalization/grant transaction 경계를 혼합하지 않는다.
+1. 통합 테스트가 가능한 5개의 순차 Supabase migration을 CLI로 생성한다. 1번의 nullable DDL·짧은 order INSERT trigger·product-first checkout bridge, checkout 활성화, DML, validation/index, finalization/grant transaction 경계를 혼합하지 않는다.
 2. `ascentum03`에 `yeosachin-logs` 데이터셋과 ingest 전용 runtime token을 생성한다.
 3. 관측 SDK, 인증 UI, Groble parser·RPC를 구현한다.
 4. 로컬 단위·DB·빌드 검증을 통과한다.
-5. push 직전 원격 row count·table size와 장기 transaction을 확인하고 5개 Supabase migration을 순서대로 반영한다. INSERT trigger가 포함된 1번, checkout 활성화 2번, 백필 3번의 순서를 바꾸지 않는다. 이후 Vercel preview에 Amplitude key와 Axiom runtime 변수를 추가한다.
+5. push 직전 원격 row count·table size와 장기 transaction을 확인하고 checkout/order INSERT 쓰기를 제한한다. active writer가 0인지 확인한 뒤 5개 Supabase migration을 순서대로 반영한다. INSERT trigger와 product-first bridge가 포함된 1번, checkout 활성화 2번, 백필 3번의 순서를 바꾸지 않으며 Phase 1 internal checkout body는 post-drain 전까지 revoke 상태로 남긴다. 이후 Vercel preview에 Amplitude key와 Axiom runtime 변수를 추가한다.
 6. preview에서 대표 사용자 흐름, Groble 서명 테스트, Amplitude event, Axiom ingest를 검증한다.
 7. Amplitude와 Axiom 웹 UI에서 대시보드·세그먼트·모니터를 구성한다.
 8. 코드 리뷰와 회귀 검증 후 main에 merge한다.

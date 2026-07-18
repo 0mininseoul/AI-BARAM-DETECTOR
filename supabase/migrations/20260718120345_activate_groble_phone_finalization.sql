@@ -627,8 +627,68 @@ DECLARE
     v_lock_user_id UUID;
     v_is_known_duplicate BOOLEAN;
 BEGIN
-    -- Existing event/payment attribution is already immutable. Let the canonical
-    -- duplicate paths preserve their disposition before applying the new-event gate.
+    -- Validate before deriving any advisory-lock key so invalid rolling calls keep
+    -- the canonical error contract and cannot consume unbounded lock namespaces.
+    IF p_event_type <> 'payment.completed'
+       OR p_event_id IS NULL
+          OR pg_catalog.char_length(p_event_id) NOT BETWEEN 1 AND 256
+       OR p_idempotency_key IS NULL
+          OR pg_catalog.char_length(p_idempotency_key) NOT BETWEEN 1 AND 256
+       OR p_payment_id IS NULL
+          OR pg_catalog.char_length(p_payment_id) NOT BETWEEN 1 AND 256
+       OR p_product_id IS NULL OR p_product_id !~ '^[A-Za-z0-9_-]{1,128}$'
+       OR p_amount_krw IS NULL OR p_amount_krw <= 0
+       OR p_buyer_email IS NULL OR pg_catalog.char_length(p_buyer_email) > 320
+       OR p_occurred_at IS NULL OR p_paid_at IS NULL THEN
+        RAISE EXCEPTION 'GROBLE_PAYMENT_EVIDENCE_INVALID';
+    END IF;
+
+    -- Global order: payment -> namespaced product -> sorted users. The canonical
+    -- call below re-enters the payment and user locks held by this transaction.
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(p_payment_id, 0)
+    );
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(
+            'earlybird:groble:product:' || p_product_id,
+            0
+        )
+    );
+
+    -- The product lock prevents a new verified INSERT from appearing between the
+    -- owner scan and the authoritative gate. User locks remain deterministically
+    -- ordered for checkout/refund/finalizer compatibility.
+    FOR v_lock_user_id IN
+        SELECT potential_user.user_id
+        FROM (
+            SELECT verified_order.user_id
+            FROM public.earlybird_orders AS verified_order
+            WHERE verified_order.buyer_match_policy = 'verified_kakao_phone'
+              AND verified_order.expected_groble_product_id = p_product_id
+              AND (
+                  verified_order.status = 'payment_pending'
+                  OR (
+                      verified_order.status = 'cancelled'
+                      AND verified_order.payment_id IS NULL
+                  )
+              )
+
+            UNION
+
+            SELECT buyer.id AS user_id
+            FROM public.users AS buyer
+            WHERE pg_catalog.lower(pg_catalog.btrim(buyer.email))
+                = pg_catalog.lower(pg_catalog.btrim(p_buyer_email))
+        ) AS potential_user
+        ORDER BY potential_user.user_id::TEXT
+    LOOP
+        PERFORM pg_catalog.pg_advisory_xact_lock(
+            pg_catalog.hashtextextended(v_lock_user_id::TEXT, 0)
+        );
+    END LOOP;
+
+    -- Existing attribution is immutable. Read it only after the shared lock order
+    -- so a same-payment canonical caller cannot race or deadlock this wrapper.
     SELECT
         EXISTS (
             SELECT 1
@@ -644,37 +704,6 @@ BEGIN
     INTO v_is_known_duplicate;
 
     IF NOT v_is_known_duplicate THEN
-        -- Lock every unresolved verified order owner for the product, plus every
-        -- email candidate, in one stable order before the product-wide recheck.
-        FOR v_lock_user_id IN
-            SELECT potential_user.user_id
-            FROM (
-                SELECT verified_order.user_id
-                FROM public.earlybird_orders AS verified_order
-                WHERE verified_order.buyer_match_policy = 'verified_kakao_phone'
-                  AND verified_order.expected_groble_product_id = p_product_id
-                  AND (
-                      verified_order.status = 'payment_pending'
-                      OR (
-                          verified_order.status = 'cancelled'
-                          AND verified_order.payment_id IS NULL
-                      )
-                  )
-
-                UNION
-
-                SELECT buyer.id AS user_id
-                FROM public.users AS buyer
-                WHERE pg_catalog.lower(pg_catalog.btrim(buyer.email))
-                    = pg_catalog.lower(pg_catalog.btrim(p_buyer_email))
-            ) AS potential_user
-            ORDER BY potential_user.user_id::TEXT
-        LOOP
-            PERFORM pg_catalog.pg_advisory_xact_lock(
-                pg_catalog.hashtextextended(v_lock_user_id::TEXT, 0)
-            );
-        END LOOP;
-
         IF EXISTS (
             SELECT 1
             FROM public.earlybird_orders AS candidate
