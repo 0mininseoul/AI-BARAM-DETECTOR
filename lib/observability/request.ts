@@ -54,7 +54,6 @@ function incomingTraceId(request: Request): string | null {
         && (
             version === '00'
             || candidate[TRACEPARENT_BASE_LENGTH] !== '-'
-            || candidate.length === TRACEPARENT_BASE_LENGTH + 1
         )
     ) {
         return null;

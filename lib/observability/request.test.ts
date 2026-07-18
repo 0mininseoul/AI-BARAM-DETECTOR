@@ -74,6 +74,17 @@ describe('requestContext', () => {
         expect(context.trace_id).toBe('4bf92f3577b34da6a3ce929d0e0e4736');
     });
 
+    it('accepts a future-version extension delimiter without interpreting fields', () => {
+        const context = requestContext(new Request('https://example.com', {
+            headers: {
+                traceparent: '01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-',
+            },
+        }), '/api/example');
+
+        expect(context.trace_id).toBe('4bf92f3577b34da6a3ce929d0e0e4736');
+        expect(context).not.toHaveProperty('traceparent');
+    });
+
     it('accepts a higher-version extension at the conservative length limit', () => {
         const traceparent = '01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-'
             .padEnd(512, 'x');
@@ -136,7 +147,6 @@ describe('requestContext', () => {
         '00-4bf92f3577b34da6a3ce929d0e0e4736-too-short-01',
         '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-extra',
         '01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01future',
-        '01-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-',
     ])('rejects an invalid traceparent value: %s', traceparent => {
         const context = requestContext(new Request('https://example.com', {
             headers: { traceparent },
