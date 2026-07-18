@@ -17,6 +17,7 @@ import { validateProfileAttemptResults } from '../lib/services/instagram/provide
 import { makeApifyProvider } from '../lib/services/instagram/providers/apify';
 import {
     getApifyClient,
+    selectApifyApiToken,
     type ApifyClientLike,
 } from '../lib/services/instagram/providers/apify-relationship';
 import {
@@ -60,6 +61,17 @@ interface ProfileRepairCanaryRunClient {
     } | undefined>;
 }
 
+interface ProfileRepairCanaryAccountingSnapshot {
+    status?: unknown;
+    usageTotalUsd?: unknown;
+    finishedAt?: unknown;
+}
+
+interface ProfileRepairCanaryAccountingLookup {
+    credentialSlot: ApifyCredentialSlot;
+    signal: AbortSignal;
+}
+
 export interface ProfileRepairCanaryApifyClient {
     actor(actorId: string): unknown;
     dataset(datasetId: string): unknown;
@@ -76,6 +88,10 @@ export interface ProfileRepairCanaryDependencies {
     env: Record<string, string | undefined>;
     loadSource(input: LoadSourceInput): Promise<unknown>;
     getClient(slot: ApifyCredentialSlot): ProfileRepairCanaryApifyClient;
+    getAccountingSnapshot(
+        runId: string,
+        input: ProfileRepairCanaryAccountingLookup
+    ): Promise<ProfileRepairCanaryAccountingSnapshot | undefined>;
     getProfilesBatchOutcomes(
         usernames: readonly string[],
         context: ProviderCallContext,
@@ -270,9 +286,32 @@ function stableProviderFinish(value: unknown, nowMs: number): boolean {
         && finishedAtMs <= nowMs - ACCOUNTING_FINISH_STABILITY_MS;
 }
 
+async function accountingSnapshotWithinDeadline(
+    run: StoredProfileRepairCanaryRun,
+    remainingMs: number,
+    dependencies: ProfileRepairCanaryDependencies
+): Promise<ProfileRepairCanaryAccountingSnapshot | undefined> {
+    const controller = new AbortController();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<undefined>(resolve => {
+        timeout = setTimeout(() => {
+            controller.abort();
+            resolve(undefined);
+        }, remainingMs);
+    });
+    const lookup = dependencies.getAccountingSnapshot(run.runId as string, {
+        credentialSlot: run.credentialSlot,
+        signal: controller.signal,
+    }).catch(() => undefined);
+    try {
+        return await Promise.race([lookup, deadline]);
+    } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
+    }
+}
+
 async function reconcileUsage(
     run: StoredProfileRepairCanaryRun,
-    client: ProfileRepairCanaryApifyClient,
     dependencies: ProfileRepairCanaryDependencies
 ): Promise<StoredProfileRepairCanaryRun> {
     if (
@@ -285,12 +324,13 @@ async function reconcileUsage(
     const startedAt = dependencies.now();
     const deadline = startedAt + ACCOUNTING_RECONCILIATION_LIMIT_MS;
     for (let poll = 0; poll < ACCOUNTING_MAX_POLLS; poll++) {
-        let snapshot;
-        try {
-            snapshot = await client.run(run.runId).get();
-        } catch {
-            snapshot = undefined;
-        }
+        const beforeLookupRemaining = deadline - dependencies.now();
+        if (beforeLookupRemaining <= 0) break;
+        const snapshot = await accountingSnapshotWithinDeadline(
+            run,
+            beforeLookupRemaining,
+            dependencies
+        );
         const terminalStatus = snapshot?.status;
         const actualUsageUsd = snapshot?.usageTotalUsd;
         if (
@@ -356,7 +396,7 @@ async function executeRepetition(
     }
     if (run.state === 'ambiguous') return run;
     if (run.state === 'succeeded' || run.state === 'failed') {
-        return reconcileUsage(run, client, dependencies);
+        return reconcileUsage(run, dependencies);
     }
 
     const startedAt = dependencies.now();
@@ -444,7 +484,7 @@ async function executeRepetition(
             latencyMs,
             gatePassed: false,
         });
-        return reconcileUsage(terminal, client, dependencies);
+        return reconcileUsage(terminal, dependencies);
     }
     if (checkpointed.runId === null) {
         throw safeError('PROFILE_REPAIR_CANARY_RUN_IDENTITY_CONFLICT');
@@ -463,7 +503,7 @@ async function executeRepetition(
         ...counts,
         latencyMs,
     });
-    return reconcileUsage(terminal, client, dependencies);
+    return reconcileUsage(terminal, dependencies);
 }
 
 export async function runProfileRepairCanary(
@@ -556,11 +596,47 @@ async function defaultLoadSource(input: LoadSourceInput): Promise<unknown> {
     return data;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+async function defaultGetAccountingSnapshot(
+    runId: string,
+    input: ProfileRepairCanaryAccountingLookup
+): Promise<ProfileRepairCanaryAccountingSnapshot | undefined> {
+    if (!/^[A-Za-z0-9]{8,64}$/.test(runId)) {
+        throw safeError('PROFILE_REPAIR_CANARY_ACCOUNTING_INVALID');
+    }
+    const token = selectApifyApiToken(process.env, input.credentialSlot);
+    const response = await fetch(
+        `https://api.apify.com/v2/actor-runs/${encodeURIComponent(runId)}`,
+        {
+            method: 'GET',
+            headers: {
+                accept: 'application/json',
+                authorization: `Bearer ${token}`,
+            },
+            redirect: 'error',
+            cache: 'no-store',
+            signal: input.signal,
+        }
+    );
+    if (!response.ok) return undefined;
+    const envelope: unknown = await response.json();
+    if (!isRecord(envelope) || !isRecord(envelope.data)) return undefined;
+    return {
+        status: envelope.data.status,
+        usageTotalUsd: envelope.data.usageTotalUsd,
+        finishedAt: envelope.data.finishedAt,
+    };
+}
+
 function defaultDependencies(): ProfileRepairCanaryDependencies {
     return {
         env: process.env,
         loadSource: defaultLoadSource,
         getClient: slot => getApifyClient(process.env, slot) as ProfileRepairCanaryApifyClient,
+        getAccountingSnapshot: defaultGetAccountingSnapshot,
         async getProfilesBatchOutcomes(usernames, context, client) {
             const provider = makeApifyProvider({
                 client: client as unknown as ApifyClientLike,

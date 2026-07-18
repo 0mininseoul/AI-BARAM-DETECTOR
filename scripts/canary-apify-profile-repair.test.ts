@@ -234,6 +234,14 @@ function dependencies(input: {
         usageTotalUsd?: unknown;
         finishedAt?: unknown;
     };
+    accountingGet?: (
+        runId: string,
+        options: { credentialSlot: typeof SLOT; signal: AbortSignal }
+    ) => Promise<{
+        status?: unknown;
+        usageTotalUsd?: unknown;
+        finishedAt?: unknown;
+    } | undefined>;
     events?: string[];
     now?: () => number;
     sleep?: (ms: number) => Promise<void>;
@@ -243,6 +251,13 @@ function dependencies(input: {
     const sourceInputs = input.inputs ?? fixture.inputs;
     const events = input.events ?? [];
     const actorStart = vi.fn();
+    const accountingGet = vi.fn(input.accountingGet ?? (async (runId: string) => (
+        input.accounting?.(runId) ?? {
+            status: 'SUCCEEDED',
+            usageTotalUsd: 0.04,
+            finishedAt: '2026-07-18T02:59:00.000Z',
+        }
+    )));
     let freshRepetition = 0;
     const run = vi.fn((runId: string) => ({
         keyValueStore: () => ({
@@ -251,10 +266,9 @@ function dependencies(input: {
                 value: { usernames: sourceInputs.get(runId) },
             })),
         }),
-        get: vi.fn(async () => input.accounting?.(runId) ?? ({
-            status: 'SUCCEEDED',
-            usageTotalUsd: 0.04,
-            finishedAt: '2026-07-18T02:59:00.000Z',
+        get: vi.fn(() => accountingGet(runId, {
+            credentialSlot: SLOT,
+            signal: new AbortController().signal,
         })),
     }));
     const getProfilesBatchOutcomes = vi.fn(async (
@@ -296,12 +310,22 @@ function dependencies(input: {
             run,
             dataset: vi.fn(),
         })),
+        getAccountingSnapshot: accountingGet,
         getProfilesBatchOutcomes,
         runStore: input.store ?? memoryStore([], events),
         now: input.now ?? (() => Date.parse(NOW)),
         sleep: input.sleep ?? (async () => undefined),
+    } as ProfileRepairCanaryDependencies & {
+        getAccountingSnapshot: typeof accountingGet;
     };
-    return { deps, actorStart, run, getProfilesBatchOutcomes, events };
+    return {
+        deps,
+        actorStart,
+        run,
+        accountingGet,
+        getProfilesBatchOutcomes,
+        events,
+    };
 }
 
 describe('profile repair canary source replay', () => {
@@ -699,5 +723,55 @@ describe('profile repair paid canary lifecycle', () => {
         expect(sleeps.reduce((total, value) => total + value, 0)).toBeLessThanOrEqual(180_000);
         expect(store.reserve).toHaveBeenCalledTimes(1);
         expect(store.reconcileUsage).not.toHaveBeenCalled();
+    });
+
+    it('aborts a never-settling accounting GET at 180 seconds and blocks repetition two', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(Date.parse(NOW));
+        try {
+            let aborted = false;
+            const store = memoryStore();
+            const setup = dependencies({
+                store,
+                now: () => Date.now(),
+                sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
+                accountingGet: async (_runId, { signal }) => new Promise((_, reject) => {
+                    signal.addEventListener('abort', () => {
+                        aborted = true;
+                        reject(new Error('accounting request aborted'));
+                    }, { once: true });
+                }),
+            });
+            const reportPromise = runProfileRepairCanary(options(true), setup.deps);
+            const bounded = Promise.race([
+                reportPromise.then(report => ({ kind: 'report' as const, report })),
+                new Promise<{ kind: 'timeout' }>(resolve => {
+                    setTimeout(() => resolve({ kind: 'timeout' }), 180_001);
+                }),
+            ]);
+
+            await vi.advanceTimersByTimeAsync(180_001);
+            const result = await bounded;
+
+            expect(result.kind).toBe('report');
+            if (result.kind !== 'report') throw new Error('canary exceeded its accounting deadline');
+            expect(result.report).toMatchObject({
+                gate_passed: false,
+                cost_status: 'conservative',
+                total_actual_cost_usd: null,
+            });
+            expect(result.report.runs).toHaveLength(1);
+            expect(result.report.runs?.[0]).toMatchObject({
+                repetition: 1,
+                actual_cost_usd: null,
+                cost_status: 'conservative',
+            });
+            expect(aborted).toBe(true);
+            expect(setup.accountingGet).toHaveBeenCalledTimes(1);
+            expect(store.reserve).toHaveBeenCalledTimes(1);
+            expect(store.reconcileUsage).not.toHaveBeenCalled();
+        } finally {
+            vi.useRealTimers();
+        }
     });
 });
