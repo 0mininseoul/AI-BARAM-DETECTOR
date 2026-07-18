@@ -8,11 +8,16 @@
  * 변경이 꼭 필요하면 사용자에게 먼저 확인할 것. (과거 순화 덮어쓰기 사례 있음)
  * ============================================================================ */
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { motion, useReducedMotion, type Variants } from 'framer-motion';
 import { trackEvent, EVENTS } from '@/lib/services/analytics';
+import {
+  landingViewEventKey,
+  readAttribution,
+  tryClaimAnalyticsEvent,
+} from '@/lib/services/analytics-funnel';
 import {
   clearPendingAnalysisTarget,
   storePendingAnalysisTarget,
@@ -112,6 +117,11 @@ export default function LandingPage() {
   const [starting, setStarting] = useState(false);
   const [heroError, setHeroError] = useState<string | null>(null);
   const [loginOpen, setLoginOpen] = useState(false);
+
+  useEffect(() => {
+    if (!tryClaimAnalyticsEvent(sessionStorage, landingViewEventKey())) return;
+    trackEvent(EVENTS.LANDING_VIEWED, readAttribution(window.location.search));
+  }, []);
 
   const closeLogin = useCallback(() => {
     try {

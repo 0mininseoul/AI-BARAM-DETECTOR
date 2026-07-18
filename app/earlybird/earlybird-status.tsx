@@ -1,6 +1,15 @@
+'use client';
+
 import Link from 'next/link';
+import { useEffect, useRef } from 'react';
 import { CaseCard, Eyebrow } from '@/components/case-ui';
 import type { EarlybirdOrderStatusDto } from '@/lib/services/earlybird/order-status';
+import { EVENTS, trackEvent } from '@/lib/services/analytics';
+import { tryClaimAnalyticsEvent } from '@/lib/services/analytics-funnel';
+import {
+    earlybirdStatusEventKey,
+    paymentConfirmationEventKey,
+} from '@/lib/services/earlybird/analytics-state';
 
 function formatKrw(amount: number): string {
     return `${amount.toLocaleString('ko-KR')}원`;
@@ -24,6 +33,34 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 }
 
 export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
+    const trackedRef = useRef(new Set<string>());
+
+    useEffect(() => {
+        const properties = {
+            order_id: order.orderId,
+            plan_id: order.planId,
+            ...(order.actualAmountKrw === null
+                ? {}
+                : { amount_krw: order.actualAmountKrw }),
+            status: order.systemStatus,
+        };
+        const statusKey = earlybirdStatusEventKey(order.orderId, order.systemStatus);
+        if (!trackedRef.current.has(statusKey)) {
+            trackedRef.current.add(statusKey);
+            if (tryClaimAnalyticsEvent(sessionStorage, statusKey)) {
+                trackEvent(EVENTS.EARLYBIRD_STATUS_VIEWED, properties);
+            }
+        }
+
+        const paymentKey = paymentConfirmationEventKey(order.orderId, order.systemStatus);
+        if (paymentKey && !trackedRef.current.has(paymentKey)) {
+            trackedRef.current.add(paymentKey);
+            if (tryClaimAnalyticsEvent(sessionStorage, paymentKey)) {
+                trackEvent(EVENTS.PAYMENT_CONFIRMED_VIEWED, properties);
+            }
+        }
+    }, [order]);
+
     return (
         <>
             <Eyebrow>얼리버드 사전 구매 현황</Eyebrow>

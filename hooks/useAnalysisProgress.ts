@@ -12,6 +12,13 @@ import {
     shouldApplyProgressRevision,
 } from '@/lib/services/analysis/v2-progress-client-state';
 import { createClient } from '@/lib/supabase/client';
+import { EVENTS, trackEvent } from '@/lib/services/analytics';
+import {
+    analysisCompletedEventKey,
+    analysisStartedAtKey,
+    boundedDurationMs,
+    tryClaimAnalyticsEvent,
+} from '@/lib/services/analytics-funnel';
 
 interface AnalysisProgress {
     id: string;
@@ -43,6 +50,8 @@ export function useAnalysisProgress(requestId: string) {
     const v2LastEventSeqRef = useRef(0);
     const v2RevisionRef = useRef(-1);
     const fetchQueuedRef = useRef(false);
+    const observedStartedAtRef = useRef(Date.now());
+    const completionTrackedRef = useRef(new Set<string>());
     const activeRequestIdRef = useRef<string | null>(null);
     const fetchInFlightRef = useRef<{
         requestId: string;
@@ -197,6 +206,7 @@ export function useAnalysisProgress(requestId: string) {
         v2LastEventSeqRef.current = 0;
         v2RevisionRef.current = -1;
         fetchQueuedRef.current = false;
+        observedStartedAtRef.current = Date.now();
         setData(null);
         setLoading(true);
         setError(null);
@@ -209,6 +219,28 @@ export function useAnalysisProgress(requestId: string) {
             if (inFlight?.requestId === requestId) inFlight.controller.abort();
         };
     }, [fetchData, requestId]);
+
+    useEffect(() => {
+        if (data?.status !== 'completed') return;
+        const eventKey = analysisCompletedEventKey(requestId);
+        if (completionTrackedRef.current.has(eventKey)) return;
+        completionTrackedRef.current.add(eventKey);
+        if (!tryClaimAnalyticsEvent(sessionStorage, eventKey)) return;
+
+        let startedAt = observedStartedAtRef.current;
+        try {
+            const persisted = Number(sessionStorage.getItem(analysisStartedAtKey(requestId)));
+            if (Number.isFinite(persisted) && persisted > 0 && persisted <= Date.now()) {
+                startedAt = persisted;
+            }
+        } catch {
+            /* analytics timing is best-effort */
+        }
+        trackEvent(EVENTS.ANALYSIS_COMPLETED, {
+            request_id: requestId,
+            duration_ms: boundedDurationMs(startedAt, Date.now()),
+        });
+    }, [data?.status, requestId]);
 
     useEffect(() => {
         if (

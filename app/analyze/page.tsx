@@ -28,6 +28,12 @@ import {
     signOutAndClearPendingAnalysisTarget,
     storePendingAnalysisTarget,
 } from '@/lib/services/pending-analysis-target';
+import { EVENTS, trackEvent } from '@/lib/services/analytics';
+import { tryClaimAnalyticsEvent } from '@/lib/services/analytics-funnel';
+import {
+    planSelectedEventKey,
+    planViewEventKey,
+} from '@/lib/services/earlybird/analytics-state';
 import { TopBar, BrandMark, Eyebrow, CaseCard, PrimaryButton } from '@/components/case-ui';
 
 const PLAN_NAMES: Readonly<Record<PlanId, string>> = {
@@ -55,6 +61,8 @@ export default function AnalyzePage() {
     const router = useRouter();
     const { user, loading: authLoading } = useAuth();
     const initializedRef = useRef(false);
+    const planViewsTrackedRef = useRef(new Set<string>());
+    const planSelectionsTrackedRef = useRef(new Set<string>());
     const {
         targetInstagramId,
         preflight,
@@ -83,6 +91,31 @@ export default function AnalyzePage() {
     const selectedPlanAvailable = readyPreflight && effectiveSelectedCard
         ? isEarlybirdPlanSelectable(effectiveSelectedCard, readyPreflight.requiredPlan)
         : false;
+
+    useEffect(() => {
+        if (!readyPreflight || !exclusionDecided) return;
+        for (const plan of readyPreflight.plans) {
+            if (
+                plan.planId === 'plus'
+                || !isEarlybirdPlanSelectable(plan, readyPreflight.requiredPlan)
+                || plan.price.status !== 'quoted'
+            ) continue;
+            const key = planViewEventKey(
+                readyPreflight.preflightId,
+                readyPreflight.pricingVersion,
+                plan.planId,
+            );
+            if (planViewsTrackedRef.current.has(key)) continue;
+            planViewsTrackedRef.current.add(key);
+            if (!tryClaimAnalyticsEvent(sessionStorage, key)) continue;
+            trackEvent(EVENTS.PLAN_VIEWED, {
+                plan_id: plan.planId,
+                required_plan_id: readyPreflight.requiredPlan,
+                amount_krw: plan.price.amountKrw,
+                preflight_id: readyPreflight.preflightId,
+            });
+        }
+    }, [exclusionDecided, readyPreflight]);
 
     useEffect(() => {
         if (authLoading || initializedRef.current || typeof window === 'undefined') return;
@@ -173,6 +206,31 @@ export default function AnalyzePage() {
         await submitExclusion(girlfriendInstagramId);
     };
 
+    const trackPlanSelection = (planId: PlanId) => {
+        if (!readyPreflight) return;
+        const plan = readyPreflight.plans.find(candidate => candidate.planId === planId);
+        if (!plan || !isEarlybirdPlanSelectable(plan, readyPreflight.requiredPlan)) return;
+        const key = planSelectedEventKey(
+            readyPreflight.preflightId,
+            readyPreflight.pricingVersion,
+            planId,
+        );
+        if (planSelectionsTrackedRef.current.has(key)) return;
+        planSelectionsTrackedRef.current.add(key);
+        if (!tryClaimAnalyticsEvent(sessionStorage, key)) return;
+        trackEvent(EVENTS.PLAN_SELECTED, {
+            plan_id: planId,
+            required_plan_id: readyPreflight.requiredPlan,
+            ...(plan.price.status === 'quoted' ? { amount_krw: plan.price.amountKrw } : {}),
+            preflight_id: readyPreflight.preflightId,
+        });
+    };
+
+    const handlePlanSelection = (planId: PlanId) => {
+        setSelectedPlan(planId);
+        trackPlanSelection(planId);
+    };
+
     const handleEarlybirdAction = async () => {
         if (!effectiveSelectedPlan || !readyPreflight) return;
         if (!canSubmitEarlybirdSelection(
@@ -186,6 +244,17 @@ export default function AnalyzePage() {
         setError(null);
         try {
             const paidPlan = isPaidEarlybirdPlanId(effectiveSelectedPlan);
+            trackPlanSelection(effectiveSelectedPlan);
+            const analyticsProperties = {
+                plan_id: effectiveSelectedPlan,
+                ...(effectiveSelectedCard?.price.status === 'quoted'
+                    ? { amount_krw: effectiveSelectedCard.price.amountKrw }
+                    : {}),
+                preflight_id: readyPreflight.preflightId,
+            };
+            if (paidPlan) {
+                trackEvent(EVENTS.CHECKOUT_STARTED, analyticsProperties);
+            }
             const response = await fetch(
                 paidPlan ? '/api/earlybird/checkout' : '/api/earlybird/waitlist',
                 {
@@ -221,6 +290,7 @@ export default function AnalyzePage() {
                 setError('결제창 주소를 확인하지 못했습니다. 잠시 후 다시 시도해주세요.');
                 return;
             }
+            trackEvent(EVENTS.CHECKOUT_REDIRECTED, analyticsProperties);
             window.location.assign(payload.checkoutUrl);
         } catch {
             setError('요청을 처리하지 못했습니다. 잠시 후 다시 시도해주세요.');
@@ -519,7 +589,7 @@ export default function AnalyzePage() {
                                                         value={plan.planId}
                                                         checked={selected}
                                                         disabled={!available}
-                                                        onChange={() => setSelectedPlan(plan.planId)}
+                                                        onChange={() => handlePlanSelection(plan.planId)}
                                                         className="sr-only"
                                                     />
                                                     <div className="flex items-start justify-between gap-4">
