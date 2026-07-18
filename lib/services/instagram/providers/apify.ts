@@ -71,6 +71,81 @@ async function withinProfileDeadline<T>(pending: Promise<T>, deadlineAtMs?: numb
     }
 }
 
+export interface ApifyProfileDatasetReadSettings {
+    datasetReadRetries: number;
+    datasetRetryBaseDelayMs: number;
+    strictEnvelope?: boolean;
+}
+
+export async function waitForSettledApifyProfileDataset(
+    apify: ApifyClientLike,
+    datasetId: string,
+    maximumItems: number,
+    settings: ApifyProfileDatasetReadSettings,
+    deadlineAtMs?: number
+) {
+    let lastPage;
+    for (let attempt = 0; attempt <= settings.datasetReadRetries; attempt++) {
+        if (deadlineAtMs !== undefined && Date.now() >= deadlineAtMs) {
+            throw new Error(
+                'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset deadline was exhausted.'
+            );
+        }
+        try {
+            lastPage = await withinProfileDeadline(
+                apify.dataset(datasetId).listItems({
+                    limit: maximumItems + 1,
+                }),
+                deadlineAtMs
+            );
+        } catch {
+            lastPage = undefined;
+        }
+        if (
+            lastPage
+            && Array.isArray(lastPage.items)
+            && Number.isInteger(lastPage.total)
+            && lastPage.total >= 0
+            && lastPage.total <= maximumItems
+            && lastPage.items.length === lastPage.total
+            && (
+                settings.strictEnvelope !== true
+                || (
+                    Number.isInteger(lastPage.count)
+                    && lastPage.count >= 0
+                    && lastPage.count === lastPage.items.length
+                )
+            )
+        ) {
+            // A just-finished Dataset can briefly report a valid-looking 0/0.
+            // Exhaust bounded rereads before accepting a genuinely empty result.
+            if (lastPage.total > 0 || attempt === settings.datasetReadRetries) {
+                return lastPage;
+            }
+        }
+        if (attempt < settings.datasetReadRetries) {
+            const delayMs = settings.datasetRetryBaseDelayMs * 2 ** attempt;
+            if (deadlineAtMs !== undefined && Date.now() + delayMs >= deadlineAtMs) {
+                throw new Error(
+                    'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset deadline was exhausted.'
+                );
+            }
+            await sleep(delayMs);
+        }
+    }
+    if (settings.strictEnvelope === true && lastPage) {
+        throw new Error(
+            'SCRAPING_SCHEMA_ERROR: Apify profile dataset envelope is invalid.'
+        );
+    }
+    if (lastPage && !Array.isArray(lastPage.items)) {
+        throw new Error('SCRAPING_SCHEMA_ERROR: Apify profile dataset items가 배열이 아닙니다.');
+    }
+    throw new Error(
+        'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset did not settle after completion.'
+    );
+}
+
 interface ApifyProviderDeps {
     client?: ApifyClientLike;
     env?: Record<string, string | undefined>;
@@ -500,6 +575,173 @@ function mapProfile(profile: Record<string, unknown>, includePosts: boolean): In
     };
 }
 
+export interface ParsedApifyProfileDataset {
+    profilesByUsername: Map<string, InstagramProfile>;
+    failuresByUsername: Map<string, Error>;
+    notFoundUsernames: Set<string>;
+    datasetContaminated: boolean;
+}
+
+/**
+ * Strict shared parser for one exact profile Actor input set. Both the legacy profile Actor
+ * and the pinned details replacement use this function so attribution and media evidence
+ * cannot drift between provider routes.
+ */
+export function parseApifyProfileDataset(
+    items: readonly unknown[],
+    requestedUsernames: readonly string[]
+): ParsedApifyProfileDataset {
+    const currentBatch = new Set(
+        requestedUsernames.map(username => username.trim().toLowerCase())
+    );
+    const profilesByUsername = new Map<string, InstagramProfile>();
+    const failuresByUsername = new Map<string, Error>();
+    const notFoundUsernames = new Set<string>();
+    const seenDatasetUsernames = new Set<string>();
+    let datasetContaminated = false;
+    const markDuplicate = (key: string) => {
+        profilesByUsername.delete(key);
+        notFoundUsernames.delete(key);
+        failuresByUsername.set(
+            key,
+            new Error(
+                'SCRAPING_SCHEMA_ERROR: Apify profile dataset has duplicate attributed rows.'
+            )
+        );
+        datasetContaminated = true;
+    };
+
+    for (const item of items) {
+        const explicitNotFound = profileNotFoundEnvelopeSchema.safeParse(item);
+        if (explicitNotFound.success) {
+            const key = explicitNotFound.data.username.toLowerCase();
+            if (!currentBatch.has(key)) {
+                datasetContaminated = true;
+                continue;
+            }
+            if (seenDatasetUsernames.has(key)) {
+                markDuplicate(key);
+                continue;
+            }
+            seenDatasetUsernames.add(key);
+            notFoundUsernames.add(key);
+            continue;
+        }
+        const envelope = profileUsernameEnvelopeSchema.safeParse(item);
+        if (!envelope.success) {
+            const hasUsernameField = typeof item === 'object'
+                && item !== null
+                && Object.prototype.hasOwnProperty.call(item, 'username');
+            const actorErrorUsername = hasUsernameField
+                ? null
+                : attributedProfileActorErrorUsername(item);
+            if (actorErrorUsername && currentBatch.has(actorErrorUsername)) {
+                if (seenDatasetUsernames.has(actorErrorUsername)) {
+                    markDuplicate(actorErrorUsername);
+                    continue;
+                }
+                seenDatasetUsernames.add(actorErrorUsername);
+                failuresByUsername.set(
+                    actorErrorUsername,
+                    new Error(
+                        'SCRAPING_INCOMPLETE_ERROR: Apify profile Actor returned an attributed error row.'
+                    )
+                );
+                continue;
+            }
+            datasetContaminated = true;
+            continue;
+        }
+        const key = envelope.data.username.toLowerCase();
+        if (!currentBatch.has(key)) {
+            datasetContaminated = true;
+            continue;
+        }
+        if (seenDatasetUsernames.has(key)) {
+            markDuplicate(key);
+            continue;
+        }
+        seenDatasetUsernames.add(key);
+        try {
+            const profile = mapProfile(item as Record<string, unknown>, true);
+            profilesByUsername.set(key, profile);
+        } catch (error) {
+            failuresByUsername.set(
+                key,
+                error instanceof Error
+                    ? error
+                    : new Error('SCRAPING_SCHEMA_ERROR: Apify profile row mapping failed.')
+            );
+        }
+    }
+
+    return {
+        profilesByUsername,
+        failuresByUsername,
+        notFoundUsernames,
+        datasetContaminated,
+    };
+}
+
+export function buildApifyProfileAttemptResults(
+    requestedUsernames: readonly string[],
+    collected: ParsedApifyProfileDataset,
+    latencyMs: number
+): ProfileAttemptResult[] {
+    const missingUsernames = new Set(
+        requestedUsernames
+            .map(username => username.trim().toLowerCase())
+            .filter(key => (
+                !collected.profilesByUsername.has(key)
+                && !collected.failuresByUsername.has(key)
+                && !collected.notFoundUsernames.has(key)
+            ))
+    );
+    return requestedUsernames.map((requestedUsername) => {
+        const key = requestedUsername.trim().toLowerCase();
+        const profile = collected.profilesByUsername.get(key);
+        if (profile) {
+            return successfulProfileAttempt({
+                requestedUsername,
+                source: 'apify',
+                profile,
+                requestCount: 1,
+                latencyMs,
+            });
+        }
+        const failure = collected.failuresByUsername.get(key);
+        if (failure || collected.datasetContaminated) {
+            return failedProfileAttempt({
+                requestedUsername,
+                source: 'apify',
+                error: failure ?? new Error(
+                    'SCRAPING_SCHEMA_ERROR: Apify profile dataset has an unattributed row.'
+                ),
+                requestCount: 1,
+                latencyMs,
+            });
+        }
+        if (missingUsernames.has(key)) {
+            return failedProfileAttempt({
+                requestedUsername,
+                source: 'apify',
+                error: new Error(
+                    'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset omitted an account without explicit not-found evidence.'
+                ),
+                requestCount: 1,
+                latencyMs,
+            });
+        }
+        return unavailableProfileAttempt({
+            requestedUsername,
+            source: 'apify',
+            reason: 'not_found',
+            requestCount: 1,
+            latencyMs,
+        });
+    });
+}
+
 export function parseApifyRelationshipDataset(
     items: Array<Record<string, unknown>>,
     username: string,
@@ -638,62 +880,6 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
         return Number(estimate.toFixed(12));
     }
 
-    async function waitForSettledProfileDataset(
-        apify: ApifyClientLike,
-        datasetId: string,
-        maximumItems: number,
-        settings: ReturnType<typeof profileSettings>,
-        deadlineAtMs?: number
-    ) {
-        let lastPage;
-        for (let attempt = 0; attempt <= settings.datasetReadRetries; attempt++) {
-            if (deadlineAtMs !== undefined && Date.now() >= deadlineAtMs) {
-                throw new Error(
-                    'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset deadline was exhausted.'
-                );
-            }
-            try {
-                lastPage = await withinProfileDeadline(
-                    apify.dataset(datasetId).listItems({
-                        limit: maximumItems + 1,
-                    }),
-                    deadlineAtMs
-                );
-            } catch {
-                lastPage = undefined;
-            }
-            if (
-                lastPage
-                && Array.isArray(lastPage.items)
-                && Number.isInteger(lastPage.total)
-                && lastPage.total >= 0
-                && lastPage.total <= maximumItems
-                && lastPage.items.length === lastPage.total
-            ) {
-                // A just-finished Dataset can briefly report a valid-looking 0/0.
-                // Exhaust bounded rereads before accepting a genuinely empty result.
-                if (lastPage.total > 0 || attempt === settings.datasetReadRetries) {
-                    return lastPage;
-                }
-            }
-            if (attempt < settings.datasetReadRetries) {
-                const delayMs = settings.datasetRetryBaseDelayMs * 2 ** attempt;
-                if (deadlineAtMs !== undefined && Date.now() + delayMs >= deadlineAtMs) {
-                    throw new Error(
-                        'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset deadline was exhausted.'
-                    );
-                }
-                await sleep(delayMs);
-            }
-        }
-        if (lastPage && !Array.isArray(lastPage.items)) {
-            throw new Error('SCRAPING_SCHEMA_ERROR: Apify profile dataset items가 배열이 아닙니다.');
-        }
-        throw new Error(
-            'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset did not settle after completion.'
-        );
-    }
-
     async function getSingleProfile(
         username: string,
         includePosts: boolean,
@@ -791,7 +977,7 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
 
         let page;
         try {
-            page = await waitForSettledProfileDataset(
+            page = await waitForSettledApifyProfileDataset(
                 apify,
                 run.defaultDatasetId,
                 1,
@@ -863,20 +1049,19 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
         );
     }
 
-    interface CollectedProfileBatch {
-        profilesByUsername: Map<string, InstagramProfile>;
-        failuresByUsername: Map<string, Error>;
-        notFoundUsernames: Set<string>;
-        datasetContaminated: boolean;
-    }
-
     async function collectProfilesBatch(
         usernames: string[],
         batchSize: number = 10,
         context?: ProviderCallContext
-    ): Promise<CollectedProfileBatch> {
+    ): Promise<ParsedApifyProfileDataset> {
         if (!Number.isInteger(batchSize) || batchSize <= 0) {
             throw new Error('SCRAPING_CONFIG_ERROR: batchSize는 양의 정수여야 합니다.');
+        }
+        const canonicalRequested = usernames.map(username => username.trim().toLowerCase());
+        if (new Set(canonicalRequested).size !== canonicalRequested.length) {
+            throw new Error(
+                'SCRAPING_CONFIG_ERROR: duplicate Apify profile username request.'
+            );
         }
         if (
             (context?.resumeRunId || context?.onRunStarted)
@@ -891,23 +1076,10 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
         const profilesByUsername = new Map<string, InstagramProfile>();
         const failuresByUsername = new Map<string, Error>();
         const notFoundUsernames = new Set<string>();
-        const seenDatasetUsernames = new Set<string>();
         let datasetContaminated = false;
-        const markDuplicate = (key: string) => {
-            profilesByUsername.delete(key);
-            notFoundUsernames.delete(key);
-            failuresByUsername.set(
-                key,
-                new Error(
-                    'SCRAPING_SCHEMA_ERROR: Apify profile dataset has duplicate attributed rows.'
-                )
-            );
-            datasetContaminated = true;
-        };
         const durableRun = hasDurableProfileRunCheckpoint(context);
         for (let i = 0; i < usernames.length; i += batchSize) {
             const batch = usernames.slice(i, i + batchSize);
-            const currentBatch = new Set(batch.map(username => username.toLowerCase()));
             const maximumChargeUsd = context?.maxChargeUsd
                 ?? profileMaximumChargeUsd(batch.length, settings);
             let run;
@@ -979,7 +1151,7 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
             }
             let page;
             try {
-                page = await waitForSettledProfileDataset(
+                page = await waitForSettledApifyProfileDataset(
                     apify,
                     run.defaultDatasetId,
                     batch.length,
@@ -1003,69 +1175,17 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
             context?.recordUsage({
                 estimated_cost_usd: page.items.length * settings.estimatedCostPerResultUsd,
             });
-            for (const item of page.items) {
-                const explicitNotFound = profileNotFoundEnvelopeSchema.safeParse(item);
-                if (explicitNotFound.success) {
-                    const key = explicitNotFound.data.username.toLowerCase();
-                    if (!currentBatch.has(key)) {
-                        datasetContaminated = true;
-                        continue;
-                    }
-                    if (seenDatasetUsernames.has(key)) {
-                        markDuplicate(key);
-                        continue;
-                    }
-                    seenDatasetUsernames.add(key);
-                    notFoundUsernames.add(key);
-                    continue;
-                }
-                const envelope = profileUsernameEnvelopeSchema.safeParse(item);
-                if (!envelope.success) {
-                    const hasUsernameField = typeof item === 'object'
-                        && item !== null
-                        && Object.prototype.hasOwnProperty.call(item, 'username');
-                    const actorErrorUsername = hasUsernameField
-                        ? null
-                        : attributedProfileActorErrorUsername(item);
-                    if (actorErrorUsername && currentBatch.has(actorErrorUsername)) {
-                        if (seenDatasetUsernames.has(actorErrorUsername)) {
-                            markDuplicate(actorErrorUsername);
-                            continue;
-                        }
-                        seenDatasetUsernames.add(actorErrorUsername);
-                        failuresByUsername.set(
-                            actorErrorUsername,
-                            new Error(
-                                'SCRAPING_INCOMPLETE_ERROR: Apify profile Actor returned an attributed error row.'
-                            )
-                        );
-                        continue;
-                    }
-                    datasetContaminated = true;
-                    continue;
-                }
-                const key = envelope.data.username.toLowerCase();
-                if (!currentBatch.has(key)) {
-                    datasetContaminated = true;
-                    continue;
-                }
-                if (seenDatasetUsernames.has(key)) {
-                    markDuplicate(key);
-                    continue;
-                }
-                seenDatasetUsernames.add(key);
-                try {
-                    const profile = mapProfile(item as Record<string, unknown>, true);
-                    profilesByUsername.set(key, profile);
-                } catch (error) {
-                    failuresByUsername.set(
-                        key,
-                        error instanceof Error
-                            ? error
-                            : new Error('SCRAPING_SCHEMA_ERROR: Apify profile row mapping failed.')
-                    );
-                }
+            const parsed = parseApifyProfileDataset(page.items, batch);
+            for (const [key, profile] of parsed.profilesByUsername) {
+                profilesByUsername.set(key, profile);
             }
+            for (const [key, error] of parsed.failuresByUsername) {
+                failuresByUsername.set(key, error);
+            }
+            for (const key of parsed.notFoundUsernames) {
+                notFoundUsernames.add(key);
+            }
+            datasetContaminated ||= parsed.datasetContaminated;
         }
         return {
             profilesByUsername,
@@ -1114,55 +1234,7 @@ export function makeApifyProvider(deps: ApifyProviderDeps = {}): ScraperProvider
         const startedAt = Date.now();
         const collected = await collectProfilesBatch(usernames, batchSize, context);
         const latencyMs = profileAttemptLatency(startedAt);
-        const missingUsernames = usernames.filter(requestedUsername => {
-            const key = requestedUsername.trim().toLowerCase();
-            return !collected.profilesByUsername.has(key)
-                && !collected.failuresByUsername.has(key)
-                && !collected.notFoundUsernames.has(key);
-        });
-        const results = usernames.map((requestedUsername) => {
-            const key = requestedUsername.trim().toLowerCase();
-            const profile = collected.profilesByUsername.get(key);
-            if (profile) {
-                return successfulProfileAttempt({
-                    requestedUsername,
-                    source: 'apify',
-                    profile,
-                    requestCount: 1,
-                    latencyMs,
-                });
-            }
-            const failure = collected.failuresByUsername.get(key);
-            if (failure || collected.datasetContaminated) {
-                return failedProfileAttempt({
-                    requestedUsername,
-                    source: 'apify',
-                    error: failure ?? new Error(
-                        'SCRAPING_SCHEMA_ERROR: Apify profile dataset has an unattributed row.'
-                    ),
-                    requestCount: 1,
-                    latencyMs,
-                });
-            }
-            if (missingUsernames.includes(requestedUsername)) {
-                return failedProfileAttempt({
-                    requestedUsername,
-                    source: 'apify',
-                    error: new Error(
-                        'SCRAPING_INCOMPLETE_ERROR: Apify profile dataset omitted an account without explicit not-found evidence.'
-                    ),
-                    requestCount: 1,
-                    latencyMs,
-                });
-            }
-            return unavailableProfileAttempt({
-                    requestedUsername,
-                    source: 'apify',
-                    reason: 'not_found',
-                    requestCount: 1,
-                    latencyMs,
-                });
-        });
+        const results = buildApifyProfileAttemptResults(usernames, collected, latencyMs);
         context?.recordUsage({
             result_count: results.filter(result => result.outcome.status === 'success').length,
         });

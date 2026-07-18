@@ -92,6 +92,14 @@ limited to bounded aggregate counts and cost/gate status; it must not contain us
 request identifiers, run or dataset identifiers, tokens, URLs, payloads, hashes, or provider
 messages.
 
+The replacement-canary source RPC can revalidate SQL lineage and the eight distinct terminal
+job/run identities, but it cannot inspect external KVS rows. The zero-start application replay is
+therefore the authority for the raw-set proof. Reservation atomically requires and stores only its
+bounded aggregates: 8 source runs; 15 candidate, unique, public, and incomplete rows; zero
+unavailable or primary-success candidate rows; three critical rows; and the ordered-set HMAC. Any
+aggregate mismatch fails before either journal row is written. Never add per-account identifiers or
+raw replay outcomes to the journal.
+
 After that replay is reviewed, a human may separately approve one paid invocation by adding the
 exact valueless `--confirm-paid-api-call` flag. The limits are fixed in code: two repetitions,
 15 usernames per Actor run, `$0.05` maximum charge per run, and `$0.10` maximum total exposure.
@@ -100,10 +108,75 @@ terminal, passes the quality gate, has stable reconciled actual cost at or below
 recorded that way in the journal. A later retry after reconciliation requires a fresh human approval
 and must resume only the run ID already stored for that repetition.
 
+The fixed `$0.05` maximum-charge identity is distinct from observed billing truth. Persist and
+reconcile an observed actual amount up to the `$1.00` incident bound. An amount above `$0.05`
+fails the quality gate and forbids repetition two, but it must not block three-storage cleanup,
+source cleanup, or HMAC purge. An observed amount above `$1.00` is an incident and is rejected.
+
+### Official profile-provider replacement canary
+
+This command validates pinned `apify/instagram-scraper` build `0.0.692`; it does not rewrite the
+historical profile-repair result. Disable shell tracing and keep the source request identity in a
+protected environment variable so it is not copied into shell history.
+
+First run the read-only replay without the paid confirmation flag:
+
+```bash
+set +x
+npm run canary:instagram-profile-provider -- \
+  --source-request-id="${PROFILE_PROVIDER_CANARY_SOURCE_REQUEST_ID}"
+```
+
+Require 8 source runs, exactly 15 unique public incomplete candidates, three critical candidates,
+Actor start delta zero, journal-write delta zero, and total actual cost zero. Replay mode never
+resumes cleanup or writes a terminal checkpoint. If retained source storage has already entered
+terminal cleanup, use scheduled recovery or an explicitly confirmed cleanup/resume command instead
+of treating replay as cleanup authorization.
+
+Before a paid invocation, verify the exact merged SHA on Cloud Run, set
+`ANALYSIS_V2_RECOVERY_ENABLED=true`, and require the exact recovery Scheduler to be enabled and
+structurally unchanged. The CLI runs both deployment scripts in `--check` mode before each new
+reservation. Apify does not expose the account-level default run-access setting through its public
+user API, so an operator must inspect the account setting in Console immediately before execution,
+confirm `Restricted`, also confirm `Share run data with developers` is disabled, wait at least one
+minute after any setting change, and provide the short-lived verification timestamp required by the
+CLI. The command never changes either account setting. A terminal run's own `generalAccess` is then
+read from Apify and stored as separate gate evidence; an operator attestation cannot override a
+non-`RESTRICTED` run.
+
+After the Console checks and propagation wait, set these operator attestations without shell
+tracing. `VERIFIED_AT` must be an ISO timestamp between one and five minutes old when each new
+reservation is checked:
+
+```dotenv
+PROFILE_PROVIDER_CANARY_ACCOUNT_DEFAULT_ACCESS=RESTRICTED
+PROFILE_PROVIDER_CANARY_SHARE_RUN_DATA_WITH_DEVELOPERS=DISABLED
+PROFILE_PROVIDER_CANARY_ACCOUNT_DEFAULT_ACCESS_VERIFIED_AT=<fresh-iso-timestamp>
+```
+
+Only after a fresh approval for the exact Actor/build, 15 public inputs, two conditional
+repetitions, `$0.05` per-run cap, `$0.10` session cap, and terminal storage deletion may the same
+command include the exact valueless flag:
+
+```bash
+set +x
+npm run canary:instagram-profile-provider -- \
+  --source-request-id="${PROFILE_PROVIDER_CANARY_SOURCE_REQUEST_ID}" \
+  --confirm-paid-api-call
+```
+
+If repetition 1 completed in an earlier process, starting repetition 2 requires a new executing
+session and fresh approval. If a start is ambiguous, follow
+[`profile-provider-canary-ambiguous-start-resolution-runbook.md`](./profile-provider-canary-ambiguous-start-resolution-runbook.md);
+never issue a replacement start. If terminal cleanup was interrupted, the confirmed paid command
+may resume cleanup before source replay and starts zero Actors, or the recovery Scheduler may
+reclaim the expired cleanup lease. Keep recovery enabled until the experiment is terminal, every
+source/canary KVS, dataset, and request queue is verified absent, and the ordered-set HMAC is clear.
+
 Stop without starting a replacement, rotating credentials, issuing another Actor start, manually
 aborting, or resurrecting a terminal run if source ownership, target, V2 failure status, job count,
 source input shape, Actor, slot, or exact 15-member union does not match; if a run start is ambiguous;
-if a terminal result has fewer than 14 successes, more than one unavailable result, any other
+if a terminal result is not exactly 15/15 successes, has any unavailable result, any other
 failure, or no critical recovery; or if actual cost is unsettled or exceeds either cap. Audit an
 ambiguous start in Apify and the journal before any later approved invocation. A timed-out
 reconciliation remains conservative and blocks repetition two even if the provider later reports a
