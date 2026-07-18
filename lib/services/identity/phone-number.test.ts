@@ -12,7 +12,17 @@ describe('normalizeKoreanMobileNumber', () => {
         expect(normalizeKoreanMobileNumber(input)).toBe(expected);
     });
 
-    it.each([null, undefined, '', '02-123-4567', '+1 212 555 0100', '010-12-34'])(
+    it.each([
+        null,
+        undefined,
+        '',
+        '02-123-4567',
+        '+1 212 555 0100',
+        '010-12-34',
+        'abc010-1234-5678',
+        '010-1234-5678abc',
+        '010-1234-5678 ext 9',
+    ])(
         'rejects %s',
         input => {
             expect(normalizeKoreanMobileNumber(input)).toBeNull();

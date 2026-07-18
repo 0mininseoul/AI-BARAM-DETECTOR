@@ -11,8 +11,11 @@ export function normalizeKoreanMobileNumber(
     const candidate = trimmed.startsWith('82') && !trimmed.startsWith('+')
         ? `+${trimmed}`
         : trimmed;
-    const parsed = parsePhoneNumberFromString(candidate, 'KR');
-    if (!parsed?.isValid() || parsed.country !== 'KR') return null;
+    const parsed = parsePhoneNumberFromString(candidate, {
+        defaultCountry: 'KR',
+        extract: false,
+    });
+    if (!parsed?.isValid() || parsed.ext || parsed.country !== 'KR') return null;
     const normalized = parsed.number;
     return E164_KOREAN_MOBILE.test(normalized) ? normalized : null;
 }
