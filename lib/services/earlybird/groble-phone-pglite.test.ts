@@ -386,60 +386,90 @@ describe('Groble phone migration upgrade behavior', () => {
         }
     }, 30_000);
 
-    it('backfills phone snapshots for existing pending orders', async () => {
-        const database = await createDatabaseBeforePhoneMigration();
-        try {
-            const userId = uuid(USER_NAMESPACE, 906);
-            const preflightId = uuid(PREFLIGHT_NAMESPACE, 906);
-            await database.query(
-                `INSERT INTO public.users (id, email, provider, phone_number)
-                 VALUES ($1, 'existing-order@example.com', 'kakao', '010-1111-2222')`,
-                [userId]
-            );
-            await database.query(
-                `INSERT INTO public.analysis_preflights (
-                    id, user_id, target_instagram_id, status, exclusion_decision,
-                    access_mode, plan_cards_snapshot, pricing_version, pricing_snapshot,
-                    target_followers_count, target_following_count, required_plan_id, expires_at
-                ) VALUES (
-                    $1, $2, 'existing_target', 'ready', 'skip', 'production', $3,
-                    $4, $5, 300, 100, 'basic',
-                    pg_catalog.clock_timestamp() + INTERVAL '30 minutes'
-                )`,
-                [
-                    preflightId,
-                    userId,
-                    planCards('basic'),
-                    EARLYBIRD_PRICING_VERSION,
-                    pricingSnapshot,
-                ]
-            );
-            await asServiceOn(
-                database,
-                `SELECT * FROM public.create_earlybird_checkout(
-                    $1, $2, 'basic', $3, 14900, $4, $5, $6,
-                    pg_catalog.clock_timestamp()
-                )`,
-                [
-                    userId,
-                    preflightId,
-                    BASIC_PRODUCT_ID,
-                    EARLYBIRD_PRICING_VERSION,
-                    EARLYBIRD_DISCLOSURE_VERSION,
-                    EARLYBIRD_DISCLOSURE_TEXT,
-                ]
-            );
+    it('backfills phone snapshots for existing pending and unresolved cancelled orders', async () => {
+        for (const scenario of [
+            {
+                index: 906,
+                expectedPhone: '+821011112222',
+                rawPhone: '010-1111-2222',
+                status: 'payment_pending',
+            },
+            {
+                index: 907,
+                expectedPhone: '+821033334444',
+                rawPhone: '010-3333-4444',
+                status: 'cancelled',
+            },
+        ] as const) {
+            const database = await createDatabaseBeforePhoneMigration();
+            try {
+                const userId = uuid(USER_NAMESPACE, scenario.index);
+                const preflightId = uuid(PREFLIGHT_NAMESPACE, scenario.index);
+                await database.query(
+                    `INSERT INTO public.users (id, email, provider, phone_number)
+                     VALUES ($1, $2, 'kakao', $3)`,
+                    [userId, `existing-order-${scenario.index}@example.com`, scenario.rawPhone]
+                );
+                await database.query(
+                    `INSERT INTO public.analysis_preflights (
+                        id, user_id, target_instagram_id, status, exclusion_decision,
+                        access_mode, plan_cards_snapshot, pricing_version, pricing_snapshot,
+                        target_followers_count, target_following_count, required_plan_id, expires_at
+                    ) VALUES (
+                        $1, $2, $3, 'ready', 'skip', 'production', $4,
+                        $5, $6, 300, 100, 'basic',
+                        pg_catalog.clock_timestamp() + INTERVAL '30 minutes'
+                    )`,
+                    [
+                        preflightId,
+                        userId,
+                        `existing_target_${scenario.index}`,
+                        planCards('basic'),
+                        EARLYBIRD_PRICING_VERSION,
+                        pricingSnapshot,
+                    ]
+                );
+                await asServiceOn(
+                    database,
+                    `SELECT * FROM public.create_earlybird_checkout(
+                        $1, $2, 'basic', $3, 14900, $4, $5, $6,
+                        pg_catalog.clock_timestamp()
+                    )`,
+                    [
+                        userId,
+                        preflightId,
+                        BASIC_PRODUCT_ID,
+                        EARLYBIRD_PRICING_VERSION,
+                        EARLYBIRD_DISCLOSURE_VERSION,
+                        EARLYBIRD_DISCLOSURE_TEXT,
+                    ]
+                );
+                if (scenario.status === 'cancelled') {
+                    await asServiceOn(
+                        database,
+                        `SELECT public.set_earlybird_refund_status($1, 'cancelled')`,
+                        [(await database.query<{ id: string }>(
+                            `SELECT id FROM public.earlybird_orders WHERE user_id = $1`,
+                            [userId]
+                        )).rows[0].id]
+                    );
+                }
 
-            await database.exec(phoneMigration);
-            const order = (await database.query<{
-                expected_buyer_phone_number_normalized: string | null;
-            }>(
-                `SELECT expected_buyer_phone_number_normalized
-                 FROM public.earlybird_orders`
-            )).rows[0];
-            expect(order.expected_buyer_phone_number_normalized).toBe('+821011112222');
-        } finally {
-            await database.close();
+                await database.exec(phoneMigration);
+                const order = (await database.query<{
+                    expected_buyer_phone_number_normalized: string | null;
+                    status: string;
+                }>(
+                    `SELECT expected_buyer_phone_number_normalized, status
+                     FROM public.earlybird_orders`
+                )).rows[0];
+                expect(order).toEqual({
+                    expected_buyer_phone_number_normalized: scenario.expectedPhone,
+                    status: scenario.status,
+                });
+            } finally {
+                await database.close();
+            }
         }
     }, 30_000);
 });
@@ -786,6 +816,127 @@ describe('Groble phone checkout and finalizer behavior', () => {
         )).rows[0].status).toBe('payment_pending');
     });
 
+    it('matches an unresolved cancelled snapshot by phone when buyer email differs', async () => {
+        const seed = await seedPreflight(106);
+        const checkout = await createCheckout(seed);
+        await asService(
+            `SELECT public.set_earlybird_refund_status($1, 'cancelled')`,
+            [checkout.order_id]
+        );
+
+        const result = await finalize(seed, 'basic', 106, {
+            buyerEmail: 'different-late-buyer@example.com',
+        });
+        expect(result).toMatchObject({
+            disposition: 'late_cancelled_payment',
+            order_id: checkout.order_id,
+            status: 'refund_pending',
+        });
+        const expectedEvidence = {
+            groble_buyer_email: 'different-late-buyer@example.com',
+            groble_buyer_phone_number: seed.rawPhone,
+            groble_buyer_display_name: 'Buyer 106',
+        };
+        expect((await db.query(
+            `SELECT groble_buyer_email, groble_buyer_phone_number,
+                groble_buyer_display_name
+             FROM public.earlybird_orders
+             WHERE id = $1`,
+            [checkout.order_id]
+        )).rows[0]).toEqual(expectedEvidence);
+        expect((await db.query(
+            `SELECT groble_buyer_email, groble_buyer_phone_number,
+                groble_buyer_display_name
+             FROM public.earlybird_webhook_events
+             WHERE event_id = 'phone_event_106'`
+        )).rows[0]).toEqual(expectedEvidence);
+    });
+
+    it('rejects multiple unresolved cancelled phone snapshots as ambiguous', async () => {
+        const firstSeed = await seedPreflight(109);
+        const secondSeed = await seedPreflight(110);
+        const firstCheckout = await createCheckout(firstSeed);
+        const secondCheckout = await createCheckout(secondSeed);
+
+        await asService(
+            `SELECT public.set_earlybird_refund_status($1, 'cancelled')`,
+            [firstCheckout.order_id]
+        );
+        await asService(
+            `SELECT public.set_earlybird_refund_status($1, 'cancelled')`,
+            [secondCheckout.order_id]
+        );
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET expected_buyer_phone_number_normalized = $1
+             WHERE id = $2`,
+            [firstSeed.phone, secondCheckout.order_id]
+        );
+
+        const result = await finalize(firstSeed, 'basic', 109, {
+            buyerEmail: 'ambiguous-late-buyer@example.com',
+        });
+        expect(result).toMatchObject({
+            disposition: 'ambiguous_buyer',
+            order_id: null,
+            status: null,
+        });
+        expect((await db.query<{ status: string }>(
+            `SELECT status
+             FROM public.earlybird_orders
+             WHERE id IN ($1, $2)
+             ORDER BY id`,
+            [firstCheckout.order_id, secondCheckout.order_id]
+        )).rows.map(order => order.status)).toEqual(['cancelled', 'cancelled']);
+    });
+
+    it('accepts both canonical and rolling-deploy named finalizer calls', async () => {
+        const canonicalSeed = await seedPreflight(107);
+        const canonicalOrder = await createCheckout(canonicalSeed);
+        const canonical = await asService<FinalizeRow>(
+            `SELECT * FROM public.finalize_earlybird_groble_payment(
+                p_event_id => 'canonical-named-event',
+                p_idempotency_key => 'canonical-named-idem',
+                p_event_type => 'payment.completed',
+                p_occurred_at => '2026-07-18T21:00:00+09:00',
+                p_payment_id => 'canonical-named-payment',
+                p_buyer_email => $1,
+                p_buyer_phone_normalized => $2,
+                p_buyer_phone_raw => $3,
+                p_buyer_display_name => 'Canonical Buyer',
+                p_product_id => $4,
+                p_amount_krw => 14900,
+                p_paid_at => '2026-07-18T21:00:00+09:00'
+            )`,
+            [canonicalSeed.email, canonicalSeed.phone, canonicalSeed.rawPhone, BASIC_PRODUCT_ID]
+        );
+        expect(canonical.rows[0]).toMatchObject({
+            disposition: 'accepted',
+            order_id: canonicalOrder.order_id,
+        });
+
+        const compatibilitySeed = await seedPreflight(108);
+        const compatibilityOrder = await createCheckout(compatibilitySeed);
+        const compatibility = await asService<FinalizeRow>(
+            `SELECT * FROM public.finalize_earlybird_groble_payment(
+                p_event_id => 'compatibility-named-event',
+                p_idempotency_key => 'compatibility-named-idem',
+                p_event_type => 'payment.completed',
+                p_occurred_at => '2026-07-18T21:00:00+09:00',
+                p_payment_id => 'compatibility-named-payment',
+                p_buyer_email => $1,
+                p_product_id => $2,
+                p_amount_krw => 14900,
+                p_paid_at => '2026-07-18T21:00:00+09:00'
+            )`,
+            [compatibilitySeed.email, BASIC_PRODUCT_ID]
+        );
+        expect(compatibility.rows[0]).toMatchObject({
+            disposition: 'accepted',
+            order_id: compatibilityOrder.order_id,
+        });
+    });
+
     it('preserves overflow isolation and stores selected-order evidence', async () => {
         const seed = await seedPreflight(17);
         const checkout = await createCheckout(seed);
@@ -814,7 +965,7 @@ describe('Groble phone checkout and finalizer behavior', () => {
 
     it('keeps both replaced RPCs executable only by service_role', async () => {
         const seed = await seedPreflight(18);
-        await createCheckout(seed);
+        const checkout = await createCheckout(seed);
         const signatures = (await db.query<{
             old_signature: string | null;
             new_signature: string | null;
@@ -827,7 +978,7 @@ describe('Groble phone checkout and finalizer behavior', () => {
                     'public.finalize_earlybird_groble_payment(text,text,text,timestamp with time zone,text,text,text,text,text,text,integer,timestamp with time zone)'
                 )::TEXT AS new_signature`
         )).rows[0];
-        expect(signatures.old_signature).toBeNull();
+        expect(signatures.old_signature).not.toBeNull();
         expect(signatures.new_signature).not.toBeNull();
 
         await db.query(
@@ -860,12 +1011,25 @@ describe('Groble phone checkout and finalizer behavior', () => {
                 ]
             )).rejects.toThrow(/permission denied/i);
             await expect(db.query(
+                `SELECT public.set_earlybird_refund_status($1, 'cancelled')`,
+                [checkout.order_id]
+            )).rejects.toThrow(/permission denied/i);
+            await expect(db.query(
                 `SELECT * FROM public.finalize_earlybird_groble_payment(
                     'unauthorized-event', 'unauthorized-idem', 'payment.completed',
                     pg_catalog.clock_timestamp(), 'unauthorized-payment', $1, $2, $3,
                     'Unauthorized Buyer', $4, 14900, pg_catalog.clock_timestamp()
                 )`,
                 [seed.email, seed.phone, seed.rawPhone, BASIC_PRODUCT_ID]
+            )).rejects.toThrow(/permission denied/i);
+            await expect(db.query(
+                `SELECT * FROM public.finalize_earlybird_groble_payment(
+                    'unauthorized-compat-event', 'unauthorized-compat-idem',
+                    'payment.completed', pg_catalog.clock_timestamp(),
+                    'unauthorized-compat-payment', $1, $2, 14900,
+                    pg_catalog.clock_timestamp()
+                )`,
+                [seed.email, BASIC_PRODUCT_ID]
             )).rejects.toThrow(/permission denied/i);
         } finally {
             await db.exec('RESET ROLE');

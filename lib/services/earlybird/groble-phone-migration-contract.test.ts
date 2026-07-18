@@ -65,6 +65,16 @@ describe('Groble phone matching migration contract', () => {
         );
     });
 
+    it('bounds migration locks and defers table scans until constraint validation', () => {
+        expect(migration).toContain("SET LOCAL lock_timeout = '5s'");
+        expect(migration).toContain("SET LOCAL statement_timeout = '2min'");
+        expect(migration).not.toContain('LOCK TABLE public.users');
+        expect(migration.match(/NOT VALID/g)?.length).toBeGreaterThanOrEqual(8);
+        expect(migration.match(/VALIDATE CONSTRAINT/g)?.length).toBeGreaterThanOrEqual(8);
+        expect(migration).toMatch(/row-count[\s\S]*?maintenance window/i);
+        expect(migration).not.toContain('CREATE INDEX CONCURRENTLY');
+    });
+
     it('adds bounded service-only order snapshots and webhook evidence', () => {
         expect(migration).toContain('expected_buyer_phone_number_normalized TEXT');
         for (const column of [
@@ -81,7 +91,7 @@ describe('Groble phone matching migration contract', () => {
             /CREATE INDEX earlybird_orders_pending_phone_product_idx[\s\S]*?expected_buyer_phone_number_normalized, expected_groble_product_id[\s\S]*?WHERE status = 'payment_pending'/
         );
         expect(migration).toMatch(
-            /UPDATE public\.earlybird_orders[\s\S]*?SET expected_buyer_phone_number_normalized = buyer\.phone_number_normalized[\s\S]*?status = 'payment_pending'/
+            /UPDATE public\.earlybird_orders[\s\S]*?SET expected_buyer_phone_number_normalized = buyer\.phone_number_normalized[\s\S]*?status IN \('payment_pending', 'cancelled'\)[\s\S]*?payment_id IS NULL/
         );
     });
 
@@ -102,7 +112,7 @@ describe('Groble phone matching migration contract', () => {
         expect(migration).not.toMatch(/GRANT SELECT ON TABLE public\.earlybird_webhook_events/i);
     });
 
-    it('replaces checkout and finalization with empty search paths and service-only execution', () => {
+    it('keeps canonical and rolling-deploy finalizers search-path safe and service-only', () => {
         for (const functionName of [
             'create_earlybird_checkout',
             'finalize_earlybird_groble_payment',
@@ -112,12 +122,17 @@ describe('Groble phone matching migration contract', () => {
             expect(definition).toContain("SET search_path = ''");
         }
         expect(migration).toContain("RAISE EXCEPTION 'CHECKOUT_PHONE_REQUIRED'");
-        expect(migration).toMatch(
-            /DROP FUNCTION public\.finalize_earlybird_groble_payment\(\s*TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE, TEXT, TEXT, TEXT, INTEGER,\s*TIMESTAMP WITH TIME ZONE\s*\)/
-        );
+        expect(migration).not.toMatch(/DROP FUNCTION public\.finalize_earlybird_groble_payment/);
+        expect(migration.match(
+            /CREATE OR REPLACE FUNCTION public\.finalize_earlybird_groble_payment\(/g
+        )).toHaveLength(2);
         expect(migration).toMatch(
             /CREATE OR REPLACE FUNCTION public\.finalize_earlybird_groble_payment\([\s\S]*?p_buyer_email TEXT,[\s\S]*?p_buyer_phone_normalized TEXT,[\s\S]*?p_buyer_phone_raw TEXT,[\s\S]*?p_buyer_display_name TEXT,[\s\S]*?p_product_id TEXT/
         );
+        expect(migration).toMatch(
+            /CREATE OR REPLACE FUNCTION public\.finalize_earlybird_groble_payment\(\s*p_event_id TEXT,[\s\S]*?p_buyer_email TEXT,[\s\S]*?p_product_id TEXT,[\s\S]*?p_paid_at TIMESTAMP WITH TIME ZONE\s*\)[\s\S]*?SECURITY DEFINER[\s\S]*?SET search_path = ''[\s\S]*?p_buyer_phone_normalized => NULL::TEXT[\s\S]*?p_buyer_phone_raw => NULL::TEXT[\s\S]*?p_buyer_display_name => NULL::TEXT/
+        );
+        expect(migration).toMatch(/post-drain migration/i);
         expect(migration).toMatch(
             /REVOKE ALL ON FUNCTION public\.create_earlybird_checkout\([\s\S]*?FROM PUBLIC, anon, authenticated/
         );
@@ -130,6 +145,12 @@ describe('Groble phone matching migration contract', () => {
         expect(migration).toMatch(
             /GRANT EXECUTE ON FUNCTION public\.finalize_earlybird_groble_payment\([\s\S]*?TO service_role/
         );
+        expect(migration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.finalize_earlybird_groble_payment\(\s*TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE, TEXT, TEXT, TEXT, INTEGER,\s*TIMESTAMP WITH TIME ZONE\s*\) FROM PUBLIC, anon, authenticated/
+        );
+        expect(migration).toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.finalize_earlybird_groble_payment\(\s*TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE, TEXT, TEXT, TEXT, INTEGER,\s*TIMESTAMP WITH TIME ZONE\s*\) TO service_role/
+        );
     });
 
     it('locks every potential user deterministically before authoritative matching', () => {
@@ -140,8 +161,31 @@ describe('Groble phone matching migration contract', () => {
         expect(lockLoop).toBeGreaterThanOrEqual(0);
         expect(definition).toContain('ORDER BY potential_user.user_id::TEXT');
         expect(definition).toMatch(
-            /buyer\.phone_number_normalized = p_buyer_phone_normalized[\s\S]*?UNION[\s\S]*?lower\(pg_catalog\.btrim\(buyer\.email\)\)[\s\S]*?UNION[\s\S]*?expected_buyer_phone_number_normalized/
+            /buyer\.phone_number_normalized = p_buyer_phone_normalized[\s\S]*?UNION[\s\S]*?lower\(pg_catalog\.btrim\(buyer\.email\)\)[\s\S]*?UNION[\s\S]*?status IN \('payment_pending', 'cancelled'\)[\s\S]*?expected_buyer_phone_number_normalized/
         );
         expect(firstCandidateCount).toBeGreaterThan(lockLoop);
+    });
+
+    it('serializes profile snapshots and refund transitions with the user lock', () => {
+        const checkout = functionDefinition('create_earlybird_checkout');
+        expect(checkout).toMatch(
+            /SELECT buyer\.provider, buyer\.phone_number_normalized[\s\S]*?WHERE buyer\.id = p_user_id\s+FOR UPDATE/
+        );
+
+        const refund = functionDefinition('set_earlybird_refund_status');
+        const userDiscovery = refund.indexOf('SELECT earlybird_order.user_id');
+        const userLock = refund.indexOf('pg_advisory_xact_lock');
+        const orderLock = refund.indexOf('FOR UPDATE');
+        expect(refund).toContain('SECURITY DEFINER');
+        expect(refund).toContain("SET search_path = ''");
+        expect(userDiscovery).toBeGreaterThanOrEqual(0);
+        expect(userLock).toBeGreaterThan(userDiscovery);
+        expect(orderLock).toBeGreaterThan(userLock);
+        expect(migration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.set_earlybird_refund_status\(UUID, TEXT\)[\s\S]*?FROM PUBLIC, anon, authenticated/
+        );
+        expect(migration).toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.set_earlybird_refund_status\(UUID, TEXT\)[\s\S]*?TO service_role/
+        );
     });
 });

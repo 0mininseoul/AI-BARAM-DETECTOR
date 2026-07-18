@@ -1,12 +1,15 @@
 -- Match Groble payments against an immutable checkout phone snapshot while keeping
 -- all buyer evidence behind the existing service-role database boundary.
 
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '2min';
+
 ALTER TABLE public.users
     ADD COLUMN phone_number_normalized TEXT,
     ADD CONSTRAINT users_phone_number_normalized_check CHECK (
         phone_number_normalized IS NULL
         OR phone_number_normalized ~ '^\+8210[0-9]{8}$'
-    );
+    ) NOT VALID;
 
 CREATE OR REPLACE FUNCTION public.normalize_kr_mobile_e164(p_value TEXT)
 RETURNS TEXT
@@ -31,8 +34,6 @@ $$;
 REVOKE ALL ON FUNCTION public.normalize_kr_mobile_e164(TEXT)
     FROM PUBLIC, anon, authenticated, service_role;
 
-LOCK TABLE public.users IN SHARE ROW EXCLUSIVE MODE;
-
 UPDATE public.users
 SET phone_number_normalized = public.normalize_kr_mobile_e164(phone_number)
 WHERE phone_number IS NOT NULL;
@@ -51,10 +52,6 @@ BEGIN
 END;
 $$;
 
-CREATE UNIQUE INDEX users_phone_number_normalized_unique
-    ON public.users(phone_number_normalized)
-    WHERE phone_number_normalized IS NOT NULL;
-
 ALTER TABLE public.earlybird_orders
     ADD COLUMN expected_buyer_phone_number_normalized TEXT,
     ADD COLUMN groble_buyer_email TEXT,
@@ -63,19 +60,19 @@ ALTER TABLE public.earlybird_orders
     ADD CONSTRAINT earlybird_orders_expected_buyer_phone_check CHECK (
         expected_buyer_phone_number_normalized IS NULL
         OR expected_buyer_phone_number_normalized ~ '^\+8210[0-9]{8}$'
-    ),
+    ) NOT VALID,
     ADD CONSTRAINT earlybird_orders_groble_buyer_email_check CHECK (
         groble_buyer_email IS NULL
         OR pg_catalog.char_length(groble_buyer_email) <= 320
-    ),
+    ) NOT VALID,
     ADD CONSTRAINT earlybird_orders_groble_buyer_phone_check CHECK (
         groble_buyer_phone_number IS NULL
         OR pg_catalog.char_length(groble_buyer_phone_number) <= 64
-    ),
+    ) NOT VALID,
     ADD CONSTRAINT earlybird_orders_groble_buyer_display_name_check CHECK (
         groble_buyer_display_name IS NULL
         OR pg_catalog.char_length(groble_buyer_display_name) <= 100
-    );
+    ) NOT VALID;
 
 ALTER TABLE public.earlybird_webhook_events
     ADD COLUMN groble_buyer_email TEXT,
@@ -84,29 +81,58 @@ ALTER TABLE public.earlybird_webhook_events
     ADD CONSTRAINT earlybird_webhook_events_groble_buyer_email_check CHECK (
         groble_buyer_email IS NULL
         OR pg_catalog.char_length(groble_buyer_email) <= 320
-    ),
+    ) NOT VALID,
     ADD CONSTRAINT earlybird_webhook_events_groble_buyer_phone_check CHECK (
         groble_buyer_phone_number IS NULL
         OR pg_catalog.char_length(groble_buyer_phone_number) <= 64
-    ),
+    ) NOT VALID,
     ADD CONSTRAINT earlybird_webhook_events_groble_buyer_display_name_check CHECK (
         groble_buyer_display_name IS NULL
         OR pg_catalog.char_length(groble_buyer_display_name) <= 100
-    );
+    ) NOT VALID;
 
-UPDATE public.earlybird_orders AS pending_order
+UPDATE public.earlybird_orders AS unresolved_order
 SET expected_buyer_phone_number_normalized = buyer.phone_number_normalized
 FROM public.users AS buyer
-WHERE pending_order.user_id = buyer.id
-  AND pending_order.status = 'payment_pending'
-  AND pending_order.expected_buyer_phone_number_normalized IS NULL
+WHERE unresolved_order.user_id = buyer.id
+  AND unresolved_order.status IN ('payment_pending', 'cancelled')
+  AND unresolved_order.payment_id IS NULL
+  AND unresolved_order.expected_buyer_phone_number_normalized IS NULL
   AND buyer.phone_number_normalized IS NOT NULL;
+
+ALTER TABLE public.users
+    VALIDATE CONSTRAINT users_phone_number_normalized_check;
+ALTER TABLE public.earlybird_orders
+    VALIDATE CONSTRAINT earlybird_orders_expected_buyer_phone_check,
+    VALIDATE CONSTRAINT earlybird_orders_groble_buyer_email_check,
+    VALIDATE CONSTRAINT earlybird_orders_groble_buyer_phone_check,
+    VALIDATE CONSTRAINT earlybird_orders_groble_buyer_display_name_check;
+ALTER TABLE public.earlybird_webhook_events
+    VALIDATE CONSTRAINT earlybird_webhook_events_groble_buyer_email_check,
+    VALIDATE CONSTRAINT earlybird_webhook_events_groble_buyer_phone_check,
+    VALIDATE CONSTRAINT earlybird_webhook_events_groble_buyer_display_name_check;
+
+-- Before push, check the row-count for each indexed table and schedule these
+-- non-concurrent builds in a maintenance window if production volume warrants it.
+CREATE UNIQUE INDEX users_phone_number_normalized_unique
+    ON public.users(phone_number_normalized)
+    WHERE phone_number_normalized IS NOT NULL;
 
 CREATE INDEX earlybird_orders_pending_phone_product_idx
     ON public.earlybird_orders(
         expected_buyer_phone_number_normalized, expected_groble_product_id
     )
     WHERE status = 'payment_pending'
+      AND expected_buyer_phone_number_normalized IS NOT NULL;
+
+CREATE INDEX earlybird_orders_cancelled_phone_product_amount_idx
+    ON public.earlybird_orders(
+        expected_buyer_phone_number_normalized,
+        expected_groble_product_id,
+        expected_amount_krw
+    )
+    WHERE status = 'cancelled'
+      AND payment_id IS NULL
       AND expected_buyer_phone_number_normalized IS NOT NULL;
 
 -- Restate the browser boundary explicitly: none of the new snapshot or buyer evidence
@@ -176,7 +202,8 @@ BEGIN
     SELECT buyer.provider, buyer.phone_number_normalized
     INTO v_user_provider, v_user_phone_number_normalized
     FROM public.users AS buyer
-    WHERE buyer.id = p_user_id;
+    WHERE buyer.id = p_user_id
+    FOR UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'PREFLIGHT_NOT_VALID';
     END IF;
@@ -327,11 +354,6 @@ BEGIN
 END;
 $$;
 
-DROP FUNCTION public.finalize_earlybird_groble_payment(
-    TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE, TEXT, TEXT, TEXT, INTEGER,
-    TIMESTAMP WITH TIME ZONE
-);
-
 CREATE OR REPLACE FUNCTION public.finalize_earlybird_groble_payment(
     p_event_id TEXT,
     p_idempotency_key TEXT,
@@ -481,7 +503,8 @@ BEGIN
             SELECT phone_order.user_id
             FROM public.earlybird_orders AS phone_order
             WHERE p_buyer_phone_normalized IS NOT NULL
-              AND phone_order.status = 'payment_pending'
+              AND phone_order.status IN ('payment_pending', 'cancelled')
+              AND phone_order.payment_id IS NULL
               AND phone_order.expected_groble_product_id = p_product_id
               AND phone_order.expected_buyer_phone_number_normalized
                     = p_buyer_phone_normalized
@@ -530,6 +553,96 @@ BEGIN
               AND candidate.expected_buyer_phone_number_normalized
                     = p_buyer_phone_normalized;
             v_match_method := 'phone';
+        ELSE
+            SELECT pg_catalog.count(*)::INTEGER
+            INTO v_candidate_count
+            FROM public.earlybird_orders AS cancelled_candidate
+            WHERE cancelled_candidate.status = 'cancelled'
+              AND cancelled_candidate.payment_id IS NULL
+              AND cancelled_candidate.expected_buyer_phone_number_normalized
+                    = p_buyer_phone_normalized
+              AND cancelled_candidate.expected_groble_product_id = p_product_id
+              AND cancelled_candidate.expected_amount_krw = p_amount_krw;
+
+            IF v_candidate_count > 1 THEN
+                INSERT INTO public.earlybird_webhook_events (
+                    event_id, idempotency_key, event_type, occurred_at,
+                    payment_id, product_id, amount_krw, disposition,
+                    groble_buyer_email, groble_buyer_phone_number,
+                    groble_buyer_display_name
+                ) VALUES (
+                    p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
+                    p_payment_id, p_product_id, p_amount_krw, 'ambiguous_buyer',
+                    p_buyer_email, p_buyer_phone_raw, p_buyer_display_name
+                );
+                RETURN QUERY SELECT
+                    'ambiguous_buyer'::TEXT,
+                    NULL::UUID,
+                    NULL::TEXT,
+                    NULL::SMALLINT;
+                RETURN;
+            ELSIF v_candidate_count = 1 THEN
+                SELECT cancelled_candidate.*
+                INTO v_order
+                FROM public.earlybird_orders AS cancelled_candidate
+                WHERE cancelled_candidate.status = 'cancelled'
+                  AND cancelled_candidate.payment_id IS NULL
+                  AND cancelled_candidate.expected_buyer_phone_number_normalized
+                        = p_buyer_phone_normalized
+                  AND cancelled_candidate.expected_groble_product_id = p_product_id
+                  AND cancelled_candidate.expected_amount_krw = p_amount_krw
+                FOR UPDATE;
+
+                IF NOT FOUND THEN
+                    INSERT INTO public.earlybird_webhook_events (
+                        event_id, idempotency_key, event_type, occurred_at,
+                        payment_id, product_id, amount_krw, disposition,
+                        groble_buyer_email, groble_buyer_phone_number,
+                        groble_buyer_display_name
+                    ) VALUES (
+                        p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
+                        p_payment_id, p_product_id, p_amount_krw, 'unmatched',
+                        p_buyer_email, p_buyer_phone_raw, p_buyer_display_name
+                    );
+                    RETURN QUERY SELECT
+                        'unmatched'::TEXT,
+                        NULL::UUID,
+                        NULL::TEXT,
+                        NULL::SMALLINT;
+                    RETURN;
+                END IF;
+
+                UPDATE public.earlybird_orders AS late_order
+                SET status = 'refund_pending',
+                    payment_id = p_payment_id,
+                    actual_groble_product_id = p_product_id,
+                    actual_amount_krw = p_amount_krw,
+                    paid_at = p_paid_at,
+                    groble_buyer_email = p_buyer_email,
+                    groble_buyer_phone_number = p_buyer_phone_raw,
+                    groble_buyer_display_name = p_buyer_display_name,
+                    updated_at = pg_catalog.clock_timestamp()
+                WHERE late_order.id = v_order.id
+                RETURNING late_order.* INTO v_order;
+
+                INSERT INTO public.earlybird_webhook_events (
+                    event_id, idempotency_key, event_type, occurred_at,
+                    payment_id, product_id, amount_krw, disposition, order_id,
+                    groble_buyer_email, groble_buyer_phone_number,
+                    groble_buyer_display_name
+                ) VALUES (
+                    p_event_id, p_idempotency_key, p_event_type, p_occurred_at,
+                    p_payment_id, p_product_id, p_amount_krw,
+                    'late_cancelled_payment', v_order.id,
+                    p_buyer_email, p_buyer_phone_raw, p_buyer_display_name
+                );
+                RETURN QUERY SELECT
+                    'late_cancelled_payment'::TEXT,
+                    v_order.id,
+                    v_order.status,
+                    NULL::SMALLINT;
+                RETURN;
+            END IF;
         END IF;
     END IF;
 
@@ -835,6 +948,101 @@ BEGIN
 END;
 $$;
 
+-- Keep the legacy overload through the rolling deploy. Remove it only in a later
+-- post-drain migration after every caller uses the canonical evidence signature.
+CREATE OR REPLACE FUNCTION public.finalize_earlybird_groble_payment(
+    p_event_id TEXT,
+    p_idempotency_key TEXT,
+    p_event_type TEXT,
+    p_occurred_at TIMESTAMP WITH TIME ZONE,
+    p_payment_id TEXT,
+    p_buyer_email TEXT,
+    p_product_id TEXT,
+    p_amount_krw INTEGER,
+    p_paid_at TIMESTAMP WITH TIME ZONE
+)
+RETURNS TABLE(disposition TEXT, order_id UUID, status TEXT, plan_sequence SMALLINT)
+LANGUAGE sql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+    SELECT *
+    FROM public.finalize_earlybird_groble_payment(
+        p_event_id => $1,
+        p_idempotency_key => $2,
+        p_event_type => $3,
+        p_occurred_at => $4,
+        p_payment_id => $5,
+        p_buyer_email => $6,
+        p_buyer_phone_normalized => NULL::TEXT,
+        p_buyer_phone_raw => NULL::TEXT,
+        p_buyer_display_name => NULL::TEXT,
+        p_product_id => $7,
+        p_amount_krw => $8,
+        p_paid_at => $9
+    )
+$$;
+
+CREATE OR REPLACE FUNCTION public.set_earlybird_refund_status(
+    p_order_id UUID,
+    p_next_status TEXT
+)
+RETURNS TEXT
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+    v_user_id UUID;
+    v_order public.earlybird_orders%ROWTYPE;
+BEGIN
+    SELECT earlybird_order.user_id
+    INTO v_user_id
+    FROM public.earlybird_orders AS earlybird_order
+    WHERE earlybird_order.id = p_order_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'EARLYBIRD_ORDER_NOT_FOUND';
+    END IF;
+
+    PERFORM pg_catalog.pg_advisory_xact_lock(
+        pg_catalog.hashtextextended(v_user_id::TEXT, 0)
+    );
+
+    SELECT earlybird_order.*
+    INTO v_order
+    FROM public.earlybird_orders AS earlybird_order
+    WHERE earlybird_order.id = p_order_id
+    FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'EARLYBIRD_ORDER_NOT_FOUND';
+    END IF;
+
+    IF p_next_status = 'cancelled' AND v_order.status = 'payment_pending' THEN
+        NULL;
+    ELSIF p_next_status = 'refund_pending'
+       AND v_order.status IN (
+           'paid', 'analysis_in_progress', 'completed',
+           'payment_failed', 'overflow_refund_required'
+       ) THEN
+        NULL;
+    ELSIF p_next_status = 'refunded'
+       AND v_order.status IN (
+           'refund_pending', 'payment_failed', 'overflow_refund_required'
+       ) THEN
+        NULL;
+    ELSE
+        RAISE EXCEPTION 'EARLYBIRD_REFUND_TRANSITION_INVALID';
+    END IF;
+
+    UPDATE public.earlybird_orders AS transitioned_order
+    SET status = p_next_status,
+        updated_at = pg_catalog.clock_timestamp()
+    WHERE transitioned_order.id = p_order_id;
+
+    RETURN p_next_status;
+END;
+$$;
+
 REVOKE ALL ON FUNCTION public.create_earlybird_checkout(
     UUID, UUID, TEXT, TEXT, INTEGER, TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE
 ) FROM PUBLIC, anon, authenticated;
@@ -842,6 +1050,12 @@ REVOKE ALL ON FUNCTION public.finalize_earlybird_groble_payment(
     TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE, TEXT, TEXT, TEXT, TEXT, TEXT,
     TEXT, INTEGER, TIMESTAMP WITH TIME ZONE
 ) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.finalize_earlybird_groble_payment(
+    TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE, TEXT, TEXT, TEXT, INTEGER,
+    TIMESTAMP WITH TIME ZONE
+) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.set_earlybird_refund_status(UUID, TEXT)
+    FROM PUBLIC, anon, authenticated;
 
 GRANT EXECUTE ON FUNCTION public.create_earlybird_checkout(
     UUID, UUID, TEXT, TEXT, INTEGER, TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE
@@ -850,3 +1064,9 @@ GRANT EXECUTE ON FUNCTION public.finalize_earlybird_groble_payment(
     TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE, TEXT, TEXT, TEXT, TEXT, TEXT,
     TEXT, INTEGER, TIMESTAMP WITH TIME ZONE
 ) TO service_role;
+GRANT EXECUTE ON FUNCTION public.finalize_earlybird_groble_payment(
+    TEXT, TEXT, TEXT, TIMESTAMP WITH TIME ZONE, TEXT, TEXT, TEXT, INTEGER,
+    TIMESTAMP WITH TIME ZONE
+) TO service_role;
+GRANT EXECUTE ON FUNCTION public.set_earlybird_refund_status(UUID, TEXT)
+    TO service_role;
