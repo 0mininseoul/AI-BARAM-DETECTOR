@@ -21,6 +21,9 @@
   },
   "dependencies": {
     "@amplitude/unified": "1.1.25",
+    "@axiomhq/js": "1.8.0",
+    "@axiomhq/logging": "0.3.0",
+    "@axiomhq/nextjs": "0.3.0",
     "@google-cloud/tasks": "6.2.3",
     "@google/genai": "^2.7.0",
     "@supabase/ssr": "^0.8.0",
