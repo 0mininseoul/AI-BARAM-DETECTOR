@@ -75,6 +75,11 @@ describe('earlybird checkout and waitlist routes', () => {
         vi.clearAllMocks();
         mocks.after.mockReset();
         mocks.from.mockReset();
+        mocks.from.mockReturnValue({
+            select: vi.fn(() => ({
+                in: vi.fn(async () => ({ data: [], error: null })),
+            })),
+        });
         authenticate();
         process.env.GROBLE_BASIC_PRODUCT_ID = 'basic_product-01';
         process.env.GROBLE_STANDARD_PRODUCT_ID = 'standard_product-01';

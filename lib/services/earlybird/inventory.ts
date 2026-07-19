@@ -8,10 +8,13 @@ export async function fetchEarlybirdRemainingSlots(): Promise<
     Partial<Record<PaidEarlybirdPlanId, number>>
 > {
     try {
-        const { data, error } = await supabaseAdmin
-            .from('earlybird_plan_inventory')
-            .select('plan_id, sale_limit, sold_count')
-            .in('plan_id', PAID_EARLYBIRD_PLAN_IDS);
+        const { data, error } = await Promise.race([
+            supabaseAdmin.from('earlybird_plan_inventory')
+                .select('plan_id, sale_limit, sold_count')
+                .in('plan_id', PAID_EARLYBIRD_PLAN_IDS),
+            new Promise<never>((_, reject) =>
+                setTimeout(() => reject(new Error('INVENTORY_LOOKUP_TIMEOUT')), 1_500)),
+        ]);
         if (error || !data) return {};
         return Object.fromEntries(
             data

@@ -67,4 +67,21 @@ describe('fetchEarlybirdRemainingSlots', () => {
     it('defaults to an empty map when supabaseAdmin has no from method (existing test mock shape)', async () => {
         await expect(fetchEarlybirdRemainingSlots()).resolves.toEqual({});
     });
+
+    it('fails open to an empty map when the query hangs past the timeout', async () => {
+        vi.useFakeTimers();
+        try {
+            (supabaseAdmin as unknown as { from: ReturnType<typeof vi.fn> }).from = vi.fn(() => ({
+                select: vi.fn(() => ({
+                    in: vi.fn(() => new Promise(() => { /* never resolves */ })),
+                })),
+            }));
+
+            const resultPromise = fetchEarlybirdRemainingSlots();
+            await vi.advanceTimersByTimeAsync(1_500);
+            await expect(resultPromise).resolves.toEqual({});
+        } finally {
+            vi.useRealTimers();
+        }
+    });
 });
