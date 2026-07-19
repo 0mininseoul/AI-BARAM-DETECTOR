@@ -109,7 +109,6 @@ describe('earlybird owner order status route', () => {
                 targetInstagramId: 'target.account',
                 planId: 'basic',
                 planName: 'Basic',
-                planCapacity: 10,
                 actualAmountKrw: 14_900,
                 acceptedAt: '2026-07-17T12:00:00.000Z',
                 dueAt: '2026-07-19T12:00:00.000Z',
