@@ -124,7 +124,7 @@ case "$state" in
     enqueuer_identity_ready="true"
     bucket_ready="true"
     ;;
-  broad|storage_broad|secret_broad|vertex_admin|keyed|build_broad|build_keyed|enqueuer_broad|enqueuer_keyed|failed_latest|old_traffic|unpromoted_latest|runtime_env_drift|runtime_admission_env|runtime_legacy_gate_env|credential_override|credential_key_base64|plaintext_secret|secret_ref_drift|slot_drift|runtime_sidecar|runtime_placement|runtime_duplicate_env)
+  broad|storage_broad|secret_broad|vertex_admin|keyed|build_broad|build_keyed|enqueuer_broad|enqueuer_keyed|failed_latest|old_traffic|unpromoted_latest|runtime_env_drift|runtime_admission_env|runtime_legacy_gate_env|runtime_selfhosted_global_gate_drift|runtime_selfhosted_global_interval_drift|runtime_selfhosted_response_guard_drift|credential_override|credential_key_base64|plaintext_secret|secret_ref_drift|slot_drift|runtime_sidecar|runtime_placement|runtime_duplicate_env)
     identity_ready="true"
     vertex_ready="true"
     build_identity_ready="true"
@@ -139,7 +139,10 @@ case "$state" in
       || "$state" == "secret_ref_drift" || "$state" == "slot_drift" \
       || "$state" == "runtime_sidecar" || "$state" == "runtime_placement" \
       || "$state" == "runtime_duplicate_env" || "$state" == "runtime_admission_env" \
-      || "$state" == "runtime_legacy_gate_env" ]]; then
+      || "$state" == "runtime_legacy_gate_env" \
+      || "$state" == "runtime_selfhosted_global_gate_drift" \
+      || "$state" == "runtime_selfhosted_global_interval_drift" \
+      || "$state" == "runtime_selfhosted_response_guard_drift" ]]; then
       bucket_ready="true"
       infra_ready="true"
     fi
@@ -507,6 +510,9 @@ case "$command_line" in
       jq -e --arg slot "${ANALYSIS_V2_APIFY_API_TOKEN_SLOT:-}" '
         .ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET == "test-project-analysis-v2-media"
           and .ANALYSIS_V2_APIFY_API_TOKEN_SLOT == $slot
+          and .SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED == "true"
+          and .SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS == "750"
+          and .SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS == "100"
           and (keys | all(test("(TOKEN|SECRET|PASSWORD|CREDENTIAL|_KEY)$") | not))
       ' "$runtime_manifest" >/dev/null || exit 93
       source_runtime_slot_applied='true'
@@ -670,6 +676,9 @@ case "$command_line" in
       runtime_slot="${FAKE_GCLOUD_RUNTIME_SLOT:-quinary}"
       worker_gate='false'
       recovery_gate='false'
+      selfhosted_global_gate='true'
+      selfhosted_global_interval='750'
+      selfhosted_response_guard='100'
       apify_secret_slots="${FAKE_GCLOUD_APIFY_SECRET_SLOTS:-quinary}"
       apify_secret_version="${FAKE_GCLOUD_APIFY_SECRET_VERSION:-7}"
       apify_plaintext_slot="${FAKE_GCLOUD_APIFY_PLAINTEXT_SLOT:-}"
@@ -696,6 +705,12 @@ case "$command_line" in
       [[ "$state" != "runtime_duplicate_env" ]] || duplicate_env='true'
       [[ "$state" != "runtime_admission_env" ]] || admission_env='true'
       [[ "$state" != "runtime_legacy_gate_env" ]] || legacy_gate_env='true'
+      [[ "$state" != "runtime_selfhosted_global_gate_drift" ]] \
+        || selfhosted_global_gate='false'
+      [[ "$state" != "runtime_selfhosted_global_interval_drift" ]] \
+        || selfhosted_global_interval='749'
+      [[ "$state" != "runtime_selfhosted_response_guard_drift" ]] \
+        || selfhosted_response_guard='101'
       if [[ "$state" == "staged_build" || "$state" == "staged_final" \
         || "$state" == "promoted" || "$state" == "rolled_back" \
         || "$state" == "rolled_back_bootstrap" ]]; then
@@ -725,6 +740,9 @@ case "$command_line" in
         --arg runtime_slot "$runtime_slot" \
         --arg worker_gate "$worker_gate" \
         --arg recovery_gate "$recovery_gate" \
+        --arg selfhosted_global_gate "$selfhosted_global_gate" \
+        --arg selfhosted_global_interval "$selfhosted_global_interval" \
+        --arg selfhosted_response_guard "$selfhosted_response_guard" \
         --arg apify_secret_slots "$apify_secret_slots" \
         --arg apify_secret_version "$apify_secret_version" \
         --arg apify_plaintext_slot "$apify_plaintext_slot" \
@@ -767,6 +785,9 @@ case "$command_line" in
                 resources: {limits: {cpu: "2", memory: "2Gi"}},
                 env: ([
                   {name: "ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET", value: "test-project-analysis-v2-media"},
+                  {name: "SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED", value: $selfhosted_global_gate},
+                  {name: "SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS", value: $selfhosted_global_interval},
+                  {name: "SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS", value: $selfhosted_response_guard},
                   {name: "ANALYSIS_V2_TASKS_ENABLED", value: "true"},
                   {name: "ANALYSIS_V2_WORKER_ENABLED", value: $worker_gate},
                   {name: "ANALYSIS_V2_RECOVERY_ENABLED", value: $recovery_gate},
@@ -1244,6 +1265,9 @@ assert_contains "$temp_dir/unsupported-queue-condition.out" \
 cat >"$temp_dir/runtime.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="quinary"
+SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED="true"
+SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS="750"
+SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS="100"
 EOF
 
 cat >"$temp_dir/runtime-provider-secret.env" <<'EOF'
@@ -1272,6 +1296,9 @@ EOF
 cat >"$temp_dir/runtime-secondary-slot.env" <<'EOF'
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET="test-project-analysis-v2-media"
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT="secondary"
+SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED="true"
+SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS="750"
+SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS="100"
 EOF
 
 cat >"$temp_dir/build.yaml" <<'EOF'
@@ -3026,6 +3053,19 @@ if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
 fi
 assert_contains "$temp_dir/recovery-gate-drift.out" \
   "Cloud Run worker queue, gate, target, or OIDC runtime configuration has drifted"
+
+for selfhosted_global_drift_state in \
+  runtime_selfhosted_global_gate_drift \
+  runtime_selfhosted_global_interval_drift \
+  runtime_selfhosted_response_guard_drift; do
+  if env "${common_env[@]}" "FAKE_GCLOUD_STATE=$selfhosted_global_drift_state" \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --check \
+    >"$temp_dir/$selfhosted_global_drift_state.out" 2>&1; then
+    fail "Cloud Run self-hosted global profile gate drift was accepted: $selfhosted_global_drift_state"
+  fi
+  assert_contains "$temp_dir/$selfhosted_global_drift_state.out" \
+    "Cloud Run worker runtime, scaling, egress, or artifact config has drifted"
+done
 
 for forbidden_runtime_gate in runtime_admission_env runtime_legacy_gate_env; do
   if env "${common_env[@]}" "FAKE_GCLOUD_STATE=$forbidden_runtime_gate" \

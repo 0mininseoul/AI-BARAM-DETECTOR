@@ -204,6 +204,9 @@ GOOGLE_CLOUD_PROJECT=test-project
 GOOGLE_CLOUD_LOCATION=global
 ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET=test-project-analysis-v2-media
 ANALYSIS_V2_APIFY_API_TOKEN_SLOT=quinary
+SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED=true
+SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS=750
+SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS=100
 SUPABASE_SERVICE_ROLE_KEY=SUPABASE_SECRET_SENTINEL_0123456789
 APIFY_QUINARY_API_TOKEN=APIFY_QUINARY_SECRET_SENTINEL_0123456789
 IMAGE_PROXY_SIGNING_SECRET=IMAGE_SIGNING_SECRET_SENTINEL_01234567890123456789
@@ -536,9 +539,57 @@ expected_runtime_keys="$(printf '%s\n' \
   SCRAPER_FOLLOWERS \
   SCRAPER_FOLLOWING \
   SCRAPER_PROFILE \
-  SCRAPER_PROFILES_BATCH | sort)"
+  SCRAPER_PROFILES_BATCH \
+  SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED \
+  SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS \
+  SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS | sort)"
 [[ "$runtime_keys" == "$expected_runtime_keys" ]] \
   || fail "generated runtime manifest key allowlist drifted"
+
+manifest_gate_keys=(
+  SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED
+  SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS
+  SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS
+)
+manifest_gate_wrong_values=(false 749 101)
+manifest_gate_wrong_errors=(
+  "SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED must be true"
+  "SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS must be 750"
+  "SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS must be 100"
+)
+for index in "${!manifest_gate_keys[@]}"; do
+  manifest_gate_key="${manifest_gate_keys[$index]}"
+  missing_source_file="$temp_dir/manifest-$index-missing.env"
+  wrong_source_file="$temp_dir/manifest-$index-wrong.env"
+
+  sed "/^${manifest_gate_key}=/d" "$temp_dir/source.env" >"$missing_source_file"
+  if env \
+    "PATH=$PATH" \
+    "ANALYSIS_V2_MANIFEST_SOURCE_ENV_FILE=$missing_source_file" \
+    "ANALYSIS_V2_ENV_OUTPUT_DIR=$temp_dir/generated" \
+    "ANALYSIS_V2_WORKER_SOURCE_DIR=$repo_dir" \
+    bash "$script_dir/generate-analysis-v2-env-files.sh" \
+    >"$temp_dir/manifest-$index-missing.out" 2>&1; then
+    fail "missing self-hosted global profile manifest value was accepted: $manifest_gate_key"
+  fi
+  assert_contains "$temp_dir/manifest-$index-missing.out" \
+    "required manifest value is missing or invalid: $manifest_gate_key"
+
+  sed "s/^${manifest_gate_key}=.*/${manifest_gate_key}=${manifest_gate_wrong_values[$index]}/" \
+    "$temp_dir/source.env" >"$wrong_source_file"
+  if env \
+    "PATH=$PATH" \
+    "ANALYSIS_V2_MANIFEST_SOURCE_ENV_FILE=$wrong_source_file" \
+    "ANALYSIS_V2_ENV_OUTPUT_DIR=$temp_dir/generated" \
+    "ANALYSIS_V2_WORKER_SOURCE_DIR=$repo_dir" \
+    bash "$script_dir/generate-analysis-v2-env-files.sh" \
+    >"$temp_dir/manifest-$index-wrong.out" 2>&1; then
+    fail "wrong self-hosted global profile manifest value was accepted: $manifest_gate_key"
+  fi
+  assert_contains "$temp_dir/manifest-$index-wrong.out" \
+    "${manifest_gate_wrong_errors[$index]}"
+done
+
 build_keys="$(sed -n 's/^\([A-Z0-9_]*\):.*/\1/p' "$build_file" | sort)"
 expected_build_keys="$(printf '%s\n' \
   NEXT_PUBLIC_SUPABASE_ANON_KEY \
@@ -555,11 +606,13 @@ for sentinel in \
   assert_not_contains "$temp_dir/generator.out" "$sentinel"
 done
 
+mkdir -p "$temp_dir/manifest-source-boundary"
+cp "$temp_dir/source.env" "$temp_dir/manifest-source-boundary/source.env"
 if env \
   "PATH=$PATH" \
-  "ANALYSIS_V2_MANIFEST_SOURCE_ENV_FILE=$repo_dir/.env.local" \
+  "ANALYSIS_V2_MANIFEST_SOURCE_ENV_FILE=$temp_dir/manifest-source-boundary/source.env" \
   "ANALYSIS_V2_ENV_OUTPUT_DIR=$temp_dir/generated" \
-  "ANALYSIS_V2_WORKER_SOURCE_DIR=$repo_dir" \
+  "ANALYSIS_V2_WORKER_SOURCE_DIR=$temp_dir/manifest-source-boundary" \
   bash "$script_dir/generate-analysis-v2-env-files.sh" \
   >"$temp_dir/generator-source-boundary.out" 2>&1; then
   fail "manifest source dotenv inside the worker source was accepted"
