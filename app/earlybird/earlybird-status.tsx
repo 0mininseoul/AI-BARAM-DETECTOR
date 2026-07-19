@@ -111,7 +111,7 @@ export function EarlybirdStatus({ order }: { order: EarlybirdOrderStatusDto }) {
                         label="플랜 내 접수 순번"
                         value={order.planSequence === null
                             ? '결제 확인 후 배정'
-                            : `${order.planSequence}번째 / 10건`}
+                            : `${order.planSequence}번째 / ${order.planCapacity}건`}
                     />
                     <DetailRow label="현재 상태" value={order.displayStatus} />
                 </dl>
