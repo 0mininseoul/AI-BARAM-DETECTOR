@@ -186,6 +186,9 @@ ANALYSIS_V2_WORKER_ENABLED=false
 ANALYSIS_V2_RECOVERY_ENABLED=false
 ANALYSIS_V2_TASKS_CALLER_AUTH_MODE=adc
 PREFLIGHT_TASKS_CALLER_AUTH_MODE=adc
+SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED=true
+SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS=750
+SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS=100
 ```
 
 `ANALYSIS_V2_ADMISSION_ENABLED`는 신규 preflight/분석 생성만 제어한다. 이를 끄더라도 이미 인증된 Cloud Tasks worker와 Scheduler 복구는 계속 실행되도록 `ANALYSIS_V2_WORKER_ENABLED`, `ANALYSIS_V2_RECOVERY_ENABLED`를 별도로 유지한다. worker에는 연결된 서비스 계정 ADC만 사용한다. WIF provider 입력과 Vercel OIDC 값은 넣지 않는다. 배포 스크립트가 이 경계를 검사한다.
@@ -193,6 +196,8 @@ PREFLIGHT_TASKS_CALLER_AUTH_MODE=adc
 두 Cloud Run gate는 배포 입력과 runtime 값이 각각 독립적이며 기본값은 모두 `false`다. 폐기된 `ANALYSIS_V2_WORKER_EXECUTION_ENABLED`를 설정하지 않는다. Vercel intake 전용 `ANALYSIS_V2_ADMISSION_ENABLED`도 Cloud Run revision에 존재하면 안 되며, 배포 스크립트는 두 이름을 기존 revision에서 제거한다.
 
 Cloud Run runtime/build env manifest는 문자열 검색이 아니라 Node ENV parser와 `js-yaml`의 duplicate-엄격 YAML parser로 구조를 읽는다. 인용된 YAML key도 동일한 금지/정확 key 규칙을 적용받고, build manifest는 비어 있지 않은 공개 Supabase 두 key만 허용한다. runtime ENV 형식은 한 줄당 bare key assignment만 허용하며, 복잡한 다중 행 값은 YAML 파일로 표현한다.
+runtime manifest는 self-hosted profile의 전역 시작 예약을 위해 위 세 값을 정확히 포함해야 하며,
+`true`/`750`/`100` 외 값이나 누락은 배포 전과 `--check`에서 모두 거부한다.
 검증이 완료되면 파싱한 JSON 값에서 일회성 0400 YAML snapshot을 생성하고 `gcloud`에는 이 snapshot만 전달한다. 원본 manifest 파일이 배포 중 바뀌거나 symlink target이 교체되어도 업로드 bytes는 바뀌지 않으며, snapshot은 종료 trap에서 삭제된다.
 
 ## 출시 gate 전환 순서

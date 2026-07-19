@@ -23,6 +23,9 @@ Required source dotenv keys:
   GOOGLE_CLOUD_LOCATION
   ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET
   ANALYSIS_V2_APIFY_API_TOKEN_SLOT
+  SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED=true
+  SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS=750
+  SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS=100
 
 Generated files:
   analysis-v2-runtime.yaml  Non-secret worker runtime manifest.
@@ -116,6 +119,9 @@ const project = required('GOOGLE_CLOUD_PROJECT');
 const location = required('GOOGLE_CLOUD_LOCATION');
 const bucket = required('ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET');
 const slot = required('ANALYSIS_V2_APIFY_API_TOKEN_SLOT');
+const globalGateEnabled = required('SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED');
+const globalMinIntervalMs = required('SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS');
+const globalResponseGuardMs = required('SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS');
 
 if (!/^https:\/\/[a-z0-9-]+\.supabase\.co\/?$/i.test(supabaseUrl)) {
   throw new Error('NEXT_PUBLIC_SUPABASE_URL must be an HTTPS Supabase project URL');
@@ -132,6 +138,15 @@ if (!/^[a-z0-9]([a-z0-9-]{1,61}[a-z0-9])$/.test(bucket)) {
 if (!['primary', 'secondary', 'tertiary', 'quaternary', 'quinary'].includes(slot)) {
   throw new Error('ANALYSIS_V2_APIFY_API_TOKEN_SLOT must be explicit and valid');
 }
+if (globalGateEnabled !== 'true') {
+  throw new Error('SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED must be true');
+}
+if (globalMinIntervalMs !== '750') {
+  throw new Error('SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS must be 750');
+}
+if (globalResponseGuardMs !== '100') {
+  throw new Error('SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS must be 100');
+}
 
 const runtime = {
   NEXT_PUBLIC_SUPABASE_URL: supabaseUrl,
@@ -139,6 +154,9 @@ const runtime = {
   GOOGLE_CLOUD_LOCATION: location,
   ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET: bucket,
   ANALYSIS_V2_APIFY_API_TOKEN_SLOT: slot,
+  SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED: globalGateEnabled,
+  SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS: globalMinIntervalMs,
+  SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS: globalResponseGuardMs,
   SCRAPER_PROFILE: 'selfhosted',
   SCRAPER_PROFILES_BATCH: 'selfhosted',
   SCRAPER_FOLLOWERS: 'apify',

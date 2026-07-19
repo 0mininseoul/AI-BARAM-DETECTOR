@@ -16,6 +16,9 @@ readonly DEFAULT_TIMEOUT_SECONDS="300"
 readonly PROVENANCE_LABEL_KEY="analysis-v2-source-commit"
 readonly SERVICE_JSON_NOT_FOUND_STATUS="44"
 readonly REVISION_OBSERVATION_MAX_ATTEMPTS="5"
+readonly SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED="true"
+readonly SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS="750"
+readonly SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS="100"
 readonly -a APIFY_TOKEN_SLOTS=(
   primary
   secondary
@@ -406,6 +409,9 @@ service_runtime_config_matches() {
     --arg runtime_sa "$ANALYSIS_V2_WORKER_RUNTIME_SERVICE_ACCOUNT_EMAIL" \
     --arg bucket "$ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET" \
     --arg slot "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT" \
+    --arg selfhosted_global_gate "$SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED" \
+    --arg selfhosted_global_interval "$SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS" \
+    --arg selfhosted_response_guard "$SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS" \
     --arg apify_env_key "$apify_env_key" \
     --arg supabase_secret "$SUPABASE_SECRET_ID" \
     --arg supabase_version "$supabase_secret_version" \
@@ -467,6 +473,9 @@ service_runtime_config_matches() {
         and ([.spec.template.spec.containers[0].env[]? |
           select(.name == "ANALYSIS_V2_MEDIA_ARTIFACT_BUCKET") | .value] == [$bucket])
         and value("ANALYSIS_V2_APIFY_API_TOKEN_SLOT") == [$slot]
+        and value("SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED") == [$selfhosted_global_gate]
+        and value("SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS") == [$selfhosted_global_interval]
+        and value("SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS") == [$selfhosted_response_guard]
         and secret_ref("SUPABASE_SERVICE_ROLE_KEY"; $supabase_secret; $supabase_version)
         and secret_ref($apify_env_key; $apify_secret; $apify_version)
         and secret_ref("IMAGE_PROXY_SIGNING_SECRET"; $image_secret; $image_version)
@@ -1788,6 +1797,15 @@ if [[ -n "$worker_env_file" ]]; then
   env_json_value_equals "$runtime_env_json" ANALYSIS_V2_APIFY_API_TOKEN_SLOT \
     "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT" \
     || die "runtime env file must set the exact selected ANALYSIS_V2_APIFY_API_TOKEN_SLOT"
+  env_json_value_equals "$runtime_env_json" SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED \
+    "$SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED" \
+    || die "runtime env file must set SELFHOSTED_PROFILE_GLOBAL_GATE_ENABLED=true"
+  env_json_value_equals "$runtime_env_json" SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS \
+    "$SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS" \
+    || die "runtime env file must set SELFHOSTED_PROFILE_GLOBAL_MIN_INTERVAL_MS=750"
+  env_json_value_equals "$runtime_env_json" SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS \
+    "$SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS" \
+    || die "runtime env file must set SELFHOSTED_PROFILE_GLOBAL_RESPONSE_GUARD_MS=100"
   write_env_snapshot "$runtime_env_json" runtime worker_env_deploy_file
 fi
 if [[ -n "$worker_build_env_file" ]]; then
