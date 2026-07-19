@@ -364,6 +364,29 @@ describe('preflight persistence adapter', () => {
         });
     });
 
+    it('persists remaining slot counts into the plan cards snapshot RPC payload', async () => {
+        const rpc = vi.fn(async () => ({ data: true, error: null }));
+        const store = createSupabasePreflightStore({
+            rpc,
+            from: vi.fn() as never,
+        });
+        const snapshot = buildReadyPreflightSnapshot(
+            profile(),
+            'test_entitlement',
+            undefined,
+            { basic: 4, standard: 0 }
+        ) as ReadyPreflightSnapshot;
+
+        await store.finalizeReady(claim(), snapshot);
+
+        expect(rpc).toHaveBeenCalledWith(PREFLIGHT_DATABASE_NAMES.completeRpc, expect.objectContaining({
+            p_plan_cards_snapshot: expect.objectContaining({
+                basic: expect.objectContaining({ remainingSlots: 4 }),
+                standard: expect.objectContaining({ remainingSlots: 0 }),
+            }),
+        }));
+    });
+
     it('maps a conflicting write-once exclusion decision to an immutable error', async () => {
         const store = createSupabasePreflightStore({
             rpc: vi.fn(async () => ({
@@ -646,6 +669,29 @@ describe('preflight worker domain', () => {
             })
         );
         expect(store.finalizeBlocked).not.toHaveBeenCalled();
+    });
+
+    it('fetches remaining slots via the injected dependency and stores them on the ready snapshot', async () => {
+        const store = workerStore();
+        const getRemainingSlots = vi.fn(async () => ({ basic: 4, standard: 0 }));
+
+        await expect(processPreflight(preflightId, {
+            store,
+            getProfile: vi.fn(async () => profile()),
+            providerRunStore: providerRunStore(),
+            getRemainingSlots,
+        })).resolves.toBe('ready');
+
+        expect(getRemainingSlots).toHaveBeenCalledOnce();
+        expect(store.finalizeReady).toHaveBeenCalledWith(
+            expect.objectContaining({ preflightId, claimToken }),
+            expect.objectContaining({
+                plans: expect.arrayContaining([
+                    expect.objectContaining({ planId: 'basic', remainingSlots: 4 }),
+                    expect.objectContaining({ planId: 'standard', remainingSlots: 0 }),
+                ]),
+            })
+        );
     });
 
     it.each([

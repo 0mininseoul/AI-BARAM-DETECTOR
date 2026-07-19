@@ -463,6 +463,7 @@ function planCardsSnapshot(
         detailedMutualLimit: plan.detailedMutualLimit,
         selectionState: plan.selectionState,
         unavailableReason: plan.unavailableReason,
+        remainingSlots: plan.remainingSlots,
     }])) as Record<PlanId, Omit<
         ReadyPreflightSnapshot['plans'][number],
         'planId' | 'pricingVersion' | 'price'
@@ -1092,6 +1093,7 @@ export async function processPreflight(
         providerRunStore?: PreflightProviderRunStore;
         env?: Record<string, string | undefined>;
         observer?: PreflightProcessObserver;
+        getRemainingSlots?: typeof fetchEarlybirdRemainingSlots;
     } = {}
 ): Promise<'noop' | 'ready' | 'blocked'> {
     const store = dependencies.store ?? preflightStore;
@@ -1200,10 +1202,14 @@ export async function processPreflight(
             ...profileObservation,
         });
 
+        const remainingSlotsByPlan = await (
+            dependencies.getRemainingSlots ?? fetchEarlybirdRemainingSlots
+        )();
         const snapshot = buildReadyPreflightSnapshot(
             profile,
             claim.accessMode,
-            claim.catalogSnapshot
+            claim.catalogSnapshot,
+            remainingSlotsByPlan
         );
         if (typeof snapshot === 'string') {
             await store.finalizeBlocked(claim, snapshot);
