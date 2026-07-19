@@ -348,9 +348,7 @@ export default function AnalyzePage() {
                 ) : undefined}
             />
 
-            <main className={`mx-auto max-w-[500px] px-5 pb-16 pt-7 ${
-                readyPreflight ? '' : 'flex min-h-[calc(100dvh-3.5rem)] flex-col justify-center'
-            }`}>
+            <main className="mx-auto max-w-[500px] px-5 pb-16 pt-7">
                 {!preflight ? (
                     <>
                         <Eyebrow>판독 의뢰서 · 대상 지정</Eyebrow>
@@ -490,8 +488,21 @@ export default function AnalyzePage() {
                             </CaseCard>
                         )}
 
+                        {!exclusionDecided && (
+                            <div className="mt-5 border border-line-2 bg-panel px-4 py-3.5">
+                                <p className="flex items-start gap-2.5 text-[13px] leading-relaxed text-fg">
+                                    <span className="mt-1 h-1.5 w-1.5 shrink-0 bg-fg-dim" />
+                                    <span>
+                                        등록한 계정은 판독 후보 목록에서 자동으로 제외됩니다.
+                                        <br />
+                                        <span className="text-fg-dim">해당 없거나 알리고 싶지 않다면 건너뛰어도 괜찮습니다.</span>
+                                    </span>
+                                </p>
+                            </div>
+                        )}
+
                         {exclusionDecided && !readyPreflight && (
-                            <CaseCard className="mt-7 p-6 text-center">
+                            <CaseCard className="mt-7 p-7 text-center">
                                 <div className="mx-auto flex h-14 w-14 items-center justify-center border border-line bg-ink">
                                     <BrandMark size={26} className="anim-blink text-blood" />
                                 </div>
@@ -500,6 +511,12 @@ export default function AnalyzePage() {
                                 </h2>
                                 <p className="mt-2 text-[13px] text-fg-dim" aria-live="polite">
                                     프로필과 계정 규모를 확인하고 있습니다.
+                                </p>
+                                <div className="mt-6 h-1.5 w-full overflow-hidden bg-line">
+                                    <div className="h-full w-1/3 bg-blood anim-indeterminate" />
+                                </div>
+                                <p className="mt-5 text-[12px] text-fg-mute">
+                                    보통 몇 초 이내에 끝나요. 화면을 벗어나도 진행됩니다.
                                 </p>
                             </CaseCard>
                         )}
