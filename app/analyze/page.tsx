@@ -488,19 +488,6 @@ export default function AnalyzePage() {
                             </CaseCard>
                         )}
 
-                        {!exclusionDecided && (
-                            <div className="mt-5 border border-line-2 bg-panel px-4 py-3.5">
-                                <p className="flex items-start gap-2.5 text-[13px] leading-relaxed text-fg">
-                                    <span className="mt-1 h-1.5 w-1.5 shrink-0 bg-fg-dim" />
-                                    <span>
-                                        등록한 계정은 판독 후보 목록에서 자동으로 제외됩니다.
-                                        <br />
-                                        <span className="text-fg-dim">해당 없거나 알리고 싶지 않다면 건너뛰어도 괜찮습니다.</span>
-                                    </span>
-                                </p>
-                            </div>
-                        )}
-
                         {exclusionDecided && !readyPreflight && (
                             <CaseCard className="mt-7 p-7 text-center">
                                 <div className="mx-auto flex h-14 w-14 items-center justify-center border border-line bg-ink">
