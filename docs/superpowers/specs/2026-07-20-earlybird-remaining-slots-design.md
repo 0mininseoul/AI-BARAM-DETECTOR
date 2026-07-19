@@ -3,6 +3,15 @@
 - 날짜: 2026-07-20
 - 브랜치: `feat/earlybird-remaining-slots-realtime` (`main` 기준)
 
+> **[중요: 폐기된 접근 안내]** 이 문서는 `remainingSlots`를 preflight ready 확정 시점에
+> `planCardsSnapshot`에 영속화하는 접근을 설계하고 있으나, 이 접근은 이후 **폐기(superseded)**
+> 되었다. `analysis_v2_valid_plan_cards_snapshot` 제약
+> (`supabase/migrations/20260713142811_add_analysis_v2_preflight.sql:65-72`)이 플랜 카드당
+> 정확히 5개 키만 허용하는 화이트리스트라서, `remainingSlots` 컬럼 영속화가 이 제약에
+> 반려되었기 때문이다. 대신 `remainingSlots`는 **read time**에 `publicPreflightStatusDto`에서
+> 계산되며, preflight 상태 GET 라우트(`app/api/analysis/preflight/[preflightId]/route.ts`)에서
+> 주입된다 — 커밋 `918a13f` 기준. 아래 본문은 폐기된 영속화 설계이므로 참고용으로만 남겨둔다.
+
 ## 배경 / 현재 동작
 
 `earlybird_plan_inventory`(`plan_id, sale_limit, sold_count`)와

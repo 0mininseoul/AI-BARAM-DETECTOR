@@ -2,6 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **[중요: 폐기된 접근 안내]** 이 계획서는 `remainingSlots`를 preflight ready 확정 시점에
+> `planCardsSnapshot`에 영속화하는 접근(아래 Task들)을 지시하고 있으나, 이 접근은 이후
+> **폐기(superseded)** 되었다. `analysis_v2_valid_plan_cards_snapshot` 제약
+> (`supabase/migrations/20260713142811_add_analysis_v2_preflight.sql:65-72`)이 플랜 카드당
+> 정확히 5개 키만 허용하는 화이트리스트라서, `remainingSlots` 컬럼 영속화가 이 제약에
+> 반려되었기 때문이다. 대신 `remainingSlots`는 **read time**에 `publicPreflightStatusDto`에서
+> 계산되며, preflight 상태 GET 라우트(`app/api/analysis/preflight/[preflightId]/route.ts`)에서
+> 주입된다 — 커밋 `918a13f` 기준. 아래 Task 지시는 폐기된 영속화 설계이므로 그대로 따르지 말 것.
+
 **Goal:** preflight가 ready로 확정되는 시점에 `earlybird_plan_inventory`에서 basic/standard 플랜의 실시간 잔여 수량(`remainingSlots`)을 1회 조회해 스냅샷에 실어 영속화하고, `EarlybirdOrderStatusDto`에 플랜 총 한도(`planCapacity`)를 추가해 `earlybird-status.tsx`의 하드코딩된 "10건"을 실데이터로 교체한다.
 
 **Architecture:** `preflight.ts`의 `buildReadyPreflightSnapshot`은 동기 함수로 유지한 채 4번째 파라미터 `remainingSlotsByPlan`을 주입받고, 비동기 DB 조회는 새 헬퍼 `fetchEarlybirdRemainingSlots()`가 담당해 `processPreflight`가 호출 후 결과를 넘긴다. 조회 실패는 빈 맵으로 폴백해 preflight 전체를 실패시키지 않는다. `planCapacity`는 DB를 다시 읽지 않고 `EARLYBIRD_PLAN_CATALOG[planId].serverLimit` 정적 상수를 그대로 노출한다(기존 `PLAN_NAMES` 패턴과 동일). 새 마이그레이션·컬럼·RPC는 추가하지 않는다.
