@@ -26,6 +26,7 @@ import {
     type PlanEligibilityCatalog,
     type PlanId,
 } from '@/lib/domain/analysis/plan-catalog';
+import { PAID_EARLYBIRD_PLAN_IDS } from '@/lib/domain/earlybird/catalog';
 import { CURRENT_ANALYSIS_PIPELINE_VERSION } from '@/lib/domain/analysis/pipeline-version';
 import { RISK_POLICY_VERSION } from '@/lib/domain/analysis/risk-policy';
 import { AI_STAGE_POLICY_VERSION } from '@/lib/services/ai/stage-policy';
@@ -428,6 +429,26 @@ function currentPreflightCatalogSnapshot(): PreflightCatalogSnapshot {
         pricingVersion: PLAN_PRICING_VERSION,
         prices: pricingSnapshot(),
     };
+}
+
+export async function fetchEarlybirdRemainingSlots(): Promise<Partial<Record<PlanId, number>>> {
+    try {
+        const { data, error } = await supabaseAdmin
+            .from('earlybird_plan_inventory')
+            .select('plan_id, sale_limit, sold_count')
+            .in('plan_id', PAID_EARLYBIRD_PLAN_IDS);
+        if (error || !data) return {};
+        return Object.fromEntries(
+            data
+                .filter((row): row is { plan_id: string; sale_limit: number; sold_count: number } =>
+                    (row.plan_id === 'basic' || row.plan_id === 'standard')
+                    && Number.isSafeInteger(row.sale_limit)
+                    && Number.isSafeInteger(row.sold_count))
+                .map(row => [row.plan_id, Math.max(0, row.sale_limit - row.sold_count)])
+        );
+    } catch {
+        return {};
+    }
 }
 
 function planCardsSnapshot(
