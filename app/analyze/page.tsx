@@ -209,7 +209,7 @@ export default function AnalyzePage() {
     const trackPlanSelection = (planId: PlanId) => {
         if (!readyPreflight) return;
         const plan = readyPreflight.plans.find(candidate => candidate.planId === planId);
-        if (!plan || !isEarlybirdPlanSelectable(plan, readyPreflight.requiredPlan)) return;
+        if (!plan || plan.selectionState === 'unavailable') return;
         const key = planSelectedEventKey(
             readyPreflight.preflightId,
             readyPreflight.pricingVersion,
@@ -280,6 +280,9 @@ export default function AnalyzePage() {
                     payload && typeof payload === 'object' && 'code' in payload
                     && payload.code === 'EARLYBIRD_SOLD_OUT'
                 ) {
+                    // Show the error immediately so a slow refresh below can't leave the
+                    // user staring at a disabled button with no feedback.
+                    setError(message);
                     // The one-shot preflight snapshot is now stale; refresh it so the
                     // plan card flips to sold-out copy instead of contradicting this error.
                     await refreshPreflight();

@@ -125,4 +125,28 @@ describe('earlybird analyze UI state', () => {
         expect(notYetOpenCopyIndex).toBeGreaterThan(-1);
         expect(soldOutCardCopyIndex).toBeLessThan(notYetOpenCopyIndex);
     });
+
+    // This is a coarse source scan, not a behavioral test (this repo has no
+    // jsdom/@testing-library, so the hook can't be exercised directly). It
+    // only pins that the stale-preflight refresh after a checkout failure is
+    // gated on the exact EARLYBIRD_SOLD_OUT code, and that there is no other,
+    // unconditional call site — it fails if that gate is removed or
+    // broadened (e.g. to "any error code"), but it cannot verify the runtime
+    // ordering of setError vs. the refresh.
+    it('gates the post-checkout-failure preflight refresh on the exact EARLYBIRD_SOLD_OUT code', () => {
+        const source = readFileSync(new URL('../../../app/analyze/page.tsx', import.meta.url), 'utf8');
+        const soldOutCodeIndex = source.indexOf("'EARLYBIRD_SOLD_OUT'");
+        const refreshCallToken = 'await refreshPreflight()';
+        const refreshCallIndex = source.indexOf(refreshCallToken);
+        expect(soldOutCodeIndex).toBeGreaterThan(-1);
+        expect(refreshCallIndex).toBeGreaterThan(-1);
+        // The exact-code check must precede the refresh call it guards.
+        expect(soldOutCodeIndex).toBeLessThan(refreshCallIndex);
+        // The two must sit in the same small block (no unrelated code
+        // gating the refresh from somewhere else in the file).
+        expect(refreshCallIndex - soldOutCodeIndex).toBeLessThan(600);
+        // There must be exactly one refresh call site, so it can't be moved
+        // outside the gate elsewhere while leaving this occurrence intact.
+        expect(source.indexOf(refreshCallToken, refreshCallIndex + 1)).toBe(-1);
+    });
 });
