@@ -35,7 +35,7 @@ export function LoginModal({
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-5" role="dialog" aria-modal="true" aria-label="로그인">
             <div className="absolute inset-0 bg-ink/80 backdrop-blur-sm" onClick={onClose} />
 
-            <div className="relative w-full max-w-[400px] border border-line bg-ink-2 p-6 shadow-2xl">
+            <div className="relative w-full max-w-[400px] border border-line bg-ink-2 px-6 pb-6 pt-5 shadow-2xl">
                 <button
                     onClick={onClose}
                     aria-label="닫기"
@@ -47,13 +47,13 @@ export function LoginModal({
                 </button>
 
                 <div className="mb-6 text-center">
-                    <div className="mb-4 flex justify-center">
+                    <div className="mb-3 flex justify-center">
                         <div className="flex h-14 w-14 items-center justify-center border border-line bg-ink">
                             <BrandMark size={26} className="text-blood" />
                         </div>
                     </div>
                     <Eyebrow className="justify-center">접근 인증 필요</Eyebrow>
-                    <h2 className="mt-3 text-[19px] font-extrabold tracking-tight text-fg">로그인하고 판독을 시작하세요</h2>
+                    <h2 className="mt-3 text-[22px] font-extrabold tracking-tight text-fg">로그인하고 판독을 시작하세요</h2>
                     <p className="mt-1.5 text-[13px] text-fg-dim">입력한 아이디는 로그인 후 그대로 이어집니다.</p>
                 </div>
 
@@ -69,13 +69,6 @@ export function LoginModal({
                         개인정보처리방침
                     </Link>
                     에 동의하게 됩니다.
-                </p>
-
-                <p className="mt-3 text-center text-[12px] text-fg-mute">
-                    아직 회원이 아니신가요?{' '}
-                    <Link href="/signup" className="font-semibold text-blood underline underline-offset-2 hover:text-blood-2">
-                        회원가입
-                    </Link>
                 </p>
             </div>
         </div>
