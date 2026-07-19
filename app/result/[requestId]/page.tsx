@@ -318,6 +318,7 @@ export default function ResultPage({ params }: PageProps) {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [shareLoading, setShareLoading] = useState(false);
+    const [deleting, setDeleting] = useState(false);
     const [pageAction, setPageAction] = useState<ResultPageAction | null>(null);
     const [pageError, setPageError] = useState<ResultPageAction | null>(null);
     const [pageNavigation, setPageNavigation] = useState(initialResultPageNavigation);
@@ -550,6 +551,25 @@ export default function ResultPage({ params }: PageProps) {
         }
     };
 
+    const handleDelete = async () => {
+        if (!confirm('정말 이 판독 기록을 삭제하시겠습니까? 복구할 수 없습니다.')) return;
+        setDeleting(true);
+        try {
+            const response = await fetch(`/api/analysis/result/${requestId}`, { method: 'DELETE' });
+            if (!response.ok) {
+                alert('삭제에 실패했습니다.');
+                console.error('Analysis deletion request failed', { status: response.status });
+                setDeleting(false);
+                return;
+            }
+            router.push('/mypage');
+        } catch (err) {
+            console.error(err);
+            alert('오류가 발생했습니다.');
+            setDeleting(false);
+        }
+    };
+
     const handleLogout = async () => {
         try {
             const signedOut = await signOutAndClearPendingAnalysisTarget(
@@ -628,7 +648,7 @@ export default function ResultPage({ params }: PageProps) {
                 }
             />
 
-            <main data-amp-block className="mx-auto max-w-[480px] px-5 pt-8">
+            <main data-amp-block className="mx-auto max-w-[480px] px-5 pt-7">
                 {/* case header */}
                 <div className="flex items-center justify-between gap-3">
                     <Eyebrow className="shrink-0">판독 리포트</Eyebrow>
@@ -911,6 +931,24 @@ export default function ResultPage({ params }: PageProps) {
                 <p className="mt-5 text-center text-[11px] text-fg-mute">
                     AI 판독 결과는 100% 정확하지 않으며, 참고용으로만 사용해 주세요.
                 </p>
+
+                <div className="mt-8 border-t border-line pt-6 text-center">
+                    <button
+                        type="button"
+                        onClick={handleDelete}
+                        disabled={deleting}
+                        className="inline-flex items-center gap-1.5 text-[12px] font-medium text-fg-mute transition-colors hover:text-blood disabled:opacity-50"
+                    >
+                        {deleting ? (
+                            <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
+                        ) : (
+                            <svg xmlns="http://www.w3.org/2000/svg" className="h-[15px] w-[15px]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                        )}
+                        {deleting ? '삭제 중…' : '이 판독 기록 삭제'}
+                    </button>
+                </div>
             </main>
         </div>
     );
