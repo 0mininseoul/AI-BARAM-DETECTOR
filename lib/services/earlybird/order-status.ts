@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { supabaseAdmin } from '@/lib/supabase/admin';
+import { EARLYBIRD_PLAN_CATALOG } from '@/lib/domain/earlybird/catalog';
 
 export const earlybirdOrderSystemStatusSchema = z.enum([
     'payment_pending',
@@ -54,6 +55,7 @@ export interface EarlybirdOrderStatusDto {
     targetInstagramId: string;
     planId: 'basic' | 'standard';
     planName: 'Basic' | 'Standard';
+    planCapacity: number;
     actualAmountKrw: number | null;
     acceptedAt: string | null;
     dueAt: string | null;
@@ -113,6 +115,7 @@ export async function loadLatestEarlybirdOrder(
         targetInstagramId: order.target_instagram_id,
         planId: order.plan_id,
         planName: PLAN_NAMES[order.plan_id],
+        planCapacity: EARLYBIRD_PLAN_CATALOG[order.plan_id].serverLimit,
         actualAmountKrw: order.actual_amount_krw,
         acceptedAt: order.paid_at,
         dueAt: order.due_at,
