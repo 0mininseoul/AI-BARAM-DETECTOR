@@ -510,14 +510,31 @@ function resumeAttemptResults(
         : { outcome: result.outcome })) as readonly ProfileAttemptResult[];
 }
 
+/**
+ * Attempt precedence for one username: primary success, then repair, then fallback, then the
+ * primary row itself. The later attempt wins only where the primary did not already succeed,
+ * and the repair outranks the fallback because it is the more recent terminal evidence for
+ * the same username — not because it is more favourable. A repair that failed therefore stays
+ * a failure here and is still counted by `evaluateProfileBatchCompleteness`, which remains the
+ * only 90 percent predicate; repair never buys back failure budget.
+ *
+ * `resume.repairResults` is the server-derived repair attempt the checkpoint carries. It is
+ * read as given and never re-derived: the client-side repair-set prediction in
+ * `v2-profile-fetch-store.ts` decides whether to call the RPC, and is not an authority here.
+ */
 function finalCheckpointResults(resume: AnalysisV2ProfileFetchResume) {
     const fallbackByUsername = new Map(
         resume.fallbackResults.map(result => [result.outcome.requestedUsername, result])
     );
+    const repairByUsername = new Map(
+        resume.repairResults.map(result => [result.outcome.requestedUsername, result])
+    );
     return resume.primaryResults.map(primary => (
         primary.outcome.status === 'success'
             ? primary
-            : fallbackByUsername.get(primary.outcome.requestedUsername) ?? primary
+            : repairByUsername.get(primary.outcome.requestedUsername)
+                ?? fallbackByUsername.get(primary.outcome.requestedUsername)
+                ?? primary
     ));
 }
 

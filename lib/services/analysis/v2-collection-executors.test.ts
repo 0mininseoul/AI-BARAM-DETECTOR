@@ -284,6 +284,52 @@ function completedFallbackResume(
     };
 }
 
+/**
+ * A repair attempt exactly as the resume carries it: the server-derived rows, the frozen
+ * repair username set, and the completion timestamp. The merge under test must read these
+ * rows rather than re-deriving the repair set from the primary and fallback outcomes.
+ */
+function withRepair(
+    resume: AnalysisV2ProfileFetchResume,
+    repairResults: readonly AnalysisV2ProfileFetchResume['repairResults'][number][]
+): AnalysisV2ProfileFetchResume {
+    return {
+        ...resume,
+        repairResults: [...repairResults],
+        repairUsernames: repairResults.map(result => result.outcome.requestedUsername),
+        repairCapturedAt: capturedAt,
+    };
+}
+
+/** An Apify success whose profile is distinguishable from the primary attempt's. */
+function repairSuccess(username: string) {
+    return {
+        ...success(username, 'apify'),
+        profile: { ...profile(username), followersCount: 999 },
+    };
+}
+
+/**
+ * The one durable observable of the merge: the batch result hash is taken over the merged
+ * results in requested order, so a different winner for any username is a different hash.
+ */
+async function profileBatchResultHashOf(
+    resume: AnalysisV2ProfileFetchResume
+): Promise<string> {
+    const usernames = resume.requestedUsernames;
+    const topology = createAnalysisV2CollectionTopology('profiles', usernames);
+    const outcome = await createAnalysisV2ProfileFetchExecutor({
+        requestContextStore: contextStore(requestContext()),
+        evidenceStore: relationshipEvidence(usernames),
+        profileCheckpointStore: inMemoryProfileStore(resume).store,
+    })(stageContext(
+        'profile_fetch',
+        state({ relationships: relationshipManifest(topology) }),
+        0
+    ));
+    return outcome.checkpoint.manifest.resultHash;
+}
+
 function inMemoryProfileStore(initial: AnalysisV2ProfileFetchResume | null) {
     let current = initial;
     const store: AnalysisV2ProfileFetchCheckpointStore = {
@@ -1790,6 +1836,94 @@ describe('analysis V2 concrete collection executors', () => {
         const result = evaluateProfileBatchCompleteness(final, usernames);
 
         expect(result.satisfied).toBe(false);
+    });
+
+    it('keeps a primary success ahead of a repair row for the same username', async () => {
+        const usernames = ['alice', 'bob', 'carol'];
+        // Bob is the only unresolved username and his fallback already succeeded, so nothing
+        // else in this batch depends on the repair route. The server only ever repairs a
+        // merged failure, so a repair row for alice cannot arise in production; the ordering
+        // is pinned regardless, because primary evidence outranks every later attempt.
+        const base = {
+            ...completedFallbackResume(usernames, [failure('bob', 'apify')]),
+            fallbackResults: [success('bob', 'apify')],
+        };
+
+        await expect(profileBatchResultHashOf(withRepair(base, [failure('alice', 'apify')])))
+            .resolves.toBe(await profileBatchResultHashOf(base));
+        await expect(profileBatchResultHashOf(withRepair(base, [repairSuccess('alice')])))
+            .resolves.toBe(await profileBatchResultHashOf(base));
+    });
+
+    it('promotes a repair success over a failed fallback for the same username', async () => {
+        const usernames = ['alice', 'bob', 'carol'];
+        const base = completedFallbackResume(usernames, [failure('bob', 'apify')]);
+        const repaired = { ...base, primaryResults: [
+            base.primaryResults[0]!,
+            repairSuccess('bob'),
+            base.primaryResults[2]!,
+        ], frozenUnresolvedUsernames: [], fallbackResults: [], fallbackCapturedAt: null };
+
+        // Without the repair row the merged outcome is a non-incomplete failure and the gate
+        // rejects the whole batch, so the promotion is the only thing that can pass it.
+        await expect(profileBatchResultHashOf(base))
+            .rejects.toThrow('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
+        await expect(profileBatchResultHashOf(withRepair(base, [repairSuccess('bob')])))
+            .resolves.toBe(await profileBatchResultHashOf(repaired));
+    });
+
+    it('keeps a failed repair as the terminal outcome over a failed fallback', async () => {
+        const usernames = Array.from({ length: 10 }, (_, index) => `user${index}`);
+        const failedUsername = usernames.at(-1)!;
+        const base = completedFallbackResume(usernames, [incompleteFailure(failedUsername)]);
+
+        // One incomplete failure in ten sits inside the 90 percent gate.
+        await expect(profileBatchResultHashOf(base)).resolves.toBeTypeOf('string');
+        // The repair attempt is the most recent terminal evidence and it timed out, so the
+        // merged outcome is a non-incomplete failure and the gate must still reject.
+        await expect(profileBatchResultHashOf(
+            withRepair(base, [failure(failedUsername, 'apify')])
+        )).rejects.toThrow('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
+    });
+
+    it('counts every repaired failure against the 90 percent gate', async () => {
+        const usernames = Array.from({ length: 10 }, (_, index) => `user${index}`);
+        const failedUsernames = usernames.slice(-2);
+        const failures = failedUsernames.map(username => incompleteFailure(username));
+        const base = completedFallbackResume(usernames, failures);
+
+        // Two incomplete failures in ten exceed allowedFailures of one whether the terminal
+        // evidence came from the fallback or the repair: a repair never buys back budget.
+        await expect(profileBatchResultHashOf(withRepair(base, failures)))
+            .rejects.toThrow('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
+        expect(evaluateProfileBatchCompleteness(
+            usernames.map(username => (
+                failedUsernames.includes(username) ? incompleteFailure(username) : success(username)
+            )),
+            usernames
+        )).toMatchObject({ satisfied: false, allowedFailures: 1, failedUsernames });
+    });
+
+    it('leaves an unrepaired batch byte-identical to the fallback-only merge', async () => {
+        const usernames = Array.from({ length: 10 }, (_, index) => `user${index}`);
+        const base = completedFallbackResume(usernames, [incompleteFailure(usernames.at(-1)!)]);
+
+        expect(base.repairResults).toEqual([]);
+        // Golden captured at 592aa50, before the repair route entered the merge at all.
+        await expect(profileBatchResultHashOf(base)).resolves.toBe(
+            '7fcd6fb24e9d7ed7bb89ab13e821d1141fe95040053d4454abed6cc5f20c0813'
+        );
+    });
+
+    it('hashes a repaired batch identically across two evaluations of one checkpoint', async () => {
+        const usernames = ['alice', 'bob', 'carol'];
+        const resume = withRepair(
+            completedFallbackResume(usernames, [failure('bob', 'apify')]),
+            [repairSuccess('bob')]
+        );
+
+        await expect(profileBatchResultHashOf(resume))
+            .resolves.toBe(await profileBatchResultHashOf(resume));
     });
 
     it('rejects wrong batches, girlfriend leakage, ambiguous failures, and ambiguous starts', async () => {
