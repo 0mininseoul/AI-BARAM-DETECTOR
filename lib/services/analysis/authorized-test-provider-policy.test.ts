@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+    AUTHORIZED_TEST_PROVIDER_OPERATION_KINDS,
     assertAuthorizedTestProviderCredentialsAvailable,
+    authorizedTestProviderExecutionPolicySchema,
     configuredAuthorizedTestProviderPolicy,
     resolveAnalysisV2ApifyCredentialSlot,
 } from './authorized-test-provider-policy';
@@ -77,9 +79,64 @@ describe('authorized analysis V2 test provider policy', () => {
             ...authorizedTarget,
             ownerUserId: OTHER_USER_ID,
         }, authorizedEnv)).toBeNull();
-        expect([...ANALYSIS_V2_PROVIDER_OPERATION_KINDS].sort()).toEqual(
-            Object.keys(policy!.operationSlots).sort()
+        // The slot map covers exactly the seven authorized test operations. The provider
+        // operation kinds add 'profile-repair', which owns no slot (it resolves through the
+        // profile-fallback slot), so the two arrays diverge by exactly that one kind.
+        expect(Object.keys(policy!.operationSlots).sort()).toEqual(
+            [...AUTHORIZED_TEST_PROVIDER_OPERATION_KINDS].sort()
         );
+        expect([...ANALYSIS_V2_PROVIDER_OPERATION_KINDS].sort()).toEqual(
+            [...AUTHORIZED_TEST_PROVIDER_OPERATION_KINDS, 'profile-repair'].sort()
+        );
+    });
+
+    it('keeps operationSlots a strict seven-key shape that excludes profile-repair', () => {
+        // A policy persisted per request under the old shape must still parse unchanged.
+        const storedSevenKeyPolicy = {
+            mode: 'test_operation_split',
+            policyVersion: 'authorized-free-e2e-v1',
+            operationSlots: {
+                'target-profile': 'tertiary',
+                'relationship-followers': 'primary',
+                'relationship-following': 'secondary',
+                'profile-fallback': 'tertiary',
+                'target-likers': 'quaternary',
+                'target-comments': 'tertiary',
+                'candidate-likers': 'quinary',
+            },
+        };
+        const parsed = authorizedTestProviderExecutionPolicySchema.parse(storedSevenKeyPolicy);
+        expect(Object.keys(parsed.operationSlots)).toHaveLength(7);
+        expect(Object.keys(parsed.operationSlots).sort()).toEqual(
+            [...AUTHORIZED_TEST_PROVIDER_OPERATION_KINDS].sort()
+        );
+
+        // The tempting-but-wrong widening: adding profile-repair as an eighth slot must be
+        // rejected. The slot map is persisted per request, so an eighth key would invalidate
+        // every stored policy and every in-flight request. Repair uses the profile-fallback slot.
+        const eightKeyPolicy = {
+            ...storedSevenKeyPolicy,
+            operationSlots: {
+                ...storedSevenKeyPolicy.operationSlots,
+                'profile-repair': 'primary',
+            },
+        };
+        expect(
+            authorizedTestProviderExecutionPolicySchema.safeParse(eightKeyPolicy).success
+        ).toBe(false);
+
+        // Dropping any one of the seven required keys must also be rejected.
+        const sixKeySlots = Object.fromEntries(
+            Object.entries(storedSevenKeyPolicy.operationSlots).filter(
+                ([key]) => key !== 'candidate-likers'
+            )
+        );
+        expect(
+            authorizedTestProviderExecutionPolicySchema.safeParse({
+                ...storedSevenKeyPolicy,
+                operationSlots: sixKeySlots,
+            }).success
+        ).toBe(false);
     });
 
     it('fails closed on malformed flags, slot maps, and production policy injection', () => {
