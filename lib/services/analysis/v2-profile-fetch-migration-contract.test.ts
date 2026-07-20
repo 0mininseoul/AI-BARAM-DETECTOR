@@ -15,6 +15,13 @@ const childCaptionMigration = readFileSync(
     ),
     'utf8'
 );
+const repairMigration = readFileSync(
+    new URL(
+        '../../../supabase/migrations/20260720130000_add_analysis_v2_profile_repair_attempt.sql',
+        import.meta.url
+    ),
+    'utf8'
+);
 
 function functionDefinition(name: string, source = migration): string {
     const start = source.indexOf(`CREATE OR REPLACE FUNCTION public.${name}(`);
@@ -181,5 +188,139 @@ describe('analysis V2 profile checkpoint migration contract', () => {
         expect(migration).not.toMatch(
             /GRANT EXECUTE ON FUNCTION public\.analysis_v2_profile_checkpoint_snapshot/g
         );
+    });
+});
+
+describe('analysis V2 profile repair attempt migration contract', () => {
+    it('widens the attempt and source domains as strict supersets', () => {
+        expect(repairMigration).toContain(
+            "attempt IN ('primary', 'fallback', 'repair')"
+        );
+        expect(repairMigration).toContain(
+            "(attempt = 'primary' AND source IN ('cache', 'selfhosted'))"
+        );
+        expect(repairMigration).toContain(
+            "OR (attempt IN ('fallback', 'repair') AND source = 'apify')"
+        );
+        expectInOrder(repairMigration, [
+            'DROP CONSTRAINT analysis_v2_profile_outcomes_attempt_check',
+            'ADD CONSTRAINT analysis_v2_profile_outcomes_attempt_check',
+            'DROP CONSTRAINT analysis_v2_profile_outcomes_source_check',
+            'ADD CONSTRAINT analysis_v2_profile_outcomes_source_check',
+        ]);
+    });
+
+    it('adds nullable repair bookkeeping guarded by pair, hash, subset and order checks', () => {
+        for (const column of [
+            'ADD COLUMN repair_usernames TEXT[]',
+            'ADD COLUMN repair_payload_hash VARCHAR(64)',
+            'ADD COLUMN repair_completed_at TIMESTAMP WITH TIME ZONE',
+        ]) {
+            expect(repairMigration).toContain(column);
+        }
+        for (const constraint of [
+            'analysis_v2_profile_batches_repair_pair_check',
+            'analysis_v2_profile_batches_repair_hash_check',
+            'analysis_v2_profile_batches_repair_subset_check',
+            'analysis_v2_profile_batches_repair_order_check',
+        ]) {
+            expect(repairMigration).toContain(`ADD CONSTRAINT ${constraint}`);
+        }
+        expect(repairMigration).toContain(
+            'repair_usernames <@ frozen_unresolved_usernames'
+        );
+        expect(repairMigration).toContain(
+            'AND repair_completed_at >= fallback_completed_at'
+        );
+    });
+
+    it('accepts the third attempt in the shared outcome validator only for apify', () => {
+        const validator = functionDefinition(
+            'analysis_v2_valid_profile_outcomes',
+            repairMigration
+        );
+        expect(validator).toContain("SET search_path = ''");
+        expect(validator).toContain("p_attempt IN ('primary', 'fallback', 'repair')");
+        expect(validator).toContain("p_attempt IN ('fallback', 'repair')");
+        expect(validator).toContain("outcome.value->>'source' <> 'apify'");
+        expect(validator).toContain(
+            "p_attempt = 'primary'\n                    AND outcome.value->>'source' NOT IN ('cache', 'selfhosted')"
+        );
+        expect(validator).not.toContain("p_attempt = 'fallback'");
+    });
+
+    it('derives the repair set server-side and never repairs unavailable usernames', () => {
+        const derived = functionDefinition(
+            'analysis_v2_profile_repair_username_set',
+            repairMigration
+        );
+        expect(derived).toContain('SECURITY DEFINER');
+        expect(derived).toContain("SET search_path = ''");
+        expect(derived).toContain(
+            'COALESCE(fallback_outcome.status, primary_outcome.status) AS status'
+        );
+        expect(derived).toContain('ORDER BY merged.ordinal');
+        expect(derived).toContain("WHERE merged.status = 'failed'");
+        expect(derived).toContain("primary_outcome.status <> 'success'");
+        expect(repairMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.analysis_v2_profile_repair_username_set\(UUID, TEXT\)\s+FROM PUBLIC, anon, authenticated, service_role/
+        );
+        expect(repairMigration).not.toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.analysis_v2_profile_repair_username_set/
+        );
+    });
+
+    it('exposes the repair attempt through the resume snapshot', () => {
+        const snapshot = functionDefinition(
+            'analysis_v2_profile_checkpoint_snapshot',
+            repairMigration
+        );
+        expect(snapshot.match(/ORDER BY outcome\.ordinal/g)).toHaveLength(3);
+        expect(snapshot).toContain("'repairResults'");
+        expect(snapshot).toContain("'repairUsernames'");
+        expect(snapshot).toContain("'repairCapturedAt'");
+        expect(snapshot).toContain("outcome.attempt = 'repair'");
+    });
+
+    it('mirrors the fallback lock order, fence and idempotency in the repair RPC', () => {
+        const repair = functionDefinition(
+            'checkpoint_analysis_v2_profile_repair',
+            repairMigration
+        );
+        expect(repair).not.toContain('p_requested_usernames');
+        expectInOrder(repair, [
+            'FROM public.analysis_preflights AS preflight',
+            'FROM public.analysis_requests AS analysis_request',
+            'FROM public.analysis_pipeline_jobs AS job',
+            'v_completed_at := pg_catalog.clock_timestamp()',
+            'v_job.input_hash IS DISTINCT FROM p_job_input_hash',
+            'v_job.lease_token IS DISTINCT FROM p_claim_token',
+            "MESSAGE = 'ANALYSIS_V2_PROFILE_CHECKPOINT_FENCE_MISMATCH'",
+            'FROM public.analysis_v2_profile_fetch_batches AS batch',
+            'v_job.lease_expires_at <= v_completed_at',
+            'public.analysis_v2_profile_repair_username_set(p_request_id, p_job_key)',
+            'v_batch.fallback_completed_at IS NULL',
+            'pg_catalog.cardinality(v_repair) = 0',
+            "'repair'",
+            "MESSAGE = 'ANALYSIS_V2_PROFILE_CHECKPOINT_NOT_READY'",
+            'v_batch.repair_completed_at IS NOT NULL',
+            'v_batch.repair_payload_hash <> v_payload_hash',
+            "MESSAGE = 'ANALYSIS_V2_PROFILE_REPAIR_CONFLICT'",
+            'INSERT INTO public.analysis_v2_profile_fetch_outcomes',
+            "'repair'",
+            'SET repair_usernames = v_repair',
+        ]);
+        expect(repair.indexOf('ANALYSIS_V2_PROFILE_CHECKPOINT_FENCE_MISMATCH'))
+            .toBeLessThan(repair.indexOf('v_batch.repair_completed_at IS NOT NULL'));
+    });
+
+    it('grants only the repair RPC to service_role', () => {
+        expect(repairMigration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.checkpoint_analysis_v2_profile_repair\(\s*UUID, TEXT, UUID, TEXT, JSONB\s*\)\s*FROM PUBLIC, anon, authenticated, service_role/
+        );
+        expect(repairMigration).toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.checkpoint_analysis_v2_profile_repair\(/
+        );
+        expect(repairMigration.match(/GRANT EXECUTE ON FUNCTION/g)).toHaveLength(1);
     });
 });
