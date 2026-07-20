@@ -632,6 +632,22 @@ function durableSuccessfulProfiles(
     });
 }
 
+export function evaluateProfileBatchCompleteness(
+    final: readonly AnalysisV2CheckpointResult[],
+    requestedUsernames: readonly string[]
+): { satisfied: boolean; failedUsernames: readonly string[]; allowedFailures: number } {
+    const failed = final.filter(result => result.outcome.status === 'failed');
+    const allowedFailures = requestedUsernames.length - Math.ceil(0.9 * requestedUsernames.length);
+    const satisfied = final.length === requestedUsernames.length
+        && failed.length <= allowedFailures
+        && failed.every(result => result.outcome.failureCategory === 'incomplete');
+    return {
+        satisfied,
+        failedUsernames: failed.map(result => result.outcome.requestedUsername),
+        allowedFailures,
+    };
+}
+
 function durableTerminalProfileResults(
     resume: AnalysisV2ProfileFetchResume,
     requestedUsernames: readonly string[]
@@ -643,14 +659,7 @@ function durableTerminalProfileResults(
         throw new Error('ANALYSIS_V2_PROFILE_BATCH_IDENTITY_DRIFT');
     }
     const final = finalCheckpointResults(resume);
-    const failed = final.filter(result => result.outcome.status === 'failed');
-    const allowedIncompleteFailures = requestedUsernames.length
-        - Math.ceil(0.9 * requestedUsernames.length);
-    if (
-        final.length !== requestedUsernames.length
-        || failed.length > allowedIncompleteFailures
-        || failed.some(result => result.outcome.failureCategory !== 'incomplete')
-    ) {
+    if (!evaluateProfileBatchCompleteness(final, requestedUsernames).satisfied) {
         throw new Error('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
     }
     return final;

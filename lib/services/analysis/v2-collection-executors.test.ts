@@ -9,6 +9,7 @@ import type { AnalysisV2DagState } from './v2-dag-planner';
 import type { AnalysisV2EvidenceStore } from './v2-evidence-store';
 import type { AnalysisV2TargetEvidenceCheckpointInput } from './v2-evidence-store';
 import type {
+    AnalysisV2CheckpointResult,
     AnalysisV2ProfileAttemptResultInput,
     AnalysisV2ProfileFetchCheckpointStore,
     AnalysisV2ProfileFetchResume,
@@ -30,6 +31,7 @@ import {
     createAnalysisV2ProfileFetchExecutor,
     createAnalysisV2RelationshipsExecutor,
     createAnalysisV2TargetEvidenceExecutor,
+    evaluateProfileBatchCompleteness,
 } from './v2-collection-executors';
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
@@ -1690,6 +1692,88 @@ describe('analysis V2 concrete collection executors', () => {
 
         expect(getPostLikers).not.toHaveBeenCalled();
         expect(getPostComments).not.toHaveBeenCalled();
+    });
+
+    it('evaluateProfileBatchCompleteness accepts exactly 90 percent coverage with three incomplete failures in 30', () => {
+        const usernames = Array.from({ length: 30 }, (_, index) => `user${index}`);
+        const failedUsernames = usernames.slice(-3);
+        const final = usernames.map(username => (
+            failedUsernames.includes(username) ? incompleteFailure(username) : success(username)
+        ));
+
+        const result = evaluateProfileBatchCompleteness(final, usernames);
+
+        expect(result.satisfied).toBe(true);
+        expect(result.allowedFailures).toBe(3);
+        expect(result.failedUsernames).toEqual(failedUsernames);
+    });
+
+    it('evaluateProfileBatchCompleteness accepts the rounded 90 percent boundary with two incomplete failures in 27', () => {
+        const usernames = Array.from({ length: 27 }, (_, index) => `user${index}`);
+        const failedUsernames = usernames.slice(-2);
+        const final = usernames.map(username => (
+            failedUsernames.includes(username) ? incompleteFailure(username) : success(username)
+        ));
+
+        const result = evaluateProfileBatchCompleteness(final, usernames);
+
+        expect(result.satisfied).toBe(true);
+        expect(result.allowedFailures).toBe(2);
+        expect(result.failedUsernames).toEqual(failedUsernames);
+    });
+
+    it('evaluateProfileBatchCompleteness rejects three incomplete failures in 28 with allowedFailures of two', () => {
+        const usernames = Array.from({ length: 28 }, (_, index) => `user${index}`);
+        const failedUsernames = usernames.slice(-3);
+        const final = usernames.map(username => (
+            failedUsernames.includes(username) ? incompleteFailure(username) : success(username)
+        ));
+
+        const result = evaluateProfileBatchCompleteness(final, usernames);
+
+        expect(result.satisfied).toBe(false);
+        expect(result.allowedFailures).toBe(2);
+    });
+
+    it('evaluateProfileBatchCompleteness rejects a non-incomplete failure within the numeric bound', () => {
+        const usernames = Array.from({ length: 30 }, (_, index) => `user${index}`);
+        const failedUsername = usernames.at(-1)!;
+        const final = usernames.map(username => (
+            username === failedUsername ? failure(username, 'apify') : success(username)
+        ));
+
+        const result = evaluateProfileBatchCompleteness(final, usernames);
+
+        expect(result.satisfied).toBe(false);
+    });
+
+    it('evaluateProfileBatchCompleteness never counts unavailable results and excludes them from failedUsernames', () => {
+        const usernames = Array.from({ length: 28 }, (_, index) => `user${index}`);
+        const incompleteUsernames = usernames.slice(-3, -1);
+        const unavailableUsername = usernames.at(-1)!;
+        const final = usernames.map((username): AnalysisV2CheckpointResult => {
+            if (incompleteUsernames.includes(username)) return incompleteFailure(username);
+            if (username === unavailableUsername) {
+                return unavailable(username) as AnalysisV2CheckpointResult;
+            }
+            return success(username);
+        });
+
+        const result = evaluateProfileBatchCompleteness(final, usernames);
+
+        expect(result.satisfied).toBe(true);
+        expect(result.allowedFailures).toBe(2);
+        expect(result.failedUsernames).toEqual(incompleteUsernames);
+        expect(result.failedUsernames).not.toContain(unavailableUsername);
+    });
+
+    it('evaluateProfileBatchCompleteness rejects a length mismatch between final results and requested usernames', () => {
+        const usernames = ['alice', 'bob', 'carol', 'dave', 'erin'];
+        const final = usernames.slice(0, 4).map(username => success(username));
+
+        const result = evaluateProfileBatchCompleteness(final, usernames);
+
+        expect(result.satisfied).toBe(false);
     });
 
     it('rejects wrong batches, girlfriend leakage, ambiguous failures, and ambiguous starts', async () => {
