@@ -440,6 +440,36 @@ describe('analysis V2 reverse-like production collector', () => {
         expect(bindAdapterCheckpoint).toHaveBeenCalledTimes(2);
     });
 
+    it('never confirms absence when the provider hid the declared liker count', async () => {
+        const providerRunStore = {
+            bindAdapterCheckpoint: vi.fn(async () => ({ stored: null, checkpoint: {} })),
+            load: vi.fn(async () => ({ status: 'succeeded', runId: 'RUN123456' })),
+        } as unknown as AnalysisV2ProviderRunStore;
+        const collector = createAnalysisV2ReverseLikeCollector({
+            providerRunStore,
+            contextStore: reverseLikeContext(),
+            adapter: { getPostLikers: vi.fn(async () => []), getPostComments: vi.fn() },
+            env: {},
+        });
+
+        const result = await collector.collect({
+            requestId,
+            jobKey: 'track:reverse-likes:collect',
+            claimToken,
+            jobInputHash: consumerInputHash,
+            targetUsername: 'target.account',
+            candidates: [{
+                candidateId: 'candidate:a',
+                postUrl: 'https://instagram.com/p/POST_A/',
+                declaredLikesCount: 0,
+                declaredLikesCountKnown: false,
+            }],
+            limitPerPost: 100,
+        });
+
+        expect(result.results).toEqual([{ candidateId: 'candidate:a', status: 'not_collected' }]);
+    });
+
     it('does not reserve or call a paid provider when no shortlist post is collectable', async () => {
         const bindAdapterCheckpoint = vi.fn();
         const getPostLikers = vi.fn();

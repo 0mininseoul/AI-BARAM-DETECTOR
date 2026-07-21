@@ -39,6 +39,10 @@ export interface InstagramPost {
     childrenComplete?: boolean;
     likesCount: number;
     commentsCount: number;
+    /** True when the provider returned its documented hidden-count sentinel. */
+    likesCountHidden?: true;
+    /** True when the provider returned its documented hidden-count sentinel. */
+    commentsCountHidden?: true;
     timestamp: string;
     taggedUsers: string[];
     mentionedUsers: string[];

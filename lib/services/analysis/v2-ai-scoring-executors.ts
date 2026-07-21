@@ -340,6 +340,7 @@ export interface AnalysisV2ReverseLikeCollectionInput {
     candidateId: string;
     postUrl: string;
     declaredLikesCount: number;
+    declaredLikesCountKnown?: boolean;
 }
 
 export interface AnalysisV2ReverseLikeCollectionResult {
@@ -736,6 +737,7 @@ function relationshipRowsByBatch(
 function latestPostLikeScope(profile: AnalysisV2CheckpointProfile): Readonly<{
     postUrl: string;
     declaredLikesCount: number;
+    declaredLikesCountKnown: boolean;
 }> | null {
     const post = profile.latestPosts?.slice().sort((left, right) => (
         Date.parse(right.timestamp) - Date.parse(left.timestamp)
@@ -746,6 +748,7 @@ function latestPostLikeScope(profile: AnalysisV2CheckpointProfile): Readonly<{
     return Object.freeze({
         postUrl: `https://www.instagram.com/${kind}/${post.shortCode}/`,
         declaredLikesCount: post.likesCount,
+        declaredLikesCountKnown: post.likesCountHidden !== true,
     });
 }
 

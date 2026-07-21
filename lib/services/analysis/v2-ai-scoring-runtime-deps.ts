@@ -391,6 +391,8 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                 postUrl: canonicalPostUrl(candidate.postUrl),
                 declaredLikesCount: z.number().int().min(0).max(2_000_000_000)
                     .parse(candidate.declaredLikesCount),
+                declaredLikesCountKnown: z.boolean().default(true)
+                    .parse(candidate.declaredLikesCountKnown),
             }));
             if (
                 new Set(candidates.map(row => row.candidateId)).size !== candidates.length
@@ -399,13 +401,14 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                 throw new Error('ANALYSIS_V2_REVERSE_LIKE_SCOPE_MISMATCH');
             }
             const canonicalInput = [
-                'candidate-likers-v2',
+                'candidate-likers-v3',
                 targetUsername,
                 String(REVERSE_LIKE_LIMIT),
                 ...candidates.flatMap(row => [
                     row.candidateId,
                     row.postUrl,
                     String(row.declaredLikesCount),
+                    String(row.declaredLikesCountKnown),
                 ]),
             ].map(lengthPrefixed).join('\n');
             const operationKey = createAnalysisV2ProviderOperationKey(
@@ -467,7 +470,8 @@ export function createAnalysisV2ReverseLikeCollector(input: {
                         ...usernamesByCandidate.get(candidate.candidateId)!,
                     ]);
                     const targetObserved = likerUsernames.includes(targetUsername);
-                    const globalAbsenceConfirmed = candidate.declaredLikesCount <= REVERSE_LIKE_LIMIT
+                    const globalAbsenceConfirmed = candidate.declaredLikesCountKnown
+                        && candidate.declaredLikesCount <= REVERSE_LIKE_LIMIT
                         && likerUsernames.length >= candidate.declaredLikesCount;
                     return Object.freeze({
                         candidateId: candidate.candidateId,

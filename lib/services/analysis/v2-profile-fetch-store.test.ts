@@ -340,6 +340,44 @@ describe('analysis V2 profile fetch checkpoint store', () => {
         )).toEqual(['child-a', 'child-b', 'child-c']);
     });
 
+    it('persists hidden engagement visibility with normalized non-negative counts', async () => {
+        const mappedProfile = profile('alice', 1);
+        mappedProfile.latestPosts![0] = post(0, {
+            likesCount: 0,
+            commentsCount: 0,
+            likesCountHidden: true,
+            commentsCountHidden: true,
+        });
+        const snapshot = resume({
+            requestedUsernames: ['alice'],
+            frozenUnresolvedUsernames: [],
+            primaryResults: [{
+                outcome: outcome({ username: 'alice', status: 'success' }),
+                profile: mappedProfile,
+            }],
+        });
+        const fake = clientWith({ data: snapshot, error: null });
+        const store = createAnalysisV2ProfileFetchCheckpointStore(fake.client);
+
+        await store.checkpointPrimary({
+            ...checkpointIdentity,
+            requestedUsernames: ['alice'],
+            results: [{
+                outcome: outcome({ username: 'alice', status: 'success' }),
+                profile: mappedProfile,
+            }],
+        });
+
+        const persisted = fake.rpc.mock.calls[0]![1].p_outcomes;
+        if (!Array.isArray(persisted)) throw new Error('outcome fixture mismatch');
+        expect(persisted[0].profile.latestPosts[0]).toMatchObject({
+            likesCount: 0,
+            commentsCount: 0,
+            likesCountHidden: true,
+            commentsCountHidden: true,
+        });
+    });
+
     it('fails explicitly before persistence when required ordering evidence is missing', async () => {
         const invalidProfile = profile('alice');
         invalidProfile.latestPosts![0] = post(0, { timestamp: '' });
