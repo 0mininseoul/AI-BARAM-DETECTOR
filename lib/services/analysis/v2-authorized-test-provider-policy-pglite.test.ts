@@ -13,7 +13,7 @@ const migration = readFileSync(
 
 const profileRepairPolicyMigration = readFileSync(
     new URL(
-        '../../../supabase/migrations/20260722100000_fix_authorized_profile_repair_slot_policy.sql',
+        '../../../supabase/migrations/20260722103000_fix_authorized_profile_repair_slot_policy.sql',
         import.meta.url
     ),
     'utf8'
