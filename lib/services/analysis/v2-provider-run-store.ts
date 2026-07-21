@@ -21,6 +21,7 @@ const MAX_PROVIDER_CHARGE_USD = 100_000;
 export const ANALYSIS_V2_PROVIDER_OPERATION_KINDS = [
     'target-profile',
     'profile-fallback',
+    'profile-repair',
     'relationship-followers',
     'relationship-following',
     'target-likers',
@@ -31,7 +32,7 @@ export const ANALYSIS_V2_PROVIDER_OPERATION_KINDS = [
 export type AnalysisV2ProviderOperationKind =
     typeof ANALYSIS_V2_PROVIDER_OPERATION_KINDS[number];
 
-const OPERATION_KEY_PATTERN = new RegExp(
+export const OPERATION_KEY_PATTERN = new RegExp(
     `^(?:${ANALYSIS_V2_PROVIDER_OPERATION_KINDS.join('|')}):[0-9a-f]{64}$`
 );
 

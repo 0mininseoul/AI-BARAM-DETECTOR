@@ -9,6 +9,7 @@ import type { AnalysisV2DagState } from './v2-dag-planner';
 import type { AnalysisV2EvidenceStore } from './v2-evidence-store';
 import type { AnalysisV2TargetEvidenceCheckpointInput } from './v2-evidence-store';
 import type {
+    AnalysisV2CheckpointResult,
     AnalysisV2ProfileAttemptResultInput,
     AnalysisV2ProfileFetchCheckpointStore,
     AnalysisV2ProfileFetchResume,
@@ -30,6 +31,7 @@ import {
     createAnalysisV2ProfileFetchExecutor,
     createAnalysisV2RelationshipsExecutor,
     createAnalysisV2TargetEvidenceExecutor,
+    evaluateProfileBatchCompleteness,
 } from './v2-collection-executors';
 
 vi.mock('@/lib/supabase/admin', () => ({ supabaseAdmin: {} }));
@@ -244,6 +246,11 @@ function unavailable(username: string) {
     };
 }
 
+/** No repair attempt was made, which is the shape every snapshot below still has. */
+function unrepaired() {
+    return { repairResults: [], repairUsernames: null, repairCapturedAt: null };
+}
+
 function completedResume(
     usernames: readonly string[],
     profiles: AnalysisV2ProfileFetchResume['primaryResults'] =
@@ -258,6 +265,7 @@ function completedResume(
         fallbackResults: [],
         primaryCapturedAt: capturedAt,
         fallbackCapturedAt: null,
+        ...unrepaired(),
     };
 }
 
@@ -274,6 +282,57 @@ function completedFallbackResume(
         fallbackResults: [...finalFailures],
         fallbackCapturedAt: capturedAt,
     };
+}
+
+/**
+ * A repair attempt exactly as the resume carries it: the server-derived rows, the frozen
+ * repair username set, and the completion timestamp. The merge under test must read these
+ * rows rather than re-deriving the repair set from the primary and fallback outcomes.
+ */
+function withRepair(
+    resume: AnalysisV2ProfileFetchResume,
+    repairResults: readonly AnalysisV2ProfileFetchResume['repairResults'][number][]
+): AnalysisV2ProfileFetchResume {
+    return {
+        ...resume,
+        repairResults: [...repairResults],
+        repairUsernames: repairResults.map(result => result.outcome.requestedUsername),
+        repairCapturedAt: capturedAt,
+    };
+}
+
+/** An Apify success whose profile is distinguishable from the primary attempt's. */
+function repairSuccess(username: string) {
+    return {
+        ...success(username, 'apify'),
+        profile: { ...profile(username), followersCount: 999 },
+    };
+}
+
+/**
+ * The one durable observable of the merge: the batch result hash is taken over the merged
+ * results in requested order, so a different winner for any username is a different hash.
+ */
+async function profileBatchResultHashOf(
+    resume: AnalysisV2ProfileFetchResume
+): Promise<string> {
+    const usernames = resume.requestedUsernames;
+    const topology = createAnalysisV2CollectionTopology('profiles', usernames);
+    const outcome = await createAnalysisV2ProfileFetchExecutor({
+        requestContextStore: contextStore(requestContext()),
+        evidenceStore: relationshipEvidence(usernames),
+        profileCheckpointStore: inMemoryProfileStore(resume).store,
+        // The merge is what is under test, not the seam. A resume that already carries a repair
+        // attempt short-circuits before the runner; one that does not and fails the gate would
+        // trigger a real paid run, so a runner that resolves nothing keeps the gate observable.
+        runProfileRepair: repairRunner(),
+        providerRunStore: providerStore().value,
+    })(stageContext(
+        'profile_fetch',
+        state({ relationships: relationshipManifest(topology) }),
+        0
+    ));
+    return outcome.checkpoint.manifest.resultHash;
 }
 
 function inMemoryProfileStore(initial: AnalysisV2ProfileFetchResume | null) {
@@ -300,6 +359,7 @@ function inMemoryProfileStore(initial: AnalysisV2ProfileFetchResume | null) {
                 fallbackResults: [],
                 primaryCapturedAt: capturedAt,
                 fallbackCapturedAt: null,
+                ...unrepaired(),
             };
             return current;
         }),
@@ -314,9 +374,38 @@ function inMemoryProfileStore(initial: AnalysisV2ProfileFetchResume | null) {
             };
             return current;
         }),
+        checkpointRepair: vi.fn(async (input: {
+            results: readonly AnalysisV2ProfileAttemptResultInput[];
+        }) => {
+            if (!current || current.fallbackCapturedAt === null) {
+                throw new Error('ANALYSIS_V2_PROFILE_CHECKPOINT_NOT_READY');
+            }
+            const results = input.results as AnalysisV2ProfileFetchResume['repairResults'];
+            current = {
+                ...current,
+                repairResults: [...results],
+                repairUsernames: results.map(result => result.outcome.requestedUsername),
+                repairCapturedAt: capturedAt,
+            };
+            return current;
+        }),
         purgeTerminal: vi.fn(async () => 0),
     };
     return { store, current: () => current };
+}
+
+/**
+ * A repair runner fake that returns caller-supplied outcomes for the repair set. Default is one
+ * apify failure per requested username — a repair that resolved nothing — so the batch gate is
+ * exercised exactly as it was before the seam existed unless a test asks for successes.
+ */
+function repairRunner(
+    outcomeFor: (username: string) => AnalysisV2ProfileFetchResume['repairResults'][number]
+        = username => failure(username, 'apify') as AnalysisV2ProfileFetchResume['repairResults'][number]
+) {
+    return vi.fn(async (input: { usernames: readonly string[] }) => (
+        input.usernames.map(outcomeFor) as unknown as ProfileAttemptResult[]
+    ));
 }
 
 function storedRun(
@@ -1302,6 +1391,7 @@ describe('analysis V2 concrete collection executors', () => {
             fallbackResults: [],
             primaryCapturedAt: capturedAt,
             fallbackCapturedAt: null,
+            ...unrepaired(),
         });
         const providers = providerStore();
         const reusable = reusableTargetProfileRunStore();
@@ -1383,6 +1473,7 @@ describe('analysis V2 concrete collection executors', () => {
             fallbackResults: [],
             primaryCapturedAt: capturedAt,
             fallbackCapturedAt: null,
+            ...unrepaired(),
         });
         const reusable = reusableTargetProfileRunStore();
         const fallback = [success('alice', 'apify')] as ProfileAttemptResult[];
@@ -1440,6 +1531,7 @@ describe('analysis V2 concrete collection executors', () => {
                 fallbackResults: [],
                 primaryCapturedAt: capturedAt,
                 fallbackCapturedAt: null,
+                ...unrepaired(),
             };
             const replacement = inMemoryProfileStore(next);
             vi.mocked(profileStore.store.load).mockImplementation(replacement.store.load);
@@ -1547,6 +1639,7 @@ describe('analysis V2 concrete collection executors', () => {
             fallbackResults: [],
             primaryCapturedAt: capturedAt,
             fallbackCapturedAt: null,
+            ...unrepaired(),
         });
         const reportActiveProfile = vi.fn(async () => undefined);
         const fetcher = vi.fn(async (
@@ -1635,17 +1728,22 @@ describe('analysis V2 concrete collection executors', () => {
         });
     });
 
-    it('rejects candidate coverage below 90 percent', async () => {
+    it('rejects candidate coverage below 90 percent even after a repair that resolves nothing', async () => {
         const usernames = Array.from({ length: 30 }, (_, index) => `user${index}`);
         const failures = usernames.slice(-4).map(username => incompleteFailure(username));
         const topology = createAnalysisV2CollectionTopology('profiles', usernames);
 
+        // Four failures in thirty exceed the three-failure budget. The seam attempts a repair
+        // that comes back still failing, so the gate must still reject: repair adds a route to
+        // success, never budget.
         await expect(createAnalysisV2ProfileFetchExecutor({
             requestContextStore: contextStore(requestContext()),
             evidenceStore: relationshipEvidence(usernames),
             profileCheckpointStore: inMemoryProfileStore(
                 completedFallbackResume(usernames, failures)
             ).store,
+            runProfileRepair: repairRunner(),
+            providerRunStore: providerStore().value,
         })(stageContext(
             'profile_fetch',
             state({ relationships: relationshipManifest(topology) }),
@@ -1661,10 +1759,15 @@ describe('analysis V2 concrete collection executors', () => {
         ]);
         const topology = createAnalysisV2CollectionTopology('profiles', usernames);
 
+        // A single non-incomplete failure sits inside the numeric bound but is not `incomplete`,
+        // so the gate rejects it; the repair likewise returns a non-incomplete failure and cannot
+        // launder it into a pass.
         await expect(createAnalysisV2ProfileFetchExecutor({
             requestContextStore: contextStore(requestContext()),
             evidenceStore: relationshipEvidence(usernames),
             profileCheckpointStore: inMemoryProfileStore(resume).store,
+            runProfileRepair: repairRunner(),
+            providerRunStore: providerStore().value,
         })(stageContext(
             'profile_fetch',
             state({ relationships: relationshipManifest(topology) }),
@@ -1679,17 +1782,304 @@ describe('analysis V2 concrete collection executors', () => {
         });
         const getPostLikers = vi.fn();
         const getPostComments = vi.fn();
+        const runProfileRepair = repairRunner();
 
         await expect(createAnalysisV2TargetEvidenceExecutor({
             requestContextStore: contextStore(requestContext()),
             profileCheckpointStore: profileStore.store,
             interactionAdapter: { getPostLikers, getPostComments },
+            runProfileRepair,
         })(stageContext('target_evidence', state()))).rejects.toThrow(
             'ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE'
         );
 
         expect(getPostLikers).not.toHaveBeenCalled();
         expect(getPostComments).not.toHaveBeenCalled();
+        // Repair belongs to the profile-fetch stage only; the target-evidence path never attempts it.
+        expect(runProfileRepair).not.toHaveBeenCalled();
+        expect(profileStore.store.checkpointRepair).not.toHaveBeenCalled();
+    });
+
+    it('evaluateProfileBatchCompleteness accepts exactly 90 percent coverage with three incomplete failures in 30', () => {
+        const usernames = Array.from({ length: 30 }, (_, index) => `user${index}`);
+        const failedUsernames = usernames.slice(-3);
+        const final = usernames.map(username => (
+            failedUsernames.includes(username) ? incompleteFailure(username) : success(username)
+        ));
+
+        const result = evaluateProfileBatchCompleteness(final, usernames);
+
+        expect(result.satisfied).toBe(true);
+        expect(result.allowedFailures).toBe(3);
+        expect(result.failedUsernames).toEqual(failedUsernames);
+    });
+
+    it('evaluateProfileBatchCompleteness accepts the rounded 90 percent boundary with two incomplete failures in 27', () => {
+        const usernames = Array.from({ length: 27 }, (_, index) => `user${index}`);
+        const failedUsernames = usernames.slice(-2);
+        const final = usernames.map(username => (
+            failedUsernames.includes(username) ? incompleteFailure(username) : success(username)
+        ));
+
+        const result = evaluateProfileBatchCompleteness(final, usernames);
+
+        expect(result.satisfied).toBe(true);
+        expect(result.allowedFailures).toBe(2);
+        expect(result.failedUsernames).toEqual(failedUsernames);
+    });
+
+    it('evaluateProfileBatchCompleteness rejects three incomplete failures in 28 with allowedFailures of two', () => {
+        const usernames = Array.from({ length: 28 }, (_, index) => `user${index}`);
+        const failedUsernames = usernames.slice(-3);
+        const final = usernames.map(username => (
+            failedUsernames.includes(username) ? incompleteFailure(username) : success(username)
+        ));
+
+        const result = evaluateProfileBatchCompleteness(final, usernames);
+
+        expect(result.satisfied).toBe(false);
+        expect(result.allowedFailures).toBe(2);
+    });
+
+    it('evaluateProfileBatchCompleteness rejects a non-incomplete failure within the numeric bound', () => {
+        const usernames = Array.from({ length: 30 }, (_, index) => `user${index}`);
+        const failedUsername = usernames.at(-1)!;
+        const final = usernames.map(username => (
+            username === failedUsername ? failure(username, 'apify') : success(username)
+        ));
+
+        const result = evaluateProfileBatchCompleteness(final, usernames);
+
+        expect(result.satisfied).toBe(false);
+    });
+
+    it('evaluateProfileBatchCompleteness never counts unavailable results and excludes them from failedUsernames', () => {
+        const usernames = Array.from({ length: 28 }, (_, index) => `user${index}`);
+        const incompleteUsernames = usernames.slice(-3, -1);
+        const unavailableUsername = usernames.at(-1)!;
+        const final = usernames.map((username): AnalysisV2CheckpointResult => {
+            if (incompleteUsernames.includes(username)) return incompleteFailure(username);
+            if (username === unavailableUsername) {
+                return unavailable(username) as AnalysisV2CheckpointResult;
+            }
+            return success(username);
+        });
+
+        const result = evaluateProfileBatchCompleteness(final, usernames);
+
+        expect(result.satisfied).toBe(true);
+        expect(result.allowedFailures).toBe(2);
+        expect(result.failedUsernames).toEqual(incompleteUsernames);
+        expect(result.failedUsernames).not.toContain(unavailableUsername);
+    });
+
+    it('evaluateProfileBatchCompleteness rejects a length mismatch between final results and requested usernames', () => {
+        const usernames = ['alice', 'bob', 'carol', 'dave', 'erin'];
+        const final = usernames.slice(0, 4).map(username => success(username));
+
+        const result = evaluateProfileBatchCompleteness(final, usernames);
+
+        expect(result.satisfied).toBe(false);
+    });
+
+    it('keeps a primary success ahead of a repair row for the same username', async () => {
+        const usernames = ['alice', 'bob', 'carol'];
+        // Bob is the only unresolved username and his fallback already succeeded, so nothing
+        // else in this batch depends on the repair route. The server only ever repairs a
+        // merged failure, so a repair row for alice cannot arise in production; the ordering
+        // is pinned regardless, because primary evidence outranks every later attempt.
+        const base = {
+            ...completedFallbackResume(usernames, [failure('bob', 'apify')]),
+            fallbackResults: [success('bob', 'apify')],
+        };
+
+        await expect(profileBatchResultHashOf(withRepair(base, [failure('alice', 'apify')])))
+            .resolves.toBe(await profileBatchResultHashOf(base));
+        await expect(profileBatchResultHashOf(withRepair(base, [repairSuccess('alice')])))
+            .resolves.toBe(await profileBatchResultHashOf(base));
+    });
+
+    it('promotes a repair success over a failed fallback for the same username', async () => {
+        const usernames = ['alice', 'bob', 'carol'];
+        const base = completedFallbackResume(usernames, [failure('bob', 'apify')]);
+        const repaired = { ...base, primaryResults: [
+            base.primaryResults[0]!,
+            repairSuccess('bob'),
+            base.primaryResults[2]!,
+        ], frozenUnresolvedUsernames: [], fallbackResults: [], fallbackCapturedAt: null };
+
+        // Without the repair row the merged outcome is a non-incomplete failure and the gate
+        // rejects the whole batch, so the promotion is the only thing that can pass it.
+        await expect(profileBatchResultHashOf(base))
+            .rejects.toThrow('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
+        await expect(profileBatchResultHashOf(withRepair(base, [repairSuccess('bob')])))
+            .resolves.toBe(await profileBatchResultHashOf(repaired));
+    });
+
+    it('keeps a failed repair as the terminal outcome over a failed fallback', async () => {
+        const usernames = Array.from({ length: 10 }, (_, index) => `user${index}`);
+        const failedUsername = usernames.at(-1)!;
+        const base = completedFallbackResume(usernames, [incompleteFailure(failedUsername)]);
+
+        // One incomplete failure in ten sits inside the 90 percent gate.
+        await expect(profileBatchResultHashOf(base)).resolves.toBeTypeOf('string');
+        // The repair attempt is the most recent terminal evidence and it timed out, so the
+        // merged outcome is a non-incomplete failure and the gate must still reject.
+        await expect(profileBatchResultHashOf(
+            withRepair(base, [failure(failedUsername, 'apify')])
+        )).rejects.toThrow('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
+    });
+
+    it('counts every repaired failure against the 90 percent gate', async () => {
+        const usernames = Array.from({ length: 10 }, (_, index) => `user${index}`);
+        const failedUsernames = usernames.slice(-2);
+        const failures = failedUsernames.map(username => incompleteFailure(username));
+        const base = completedFallbackResume(usernames, failures);
+
+        // Two incomplete failures in ten exceed allowedFailures of one whether the terminal
+        // evidence came from the fallback or the repair: a repair never buys back budget.
+        await expect(profileBatchResultHashOf(withRepair(base, failures)))
+            .rejects.toThrow('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
+        expect(evaluateProfileBatchCompleteness(
+            usernames.map(username => (
+                failedUsernames.includes(username) ? incompleteFailure(username) : success(username)
+            )),
+            usernames
+        )).toMatchObject({ satisfied: false, allowedFailures: 1, failedUsernames });
+    });
+
+    it('leaves an unrepaired batch byte-identical to the fallback-only merge', async () => {
+        const usernames = Array.from({ length: 10 }, (_, index) => `user${index}`);
+        const base = completedFallbackResume(usernames, [incompleteFailure(usernames.at(-1)!)]);
+
+        expect(base.repairResults).toEqual([]);
+        // Golden captured at 592aa50, before the repair route entered the merge at all.
+        await expect(profileBatchResultHashOf(base)).resolves.toBe(
+            '7fcd6fb24e9d7ed7bb89ab13e821d1141fe95040053d4454abed6cc5f20c0813'
+        );
+    });
+
+    it('hashes a repaired batch identically across two evaluations of one checkpoint', async () => {
+        const usernames = ['alice', 'bob', 'carol'];
+        const resume = withRepair(
+            completedFallbackResume(usernames, [failure('bob', 'apify')]),
+            [repairSuccess('bob')]
+        );
+
+        await expect(profileBatchResultHashOf(resume))
+            .resolves.toBe(await profileBatchResultHashOf(resume));
+    });
+
+    it('repairs a below-gate batch and passes once the repair succeeds', async () => {
+        const usernames = Array.from({ length: 10 }, (_, index) => `user${index}`);
+        const failed = usernames.slice(-2);
+        const topology = createAnalysisV2CollectionTopology('profiles', usernames);
+        const store = inMemoryProfileStore(
+            completedFallbackResume(usernames, failed.map(username => incompleteFailure(username)))
+        );
+        const runProfileRepair = repairRunner(repairSuccess);
+        const runs = providerStore();
+
+        // Two incomplete failures in ten exceed the one-failure budget, so the fallback-only
+        // merge fails the gate. The repair resolves both, and only then does the batch pass.
+        await expect(createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext()),
+            evidenceStore: relationshipEvidence(usernames),
+            profileCheckpointStore: store.store,
+            runProfileRepair,
+            providerRunStore: runs.value,
+        })(stageContext(
+            'profile_fetch',
+            state({ relationships: relationshipManifest(topology) }),
+            0
+        ))).resolves.toMatchObject({ checkpoint: { manifest: { itemCount: 10 } } });
+
+        expect(runProfileRepair).toHaveBeenCalledTimes(1);
+        expect(runProfileRepair.mock.calls[0]![0].usernames).toEqual(failed);
+        // The repair reserves its own ledger row under the profile-repair operation key while
+        // resolving its slot through the profile-fallback slot policy.
+        expect(runs.bindAdapterCheckpoint).toHaveBeenCalledTimes(1);
+        expect(runs.bindAdapterCheckpoint.mock.calls[0]![0].operationKey)
+            .toMatch(/^profile-repair:[0-9a-f]{64}$/);
+    });
+
+    it('never repairs a batch the fallback-only merge already clears', async () => {
+        const usernames = Array.from({ length: 10 }, (_, index) => `user${index}`);
+        const topology = createAnalysisV2CollectionTopology('profiles', usernames);
+        const runProfileRepair = repairRunner();
+
+        // One incomplete failure in ten is inside the gate, so there is nothing to repair and
+        // nothing to spend.
+        await expect(createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext()),
+            evidenceStore: relationshipEvidence(usernames),
+            profileCheckpointStore: inMemoryProfileStore(
+                completedFallbackResume(usernames, [incompleteFailure(usernames.at(-1)!)])
+            ).store,
+            runProfileRepair,
+            providerRunStore: providerStore().value,
+        })(stageContext(
+            'profile_fetch',
+            state({ relationships: relationshipManifest(topology) }),
+            0
+        ))).resolves.toMatchObject({ checkpoint: { manifest: { itemCount: 10 } } });
+
+        expect(runProfileRepair).not.toHaveBeenCalled();
+    });
+
+    it('never starts a second repair for a batch whose repair already completed', async () => {
+        const usernames = ['alice', 'bob', 'carol'];
+        const topology = createAnalysisV2CollectionTopology('profiles', usernames);
+        const runProfileRepair = repairRunner();
+        // The repair already ran and did NOT resolve bob, so the batch still fails the gate. This
+        // is the case the idempotency guard exists for: a completed-but-insufficient repair must
+        // fail terminally rather than start a second paid run. (A repair that succeeded would be
+        // caught by the gate-satisfied guard instead, so it cannot prove this on its own.)
+        const resume = withRepair(
+            completedFallbackResume(usernames, [failure('bob', 'apify')]),
+            [failure('bob', 'apify')]
+        );
+
+        await expect(createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext()),
+            evidenceStore: relationshipEvidence(usernames),
+            profileCheckpointStore: inMemoryProfileStore(resume).store,
+            runProfileRepair,
+            providerRunStore: providerStore().value,
+        })(stageContext(
+            'profile_fetch',
+            state({ relationships: relationshipManifest(topology) }),
+            0
+        ))).rejects.toThrow('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
+
+        expect(runProfileRepair).not.toHaveBeenCalled();
+    });
+
+    it('does not checkpoint a repair that threw before returning outcomes', async () => {
+        const usernames = ['alice', 'bob', 'carol'];
+        const topology = createAnalysisV2CollectionTopology('profiles', usernames);
+        const store = inMemoryProfileStore(
+            completedFallbackResume(usernames, [failure('bob', 'apify')])
+        );
+        // The adapter throws on a RESTRICTED-pin failure or a still-pending run; the error must
+        // propagate and no repair checkpoint may be written.
+        const runProfileRepair = vi.fn(async () => {
+            throw new Error('SCRAPING_ACCESS_ERROR: replacement profile Actor run is not restricted.');
+        });
+
+        await expect(createAnalysisV2ProfileFetchExecutor({
+            requestContextStore: contextStore(requestContext()),
+            evidenceStore: relationshipEvidence(usernames),
+            profileCheckpointStore: store.store,
+            runProfileRepair,
+            providerRunStore: providerStore().value,
+        })(stageContext(
+            'profile_fetch',
+            state({ relationships: relationshipManifest(topology) }),
+            0
+        ))).rejects.toThrow('SCRAPING_ACCESS_ERROR');
+
+        expect(store.store.checkpointRepair).not.toHaveBeenCalled();
     });
 
     it('rejects wrong batches, girlfriend leakage, ambiguous failures, and ambiguous starts', async () => {
@@ -1746,6 +2136,8 @@ describe('analysis V2 concrete collection executors', () => {
             requestContextStore: contextStore(requestContext()),
             evidenceStore: relationshipEvidence(usernames),
             profileCheckpointStore: ambiguousTerminal.store,
+            runProfileRepair: repairRunner(),
+            providerRunStore: providerStore().value,
         })(stageContext('profile_fetch', dagState, 0))).rejects.toThrow(
             'ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE'
         );

@@ -6,7 +6,9 @@ import {
     AnalysisV2ProviderRunAlreadyReservedError,
     AnalysisV2ProviderRunConflictError,
     AnalysisV2ProviderRunFenceError,
+    ANALYSIS_V2_PROVIDER_OPERATION_KINDS,
     ANALYSIS_V2_PROVIDER_RUN_DATABASE_NAMES,
+    OPERATION_KEY_PATTERN,
     analysisV2ProviderInputHash,
     analysisV2ProviderOperationKey,
     createAnalysisV2ProviderRunStore,
@@ -114,6 +116,30 @@ describe('analysis V2 provider run store', () => {
         expect(first).not.toBe(otherKind);
         expect(analysisV2ProviderInputHash('{"username":"0_min._.00"}'))
             .toMatch(/^[0-9a-f]{64}$/);
+    });
+
+    it('registers profile-repair as a bounded operation kind inside the stored key window', () => {
+        expect(ANALYSIS_V2_PROVIDER_OPERATION_KINDS).toContain('profile-repair');
+
+        const key = analysisV2ProviderOperationKey(
+            'profile-repair',
+            `batch=3\nusername=0_min._.00`
+        );
+        const replay = analysisV2ProviderOperationKey(
+            'profile-repair',
+            `batch=3\nusername=0_min._.00`
+        );
+
+        expect(key).toBe(replay);
+        expect(key).toHaveLength(79);
+        expect(key).toMatch(/^profile-repair:[0-9a-f]{64}$/);
+        expect(OPERATION_KEY_PATTERN.test(key)).toBe(true);
+        expect(key).not.toContain('0_min._.00');
+        // 'profile-fallback' shares no digest with 'profile-repair' for the same identity.
+        expect(key).not.toBe(analysisV2ProviderOperationKey(
+            'profile-fallback',
+            `batch=3\nusername=0_min._.00`
+        ));
     });
 
     it('reserves a bounded immutable identity with a proposed UUID fence', async () => {

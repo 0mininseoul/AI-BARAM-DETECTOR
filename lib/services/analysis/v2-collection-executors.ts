@@ -14,6 +14,7 @@ import {
     numberSetting,
 } from '@/lib/services/instagram/providers/apify-relationship';
 import { APIFY_RELATIONSHIP_ACTOR_ID } from '@/lib/services/instagram/providers/apify';
+import { REPLACEMENT_PROFILE_ACTOR } from '@/lib/services/instagram/providers/apify-profile-details';
 import {
     getFollowers,
     getFollowing,
@@ -36,6 +37,7 @@ import {
 } from './v2-evidence-store';
 import {
     analysisV2ProfileFetchCheckpointStore,
+    deriveRepairUsernames,
     type AnalysisV2CheckpointProfile,
     type AnalysisV2CheckpointResult,
     type AnalysisV2ProfileAttemptResultInput,
@@ -43,6 +45,11 @@ import {
     type AnalysisV2ProfileFetchCheckpointStore,
     type AnalysisV2ProfileFetchResume,
 } from './v2-profile-fetch-store';
+import {
+    runAnalysisV2ProfileRepair,
+    profileRepairIdentity,
+    profileRepairMaximumCharge,
+} from './v2-profile-repair';
 import {
     analysisV2ProviderRunStore,
     createAnalysisV2ProviderInputHash,
@@ -56,6 +63,11 @@ import {
     type AnalysisV2CollectionRequestContext,
     type AnalysisV2CollectionRequestContextStore,
 } from './v2-request-context';
+import {
+    canonicalProviderInput,
+    checkedMaximumCharge,
+    lengthPrefixed,
+} from './v2-provider-identity';
 import { extractRawTargetInteractions } from './v2-target-interactions';
 import {
     analysisV2TargetProfileReuseStore,
@@ -78,6 +90,7 @@ const TARGET_COMMENT_POST_LIMIT = 6;
 
 type RelationshipGetter = typeof getFollowers;
 type ProfileBatchFetcher = typeof getProfilesBatchV2;
+type ProfileRepairRunner = typeof runAnalysisV2ProfileRepair;
 
 export interface AnalysisV2CollectionExecutorDependencies {
     requestContextStore?: AnalysisV2CollectionRequestContextStore;
@@ -88,6 +101,7 @@ export interface AnalysisV2CollectionExecutorDependencies {
     getFollowers?: RelationshipGetter;
     getFollowing?: RelationshipGetter;
     getProfilesBatchV2?: ProfileBatchFetcher;
+    runProfileRepair?: ProfileRepairRunner;
     interactionAdapter?: ApifyInteractionAdapter;
     env?: Record<string, string | undefined>;
 }
@@ -101,6 +115,7 @@ interface ResolvedDependencies {
     getFollowers: RelationshipGetter;
     getFollowing: RelationshipGetter;
     getProfilesBatchV2: ProfileBatchFetcher;
+    runProfileRepair: ProfileRepairRunner;
     interactionAdapter: ApifyInteractionAdapter;
     env: Record<string, string | undefined>;
 }
@@ -117,6 +132,7 @@ function deps(input: AnalysisV2CollectionExecutorDependencies): ResolvedDependen
         getFollowers: input.getFollowers ?? getFollowers,
         getFollowing: input.getFollowing ?? getFollowing,
         getProfilesBatchV2: input.getProfilesBatchV2 ?? getProfilesBatchV2,
+        runProfileRepair: input.runProfileRepair ?? runAnalysisV2ProfileRepair,
         interactionAdapter: input.interactionAdapter ?? apifyInteractionAdapter,
         env: input.env ?? process.env,
     };
@@ -147,10 +163,6 @@ async function awaitSettledBranches<const T extends readonly unknown[]>(
 
 function sha256(value: string): string {
     return createHash('sha256').update(value, 'utf8').digest('hex');
-}
-
-function lengthPrefixed(value: string): string {
-    return `${Buffer.byteLength(value, 'utf8')}:${value}`;
 }
 
 function collectionClaim(context: {
@@ -210,21 +222,6 @@ export function createAnalysisV2CollectionTopology(
         }));
     }
     return Object.freeze(result);
-}
-
-function canonicalProviderInput(parts: readonly string[]): string {
-    return parts.map(lengthPrefixed).join('\n');
-}
-
-function checkedMaximumCharge(
-    estimated: number,
-    maximum: number,
-    label: string
-): number {
-    if (!Number.isFinite(estimated) || estimated < 0 || estimated > maximum + Number.EPSILON) {
-        throw new Error(`ANALYSIS_V2_COLLECTION_BUDGET_ERROR: ${label}.`);
-    }
-    return Number(estimated.toFixed(12));
 }
 
 function relationshipMaximumCharge(
@@ -510,14 +507,31 @@ function resumeAttemptResults(
         : { outcome: result.outcome })) as readonly ProfileAttemptResult[];
 }
 
+/**
+ * Attempt precedence for one username: primary success, then repair, then fallback, then the
+ * primary row itself. The later attempt wins only where the primary did not already succeed,
+ * and the repair outranks the fallback because it is the more recent terminal evidence for
+ * the same username — not because it is more favourable. A repair that failed therefore stays
+ * a failure here and is still counted by `evaluateProfileBatchCompleteness`, which remains the
+ * only 90 percent predicate; repair never buys back failure budget.
+ *
+ * `resume.repairResults` is the server-derived repair attempt the checkpoint carries. It is
+ * read as given and never re-derived: the client-side repair-set prediction in
+ * `v2-profile-fetch-store.ts` decides whether to call the RPC, and is not an authority here.
+ */
 function finalCheckpointResults(resume: AnalysisV2ProfileFetchResume) {
     const fallbackByUsername = new Map(
         resume.fallbackResults.map(result => [result.outcome.requestedUsername, result])
     );
+    const repairByUsername = new Map(
+        resume.repairResults.map(result => [result.outcome.requestedUsername, result])
+    );
     return resume.primaryResults.map(primary => (
         primary.outcome.status === 'success'
             ? primary
-            : fallbackByUsername.get(primary.outcome.requestedUsername) ?? primary
+            : repairByUsername.get(primary.outcome.requestedUsername)
+                ?? fallbackByUsername.get(primary.outcome.requestedUsername)
+                ?? primary
     ));
 }
 
@@ -618,6 +632,69 @@ async function durableProfiles(input: {
     return stored;
 }
 
+/**
+ * One at-most-once repair pass over a profile batch that the primary+fallback merge left short of
+ * the 90% gate. It runs the pinned replacement Actor over only the still-failed frozen-unresolved
+ * subset, checkpoints those outcomes as the third `repair` attempt, and returns the merged resume
+ * for the gate to re-evaluate. Every non-repair path is a no-op that returns `resume` untouched and
+ * spends nothing.
+ */
+async function repairProfileBatch(input: {
+    dependencies: ResolvedDependencies;
+    claim: AnalysisV2CollectionJobClaim;
+    request: AnalysisV2CollectionRequestContext;
+    usernames: readonly string[];
+    resume: AnalysisV2ProfileFetchResume;
+}): Promise<AnalysisV2ProfileFetchResume> {
+    const { dependencies, claim, request, usernames, resume } = input;
+    // A completed repair is terminal for the batch. This short-circuit mirrors durableProfiles'
+    // fallback guard so a retried job never starts a second paid repair run.
+    if (resume.repairCapturedAt !== null) return resume;
+    // Repair is triggered by the single shared 90% predicate only: if the merged primary+fallback
+    // evidence already clears the gate there is nothing to repair and nothing to spend.
+    if (evaluateProfileBatchCompleteness(finalCheckpointResults(resume), usernames).satisfied) {
+        return resume;
+    }
+    // The still-failed frozen-unresolved subset. `unavailable` is never admitted, so a shortfall
+    // made entirely of settled-unavailable accounts yields an empty set and no run.
+    const repairUsernames = deriveRepairUsernames(resume);
+    if (repairUsernames.length === 0) return resume;
+
+    const identity = profileIdentity(claim);
+    const canonicalInput = profileRepairIdentity(repairUsernames);
+    const mutableProviderRun: ProviderRunCheckpoint = {};
+    const binding = await bindApifyRun({
+        dependencies,
+        claim,
+        request,
+        // The repair run gets its OWN ledger row under the profile-repair operation key, but
+        // resolves its credential slot through the profile-fallback slot: no eighth slot is added
+        // to the persisted seven-key policy.
+        operation: 'profile-fallback',
+        operationKey: createAnalysisV2ProviderOperationKey('profile-repair', canonicalInput),
+        inputHash: createAnalysisV2ProviderInputHash(canonicalInput),
+        actorId: REPLACEMENT_PROFILE_ACTOR.actorId,
+        maxChargeUsd: profileRepairMaximumCharge(repairUsernames.length),
+    });
+    Object.assign(mutableProviderRun, binding.checkpoint);
+    const credentialSlot = binding.checkpoint.credentialSlot;
+    if (!credentialSlot) throw new Error('ANALYSIS_V2_PROFILE_REPAIR_SLOT_UNRESOLVED');
+
+    // The adapter throws on a RESTRICTED-pin failure or a still-pending run, so the checkpoint
+    // write below is reached only with a durable, terminal outcome set — never sealing a barrier
+    // as synthetic failures.
+    const outcomes = await dependencies.runProfileRepair({
+        usernames: repairUsernames,
+        credentialSlot,
+        providerRunCheckpoint: mutableProviderRun,
+        env: dependencies.env,
+    });
+    return dependencies.profileCheckpointStore.checkpointRepair({
+        ...identity,
+        results: checkpointAttemptResults(outcomes),
+    });
+}
+
 function durableSuccessfulProfiles(
     resume: AnalysisV2ProfileFetchResume,
     requestedUsernames: readonly string[]
@@ -632,6 +709,22 @@ function durableSuccessfulProfiles(
     });
 }
 
+export function evaluateProfileBatchCompleteness(
+    final: readonly AnalysisV2CheckpointResult[],
+    requestedUsernames: readonly string[]
+): { satisfied: boolean; failedUsernames: readonly string[]; allowedFailures: number } {
+    const failed = final.filter(result => result.outcome.status === 'failed');
+    const allowedFailures = requestedUsernames.length - Math.ceil(0.9 * requestedUsernames.length);
+    const satisfied = final.length === requestedUsernames.length
+        && failed.length <= allowedFailures
+        && failed.every(result => result.outcome.failureCategory === 'incomplete');
+    return {
+        satisfied,
+        failedUsernames: failed.map(result => result.outcome.requestedUsername),
+        allowedFailures,
+    };
+}
+
 function durableTerminalProfileResults(
     resume: AnalysisV2ProfileFetchResume,
     requestedUsernames: readonly string[]
@@ -643,14 +736,7 @@ function durableTerminalProfileResults(
         throw new Error('ANALYSIS_V2_PROFILE_BATCH_IDENTITY_DRIFT');
     }
     const final = finalCheckpointResults(resume);
-    const failed = final.filter(result => result.outcome.status === 'failed');
-    const allowedIncompleteFailures = requestedUsernames.length
-        - Math.ceil(0.9 * requestedUsernames.length);
-    if (
-        final.length !== requestedUsernames.length
-        || failed.length > allowedIncompleteFailures
-        || failed.some(result => result.outcome.failureCategory !== 'incomplete')
-    ) {
+    if (!evaluateProfileBatchCompleteness(final, requestedUsernames).satisfied) {
         throw new Error('ANALYSIS_V2_PROFILE_EVIDENCE_INCOMPLETE');
     }
     return final;
@@ -916,7 +1002,14 @@ export function createAnalysisV2ProfileFetchExecutor(
             usernames,
             onProfileStart: context.reportActiveProfile,
         });
-        const results = durableTerminalProfileResults(resume, usernames);
+        const repaired = await repairProfileBatch({
+            dependencies,
+            claim,
+            request,
+            usernames,
+            resume,
+        });
+        const results = durableTerminalProfileResults(repaired, usernames);
         return Object.freeze({
             checkpoint: Object.freeze({
                 kind: 'profile_fetch_batch' as const,
