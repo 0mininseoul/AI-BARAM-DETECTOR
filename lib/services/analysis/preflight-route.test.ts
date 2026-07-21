@@ -274,6 +274,70 @@ describe('preflight owner routes', () => {
         expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
     });
 
+    it('gives a valid signed canary request-scoped precedence over public production admission', async () => {
+        const secret = Buffer.alloc(32, 13).toString('base64url');
+        vi.stubEnv('ANALYSIS_TEST_ENTITLEMENTS_ENABLED', 'true');
+        vi.stubEnv('ANALYSIS_TEST_ENTITLEMENT_SECRET', secret);
+        mocks.admissionAvailable.mockReturnValue(true);
+        mocks.trustedAccessMode.mockReturnValue('production');
+        const token = createAnalysisTestAdmission({
+            userId,
+            targetInstagramId: 'target.name',
+            idempotencyKey: 'preflight-key-000000000000',
+            nonce: 'preflight_admission_nonce_02',
+        }, { secret });
+
+        const response = await createPreflight(postRequest(
+            { targetInstagramId: 'Target.Name' },
+            'preflight-key-000000000000',
+            token
+        ));
+
+        expect(response.status).toBe(202);
+        expect(mocks.store.createOrReplay).toHaveBeenCalledWith(
+            expect.objectContaining({ accessMode: 'test_entitlement' })
+        );
+    });
+
+    it('rejects an invalid supplied canary instead of falling through to public production', async () => {
+        const secret = Buffer.alloc(32, 13).toString('base64url');
+        vi.stubEnv('ANALYSIS_TEST_ENTITLEMENTS_ENABLED', 'true');
+        vi.stubEnv('ANALYSIS_TEST_ENTITLEMENT_SECRET', secret);
+        mocks.admissionAvailable.mockReturnValue(true);
+        mocks.trustedAccessMode.mockReturnValue('production');
+        const token = createAnalysisTestAdmission({
+            userId,
+            targetInstagramId: 'different.target',
+            idempotencyKey: 'preflight-key-000000000000',
+            nonce: 'preflight_admission_nonce_03',
+        }, { secret });
+
+        const response = await createPreflight(postRequest(
+            { targetInstagramId: 'Target.Name' },
+            'preflight-key-000000000000',
+            token
+        ));
+
+        expect(response.status).toBe(503);
+        await expect(response.json()).resolves.toMatchObject({
+            code: 'V2_PIPELINE_UNAVAILABLE',
+        });
+        expect(mocks.store.createOrReplay).not.toHaveBeenCalled();
+        expect(mocks.enqueue).not.toHaveBeenCalled();
+    });
+
+    it('keeps no-header public admission on the trusted production access mode', async () => {
+        mocks.admissionAvailable.mockReturnValue(true);
+        mocks.trustedAccessMode.mockReturnValue('production');
+
+        const response = await createPreflight(postRequest());
+
+        expect(response.status).toBe(202);
+        expect(mocks.store.createOrReplay).toHaveBeenCalledWith(
+            expect.objectContaining({ accessMode: 'production' })
+        );
+    });
+
     it('maps the atomic per-user creation budget to a bounded 429', async () => {
         mocks.store.createOrReplay.mockRejectedValue(new PreflightRateLimitedError());
 
