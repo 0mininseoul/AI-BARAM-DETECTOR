@@ -56,6 +56,11 @@ import {
     type AnalysisV2CollectionRequestContext,
     type AnalysisV2CollectionRequestContextStore,
 } from './v2-request-context';
+import {
+    canonicalProviderInput,
+    checkedMaximumCharge,
+    lengthPrefixed,
+} from './v2-provider-identity';
 import { extractRawTargetInteractions } from './v2-target-interactions';
 import {
     analysisV2TargetProfileReuseStore,
@@ -149,10 +154,6 @@ function sha256(value: string): string {
     return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
-function lengthPrefixed(value: string): string {
-    return `${Buffer.byteLength(value, 'utf8')}:${value}`;
-}
-
 function collectionClaim(context: {
     claim: { requestId: string; jobKey: string; claimToken: string; inputHash: string };
 }): AnalysisV2CollectionJobClaim {
@@ -210,21 +211,6 @@ export function createAnalysisV2CollectionTopology(
         }));
     }
     return Object.freeze(result);
-}
-
-function canonicalProviderInput(parts: readonly string[]): string {
-    return parts.map(lengthPrefixed).join('\n');
-}
-
-function checkedMaximumCharge(
-    estimated: number,
-    maximum: number,
-    label: string
-): number {
-    if (!Number.isFinite(estimated) || estimated < 0 || estimated > maximum + Number.EPSILON) {
-        throw new Error(`ANALYSIS_V2_COLLECTION_BUDGET_ERROR: ${label}.`);
-    }
-    return Number(estimated.toFixed(12));
 }
 
 function relationshipMaximumCharge(
