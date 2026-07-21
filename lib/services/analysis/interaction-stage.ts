@@ -208,7 +208,9 @@ export function extractTargetInteractions(
             returnedCounts(likers),
             TARGET_LIKER_LIMIT_PER_POST,
             post => Math.max(
-                post.likesCount,
+                post.likesCountHidden === true
+                    ? TARGET_LIKER_LIMIT_PER_POST + 1
+                    : post.likesCount,
                 likerDeclaredByPost.get(instagramPostUrl(post)) ?? 0
             )
         ),
@@ -216,7 +218,9 @@ export function extractTargetInteractions(
             commentPosts,
             returnedCounts(comments),
             TARGET_COMMENT_LIMIT_PER_POST,
-            post => post.commentsCount
+            post => post.commentsCountHidden === true
+                ? TARGET_COMMENT_LIMIT_PER_POST + 1
+                : post.commentsCount
         ),
     };
 }
@@ -262,7 +266,9 @@ export function extractCandidateInteractions(
         candidateUsername: source.candidateUsername,
         postId: source.post.id,
         declaredCount: Math.max(
-            source.post.likesCount,
+            source.post.likesCountHidden === true
+                ? CANDIDATE_LIKER_LIMIT_PER_POST + 1
+                : source.post.likesCount,
             declaredByPost.get(url) ?? 0
         ),
         returnedCount: counts.get(url) ?? 0,

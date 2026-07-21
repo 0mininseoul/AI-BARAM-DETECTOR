@@ -2455,7 +2455,7 @@ describe('apifyProvider', () => {
             .getProfilesBatch!(['target'], 1)).rejects.toThrow('latestPosts');
     });
 
-    it('accepts the documented -1 hidden engagement-count sentinel', async () => {
+    it('normalizes the documented -1 hidden engagement-count sentinel without losing visibility', async () => {
         const { client } = mockClient([{
             ...profileItem('target'),
             latestPosts: [{
@@ -2470,7 +2470,12 @@ describe('apifyProvider', () => {
         const provider = makeApifyProvider({ client, env: {} });
 
         await expect(provider.getProfilesBatch!(['target'], 1)).resolves.toMatchObject([{
-            latestPosts: [{ likesCount: -1, commentsCount: -1 }],
+            latestPosts: [{
+                likesCount: 0,
+                commentsCount: 0,
+                likesCountHidden: true,
+                commentsCountHidden: true,
+            }],
         }]);
     });
 

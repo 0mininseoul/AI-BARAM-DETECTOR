@@ -165,14 +165,18 @@ export function extractRawTargetInteractions(input: {
             countReturnedByUrl(input.likers),
             likerDeclaredByUrl,
             TARGET_LIKER_LIMIT_PER_POST,
-            post => post.likesCount
+            post => post.likesCountHidden === true
+                ? TARGET_LIKER_LIMIT_PER_POST + 1
+                : post.likesCount
         )),
         commentCoverage: Object.freeze(coverageForPosts(
             commentPosts,
             countReturnedByUrl(input.comments),
             new Map(),
             TARGET_COMMENT_LIMIT_PER_POST,
-            post => post.commentsCount
+            post => post.commentsCountHidden === true
+                ? TARGET_COMMENT_LIMIT_PER_POST + 1
+                : post.commentsCount
         )),
     });
 }

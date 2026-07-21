@@ -510,6 +510,8 @@ function parseLatestPosts(rawPosts: unknown): InstagramPost[] {
             post.mentions ?? [],
             carousel?.mediaItems.map(media => media.caption) ?? []
         );
+        const likesCountHidden = post.likesCount === -1;
+        const commentsCountHidden = post.commentsCount === -1;
 
         return {
             id: String(post.id),
@@ -527,8 +529,10 @@ function parseLatestPosts(rawPosts: unknown): InstagramPost[] {
                     childrenComplete: true,
                 }
                 : {}),
-            likesCount: post.likesCount ?? 0,
-            commentsCount: post.commentsCount ?? 0,
+            likesCount: likesCountHidden ? 0 : post.likesCount ?? 0,
+            commentsCount: commentsCountHidden ? 0 : post.commentsCount ?? 0,
+            ...(likesCountHidden ? { likesCountHidden: true as const } : {}),
+            ...(commentsCountHidden ? { commentsCountHidden: true as const } : {}),
             timestamp: normalizeInstagramTimestamp(post.timestamp),
             taggedUsers,
             mentionedUsers,

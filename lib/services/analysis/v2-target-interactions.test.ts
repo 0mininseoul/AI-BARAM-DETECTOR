@@ -77,6 +77,34 @@ describe('V2 raw target interactions', () => {
         expect(snapshot.commentCoverage).toHaveLength(6);
     });
 
+    it('keeps hidden provider counts conservative instead of claiming complete coverage', () => {
+        const hiddenPost = {
+            ...post(1),
+            likesCount: 0,
+            commentsCount: 0,
+            likesCountHidden: true as const,
+            commentsCountHidden: true as const,
+        };
+
+        const snapshot = extractRawTargetInteractions({
+            targetPosts: [hiddenPost],
+            likers: [],
+            comments: [],
+            excludedUsernames: [],
+        });
+
+        expect(snapshot.likerCoverage[0]).toMatchObject({
+            returnedCount: 0,
+            declaredCount: 151,
+            requestedLimit: 150,
+        });
+        expect(snapshot.commentCoverage[0]).toMatchObject({
+            returnedCount: 0,
+            declaredCount: 16,
+            requestedLimit: 15,
+        });
+    });
+
     it('joins only verified women and reapplies exclusion at the downstream boundary', () => {
         const joined = joinVerifiedFemaleTargetInteractions({
             evidence: [

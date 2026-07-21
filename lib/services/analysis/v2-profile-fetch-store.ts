@@ -62,6 +62,8 @@ export const analysisV2CheckpointPostSchema = z.object({
     childrenComplete: z.boolean().optional(),
     likesCount: boundedCountSchema,
     commentsCount: boundedCountSchema,
+    likesCountHidden: z.literal(true).optional(),
+    commentsCountHidden: z.literal(true).optional(),
     timestamp: z.string().datetime({ offset: true }),
     taggedUsers: z.array(usernameSchema).max(50),
     mentionedUsers: z.array(usernameSchema).max(INSTAGRAM_MENTION_MAX_COUNT),
