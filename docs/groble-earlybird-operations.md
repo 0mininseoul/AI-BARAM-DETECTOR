@@ -162,6 +162,10 @@ ORDER BY query_start;
 - 취소 요청 webhook이 결제 완료 webhook보다 먼저 도착해도 후속 결제를 판매로 확정하거나 수량에 포함하지 않고 `refund_pending`으로 재조정한다.
 - 결제 확정은 `analysis_requests`를 만들거나 Cloud Tasks/V2 자동 분석을 시작하지 않는다.
 
+### 만료 preflight 보존
+
+`earlybird_orders.preflight_id`와 `earlybird_waitlist.preflight_id`는 의도적으로 `ON DELETE RESTRICT`를 사용한다. 만료된 연결 preflight는 retention 작업에서 대상 프로필 PII를 `retained.*` tombstone으로 scrub하지만, 주문 또는 대기 신청이 참조하는 동안 행 자체는 삭제하지 않는다. 어느 상업 레코드에서도 참조하지 않고 provider 사용액도 모두 정산된 만료 tombstone만 삭제할 수 있다. FK를 `CASCADE`로 바꾸거나 retention 500을 재시도로만 덮지 않는다.
+
 ## 수동 결과 연결
 
 판독 작업을 수동으로 진행할 때 주문 상태는 `paid`에서 `analysis_in_progress`, `completed` 순으로 변경한다. 완료 주문에 `result_request_id`를 연결할 수 있지만, 연결된 `analysis_requests.user_id`가 주문 소유자와 같고 결과가 완료 상태일 때만 링크가 표시된다.

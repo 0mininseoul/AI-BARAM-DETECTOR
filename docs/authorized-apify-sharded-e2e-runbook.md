@@ -4,8 +4,8 @@ This runbook applies only to the explicitly authorized `0_min._.00` E2E. It does
 
 ## Invariants
 
-1. Public V2 admission remains disabled.
-2. The request uses a signed `test_entitlement` and is created while authenticated as `ym1113@kakao.com`.
+1. The live public preflight/sale admission state is not changed for this canary. A valid signed admission selects `test_entitlement` for only that request; an invalid supplied header is rejected instead of falling through to production.
+2. The request uses a signed `test_entitlement` and is created while authenticated as `ym1113@kakao.com`. `PREFLIGHT_ACCESS_MODE` remains `production` for requests without that header.
 3. The exact target allowlist is `0_min._.00`, and the exact owner UUID is `974247fa-8d0e-4ab7-b6d2-ddf256ad6bdd` (`ym1113@kakao.com`).
 4. The request-bound operation map is written in the same transaction that consumes the entitlement, before the initial job is dispatched.
 5. A relationship side uses one slot. Followers and following may use different slots because they are independent Actor operations.
@@ -51,7 +51,7 @@ run can be reused consistently after the request is created.
 
 ## Pre-run checks
 
-1. Apply migrations through `20260717160000_allow_analysis_v2_rate_limit_exhaustion_fallback.sql` using the normal ordered migration path. Do not use `--include-all`.
+1. Apply migrations through `20260721143000_fix_analysis_v2_e2e_admission_and_retention.sql` using the normal ordered migration path. Do not use `--include-all`. Version `20260719190000` was already applied as the one-order manual reconciliation and must be present in git/history without being executed again.
 2. Only after those migrations succeed, deploy and enable the reviewed commit on Vercel and Cloud Run, then confirm both deployed SHAs match it.
 3. Confirm the worker can load `accessMode` plus the optional request-bound policy.
 4. Confirm both intake and worker have effective normal selected slot `primary`, resolved through the current active primary secret reference without rotating to a numeric secret version.
@@ -194,9 +194,10 @@ The launch worker uses one configured Cloud Run instance, container concurrency 
 queue capped at eight concurrent dispatches and eight dispatches per second. This reduces the
 observed fleet burst while retaining enough profile-AI parallelism for the five-minute canary.
 Cloud Run maximum instances is not a hard distributed semaphore and can be exceeded briefly during
-traffic spikes or revision rollout. Therefore this configuration is authorized only while public
-V2 admission is disabled, early-bird purchases do not create analysis tasks, and the operator runs
-one signed E2E or one manually controlled analysis at a time.
+traffic spikes or revision rollout. Therefore this configuration is authorized only while
+early-bird purchases do not create analysis tasks, automatic analysis dispatch remains disabled,
+and the operator runs one signed E2E or one manually controlled analysis at a time. Live public
+preflight/sale admission may remain enabled because a valid signed admission is request-scoped.
 
 Before automatic or concurrent paid analysis is enabled, add a fenced, expiring distributed Gemini
 lease shared by every worker revision. Do not treat `max instances=1` or process-local semaphores as
@@ -230,7 +231,7 @@ paid account instead of rotating free accounts.
 
 1. Set `ANALYSIS_V2_AUTHORIZED_TEST_SHARDING_ENABLED=false` on the intake runtime.
 2. Remove non-selected temporary Apify secret references from the worker after no policy-bound request remains active.
-3. Keep public admission disabled until the separate paid launch decision.
+3. Restore the pre-run public admission/access-mode state exactly; do not use teardown to enable automatic analysis. Normal no-header requests must remain on the production access mode.
 4. Commercial display terms are defined only by the canonical ["Groble 얼리버드 표시안 (성공 E2E 후 확정)" block](./operations-cost-model.md). Payment integration is outside this E2E's scope and remains on a separate branch; do not implement or enable it as part of this run.
 
 ## 2026-07-16 canary evidence

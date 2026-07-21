@@ -62,19 +62,24 @@ function preflightErrorCode(code: string): string {
     return 'INTERNAL_ERROR';
 }
 
-function hasValidSignedTestAdmission(
+type SignedTestAdmissionState = 'absent' | 'valid' | 'invalid';
+
+function signedTestAdmissionState(
     request: Request,
     input: { userId: string; targetInstagramId: string; idempotencyKey: string }
-): boolean {
+): SignedTestAdmissionState {
+    const token = request.headers.get('x-analysis-test-admission');
+    if (token === null) return 'absent';
+    if (!token.trim()) return 'invalid';
     try {
-        if (!analysisTestEntitlementsEnabled()) return false;
+        if (!analysisTestEntitlementsEnabled()) return 'invalid';
         assertAnalysisTestEntitlementConfiguration();
         return verifyAnalysisTestAdmission(
-            request.headers.get('x-analysis-test-admission'),
+            token,
             input
-        ) !== null;
+        ) !== null ? 'valid' : 'invalid';
     } catch {
-        return false;
+        return 'invalid';
     }
 }
 
@@ -134,7 +139,7 @@ async function handlePOST(
             );
         }
         const publicAdmission = isAnalysisV2AdmissionAvailable();
-        const signedTestAdmission = !publicAdmission && hasValidSignedTestAdmission(
+        const signedTestAdmission = signedTestAdmissionState(
             request,
             {
                 userId: user.id,
@@ -142,7 +147,14 @@ async function handlePOST(
                 idempotencyKey,
             }
         );
-        if (!publicAdmission && !signedTestAdmission) {
+        if (signedTestAdmission === 'invalid') {
+            return failed(
+                503,
+                'V2_PIPELINE_UNAVAILABLE',
+                '새 분석 접수가 일시적으로 중단되었습니다.'
+            );
+        }
+        if (!publicAdmission && signedTestAdmission !== 'valid') {
             return failed(
                 503,
                 'V2_PIPELINE_UNAVAILABLE',
@@ -159,21 +171,15 @@ async function handlePOST(
         let accessMode;
         try {
             dispatchPolicy = resolvePreflightDispatchPolicy();
-            accessMode = trustedPreflightAccessMode();
+            accessMode = signedTestAdmission === 'valid'
+                ? 'test_entitlement'
+                : trustedPreflightAccessMode();
         } catch {
             return failed(503, 'QUEUE_UNAVAILABLE', '사전 점검 작업 큐를 사용할 수 없습니다.');
         }
         if (dispatchPolicy.mode === 'unavailable') {
             return failed(503, 'QUEUE_UNAVAILABLE', '사전 점검 작업 큐를 사용할 수 없습니다.');
         }
-        if (signedTestAdmission && accessMode !== 'test_entitlement') {
-            return failed(
-                503,
-                'V2_PIPELINE_UNAVAILABLE',
-                '테스트 분석 접수 설정이 활성화되지 않았습니다.'
-            );
-        }
-
         const created = await preflightStore.createOrReplay({
             userId: user.id,
             email,
