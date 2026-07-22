@@ -30,6 +30,13 @@ ANALYSIS_V2_AUTHORIZED_TEST_TARGET_COMMENTS_SLOT=quinary
 ANALYSIS_V2_AUTHORIZED_TEST_CANDIDATE_LIKERS_SLOT=quinary
 ```
 
+새 임시 worker 서비스의 최초 배포에는 선택 슬롯 외 참조를 아래처럼 정확한 숫자 버전으로만
+명시한다. 선택 슬롯을 이 목록에 반복하거나 `latest`를 사용할 수 없다.
+
+```dotenv
+ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=tertiary:1,quaternary:1,quinary:1
+```
+
 이 mapping에서 normal/profile/target-likers는 실제 판매에 사용할 `secondary:1` 계정을,
 relationship 두 방향은 각각 `tertiary:1`과 `quaternary:1`을, target-comments와
 candidate-likers는 `quinary:1`을 사용한다. 두 relationship 방향이 다르고 target/candidate
