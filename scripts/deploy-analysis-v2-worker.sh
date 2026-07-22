@@ -90,6 +90,9 @@ Optional deployment environment variables:
   ANALYSIS_V2_WORKER_TIMEOUT_SECONDS         Fixed launch value: 300.
   ANALYSIS_V2_WORKER_ENABLED                 Enables authenticated worker drain; defaults false.
   ANALYSIS_V2_RECOVERY_ENABLED               Enables scheduled recovery; defaults false.
+  ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS
+                                               Optional comma-separated slot:version refs for
+                                               explicitly reviewed non-selected slots.
   ANALYSIS_V2_DEPLOY_REVISION_NONCE          Optional 5-character lowercase test/deploy nonce.
 
 The deployed service uses request-based billing (CPU throttling), scale-to-zero,
@@ -218,6 +221,46 @@ validate_numeric_version() {
   local label="$2"
   [[ "$value" =~ ^[1-9][0-9]*$ ]] \
     || die "$label must be an exact positive numeric version; latest is forbidden"
+}
+
+parse_additional_apify_secret_versions() {
+  local raw="${ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS:-}"
+  local item
+  local slot
+  local version
+  local additional_slot_upper
+  local env_name
+  local seen=','
+  local -a items=()
+
+  explicit_additional_apify_refs_json='[]'
+  [[ -n "$raw" ]] || return 0
+  IFS=',' read -r -a items <<<"$raw"
+  for item in "${items[@]}"; do
+    slot="${item%%:*}"
+    version="${item#*:}"
+    [[ "$item" == "$slot:$version" && "$slot" != "$version" ]] \
+      || die "ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS must be a comma-separated slot:version list"
+    validate_slot "$slot"
+    validate_numeric_version "$version" \
+      ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS
+    [[ "$slot" != "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT" ]] \
+      || die "ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS must not repeat the selected slot"
+    case "$seen" in
+      *",$slot,"*)
+        die "ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS contains a duplicate slot"
+        ;;
+    esac
+    seen="$seen$slot,"
+    additional_slot_upper="$(printf '%s' "$slot" | tr '[:lower:]' '[:upper:]')"
+    env_name="APIFY_${additional_slot_upper}_API_TOKEN"
+    explicit_additional_apify_refs_json="$(jq -cn \
+      --argjson refs "$explicit_additional_apify_refs_json" \
+      --arg env "$env_name" \
+      --arg secret "ai-baram-v2-apify-$slot" \
+      --arg version "$version" \
+      '$refs + [{env: $env, secret: $secret, version: $version}]')"
+  done
 }
 
 validate_service_account_email() {
@@ -715,6 +758,7 @@ verify_existing_service_secret_identity() {
 prepare_apify_secret_assignments() {
   local config="${1:-}"
   local retained_refs='[]'
+  local combined_refs='[]'
   if [[ -n "$config" ]]; then
     retained_refs="$(jq -ce \
       --arg selected_slot "$ANALYSIS_V2_APIFY_API_TOKEN_SLOT" \
@@ -766,11 +810,23 @@ prepare_apify_secret_assignments() {
       || die "existing worker Apify references are invalid or the selected slot version changed; same-slot overwrite can strand unresolved runs and account identity"
   fi
 
+  combined_refs="$(jq -cn \
+    --argjson retained "$retained_refs" \
+    --argjson explicit "$explicit_additional_apify_refs_json" '
+      reduce (($retained + $explicit)[]) as $ref ([];
+        ([.[] | select(.env == $ref.env)] | first) as $existing
+        | if $existing == null then . + [$ref]
+          elif $existing == $ref then .
+          else error("explicit Apify ref conflicts with the retained numeric version")
+          end
+      )
+    ')" \
+    || die "explicit additional Apify reference conflicts with an existing retained numeric version"
   expected_apify_secret_refs_json="$(jq -cn \
     --arg selected_env "$apify_env_key" \
     --arg selected_secret "$apify_secret_id" \
     --arg selected_version "$apify_secret_version" \
-    --argjson retained "$retained_refs" '
+    --argjson retained "$combined_refs" '
       ($retained + [{
         env: $selected_env,
         secret: $selected_secret,
@@ -1107,6 +1163,14 @@ verify_worker_prerequisites() {
   log "verifying prerequisite order: worker identity -> secrets -> media bucket -> worker deploy"
   bash "$identity_script" --check
   bash "$secrets_script" --check
+  while IFS=$'\t' read -r additional_slot additional_version; do
+    [[ -n "$additional_slot" ]] || continue
+    env \
+      "ANALYSIS_V2_APIFY_API_TOKEN_SLOT=$additional_slot" \
+      "ANALYSIS_V2_APIFY_API_TOKEN_SECRET_VERSION=$additional_version" \
+      bash "$secrets_script" --check
+  done < <(jq -r '.[] | [(.secret | sub("^ai-baram-v2-apify-"; "")), .version] | @tsv' \
+    <<<"$explicit_additional_apify_refs_json")
   bash "$bucket_script" --check
   log "deploy-lock bucket metadata and IAM are audited separately by an admin; this deploy verifies object access while acquiring the generation-bound lock"
 }
@@ -1759,6 +1823,9 @@ validate_numeric_version "$image_signing_secret_version" \
   ANALYSIS_V2_IMAGE_PROXY_SIGNING_SECRET_VERSION
 validate_numeric_version "$preflight_identity_hmac_secret_version" \
   ANALYSIS_V2_PREFLIGHT_IDENTITY_HMAC_SECRET_VERSION
+command -v jq >/dev/null 2>&1 || die "jq is required"
+explicit_additional_apify_refs_json='[]'
+parse_additional_apify_secret_versions
 [[ "$worker_enabled" == "true" || "$worker_enabled" == "false" ]] \
   || die "ANALYSIS_V2_WORKER_ENABLED must be true or false"
 [[ "$recovery_enabled" == "true" || "$recovery_enabled" == "false" ]] \

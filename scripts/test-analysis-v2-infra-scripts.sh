@@ -2256,6 +2256,51 @@ assert_contains "$temp_dir/worker-secondary-slot.out" \
 assert_not_contains "$temp_dir/worker-secondary-slot.out" \
   "APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:7"
 
+env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=secondary' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=tertiary:6,quaternary:6,quinary:6' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-secondary-slot.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-secondary-slot-additional-refs.out"
+for additional_assignment in \
+  'APIFY_SECONDARY_API_TOKEN=ai-baram-v2-apify-secondary:7' \
+  'APIFY_TERTIARY_API_TOKEN=ai-baram-v2-apify-tertiary:6' \
+  'APIFY_QUATERNARY_API_TOKEN=ai-baram-v2-apify-quaternary:6' \
+  'APIFY_QUINARY_API_TOKEN=ai-baram-v2-apify-quinary:6'; do
+  assert_contains "$temp_dir/worker-secondary-slot-additional-refs.out" \
+    "$additional_assignment"
+done
+assert_not_contains "$temp_dir/worker-secondary-slot-additional-refs.out" \
+  'APIFY_PRIMARY_API_TOKEN='
+
+for invalid_additional_refs in \
+  'secondary:7' \
+  'tertiary:latest' \
+  'tertiary:6,tertiary:6' \
+  'senary:6'; do
+  if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=prerequisites_ready' \
+    'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=secondary' \
+    "ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=$invalid_additional_refs" \
+    "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-secondary-slot.env" \
+    bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+    >"$temp_dir/worker-invalid-additional-refs.out" 2>&1; then
+    fail "invalid additional Apify refs were accepted: $invalid_additional_refs"
+  fi
+done
+
+if env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
+  'FAKE_GCLOUD_APIFY_SECRET_SLOTS=tertiary,quinary' \
+  'FAKE_GCLOUD_APIFY_SECRET_VERSION=6' \
+  'ANALYSIS_V2_APIFY_API_TOKEN_SLOT=secondary' \
+  'ANALYSIS_V2_APIFY_ADDITIONAL_SECRET_VERSIONS=tertiary:5' \
+  "ANALYSIS_V2_WORKER_ENV_VARS_FILE=$temp_dir/runtime-secondary-slot.env" \
+  bash "$script_dir/deploy-analysis-v2-worker.sh" --dry-run \
+  >"$temp_dir/worker-conflicting-additional-ref.out" 2>&1; then
+  fail "conflicting retained and additional Apify refs were accepted"
+fi
+assert_contains "$temp_dir/worker-conflicting-additional-ref.out" \
+  'conflicts with an existing retained numeric version'
+
 env "${common_env[@]}" 'FAKE_GCLOUD_STATE=ready' \
   'FAKE_GCLOUD_APIFY_SECRET_SLOTS=primary,tertiary,quaternary,quinary' \
   'FAKE_GCLOUD_APIFY_SECRET_VERSION=6' \
