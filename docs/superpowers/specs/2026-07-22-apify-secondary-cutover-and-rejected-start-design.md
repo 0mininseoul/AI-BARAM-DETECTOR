@@ -1,16 +1,20 @@
-# Apify Primary 안전 전환과 확정적 시작 거절 처리 설계
+# Apify Secondary 안전 전환과 확정적 시작 거절 처리 설계
 
 ## 현재 상태
 
 현재 운영 Cloud Run 서비스의 논리 슬롯 `primary`는
 `ai-baram-v2-apify-primary:2`를 참조한다. 토큰 원문을 출력하지 않고 지문만
-비교한 결과, 이 버전은 로컬 `APIFY_SEPTENARY_API_TOKEN`과 같다. 같은 Secret Manager
-비밀의 버전 `1`은 로컬 `APIFY_PRIMARY_API_TOKEN`과 같다.
+비교한 결과, 이 버전은 로컬 `APIFY_SEPTENARY_API_TOKEN`과 같다. 또한
+`ai-baram-v2-apify-secondary:1`은 로컬 `APIFY_SECONDARY_API_TOKEN`과 같고, 현재 배포에
+복구 참조로 남은 `secondary:2`는 `APIFY_SENARY_API_TOKEN`과 같다.
 
-현재 배포된 Septenary 계정은 월간 사용 한도를 넘었다. 교체할 Primary 계정은 Free
-플랜이며 월간 한도는 `$10`, 현재 사용액은 `$5.473343669480983`, 남은 한도는
-`$4.526656330519017`이다. 현재 사용 주기는 `2026-07-25T23:59:59.999Z`에 끝난다.
+현재 배포된 Septenary 계정은 월간 사용 한도를 넘었다. 교체할 Secondary 계정은 현재
+Free 플랜이며 월간 한도는 `$10`, 현재 사용액은 `$4.139891465568488`, 남은 한도는
+`$5.860108534432`이다. 현재 사용 주기는 `2026-07-29T23:59:59.999Z`에 끝난다.
 해당 계정으로 프로필 Actor에 접근할 수 있음도 확인했다.
+실제 판매 운영은 이 Secondary 계정을 Starter로 전환한 후 사용할 예정이다. 이번 작업은
+구독을 구매하지 않는다. 현재 Free 상태에서 기능·비용 E2E를 완료하고, Starter 전환 후
+같은 계정과 토큰으로 최종 출시 E2E를 다시 수행해야 한다.
 
 실패한 preflight는 Apify가 Actor 시작을 거절하기 전에 `primary` provider 원장 행을
 예약했다. 해당 계정·Actor·예약 시간 범위에서 실제 Actor run은 하나도 없다.
@@ -21,7 +25,7 @@
 ## 목표
 
 1. 기존 Cloud Run 서비스의 숫자 비밀 버전을 바꾸지 않고, 새 Analysis V2와 preflight
-   작업이 `APIFY_PRIMARY_API_TOKEN`을 사용하게 한다.
+   작업이 `APIFY_SECONDARY_API_TOKEN`을 사용하게 한다.
 2. 기존 서비스와 `primary:2`를 불변의 복구 근거로 보존한다.
 3. 예상한 카카오 사용자로 승인된 Plus E2E 1건을 완료하고, 성공 결과를 해당 사용자의
    보관함에 남긴다.
@@ -29,6 +33,8 @@
    제거한다.
 5. Apify가 확정적으로 반환한 HTTP 오류를 "Actor가 실행됐을 수도 있는 불명한
    시작"으로 오판하지 않게 한다.
+6. Starter 구독 전 E2E는 기능 준비도만 판정하며, 구독 후 같은 Secondary 계정으로
+   실행한 E2E만 최종 판매 출시 gate를 통과한 것으로 취급한다.
 
 ## 하지 않는 일
 
@@ -43,13 +49,13 @@
 
 ### 1. 새 Cloud Run 서비스로 이전: 채택
 
-처음부터 `ai-baram-v2-apify-primary:1`을 참조하는 새 Cloud Run 서비스를 만든다. 현재
+처음부터 `ai-baram-v2-apify-secondary:1`을 선택 슬롯으로 참조하는 새 Cloud Run 서비스를 만든다. 현재
 서비스의 작업을 모두 비운 뒤 Vercel의 task 대상과 Scheduler 대상을 새 서비스로
 바꾸다. 새 서비스에는 과거 credential identity가 없으므로 기존 배포 안전 규칙을 지킨다.
 롤백은 대상 URL만 기존 값으로 되돌리면 된다. 기존 서비스와 비밀 참조는 수정하지
 않는다.
 
-### 2. 기존 서비스의 `primary:2`를 `primary:1`로 직접 변경: 기각
+### 2. 기존 서비스의 선택 슬롯을 `secondary:1`로 직접 변경: 기각
 
 작업은 짧지만 레포의 같은 슬롯 불변 규칙을 어긴다. 기존 원장 행은 논리 슬롯만
 저장하고 credential 세대를 저장하지 않는다. 따라서 직접 변경하면 동일한 `primary`가 시간에
@@ -66,10 +72,10 @@
 작업 중에는 비공개 Cloud Run 서비스 세 개를 사용한다.
 
 - `analysis-worker`: 현재 복구 전용 서비스. `primary:2`에 계속 묶인다.
-- `analysis-worker-primary-e2e`: 임시 E2E 서비스. `primary:1`과 승인된 operation 분리에
+- `analysis-worker-secondary-e2e`: 임시 E2E 서비스. `secondary:1`과 승인된 operation 분리에
   필요한 추가 숫자 슬롯 참조를 갖는다.
-- `analysis-worker-primary`: 최종 운영 서비스. E2E와 비용 정산이 끝난 후
-  `primary:1`만 참조한다.
+- `analysis-worker-secondary`: 최종 운영 서비스. E2E와 비용 정산이 끝난 후
+  `secondary:1`만 참조한다.
 
 각 서비스는 검토된 같은 앱 이미지/소스 커밋, 런타임 서비스 계정, 비밀이 아닌
 런타임 정책, 스케일링 한도, HMAC/Supabase/이미지 비밀 버전을 사용한다. 서비스
@@ -91,7 +97,10 @@ URL과 OIDC audience를 고정해 가져간다. Cloud Tasks는 이미 생성된 
 3. 처리 중 request, claim/running job, active 또는 미정산 provider 행, cleanup intent,
    미디어 artifact, 대기 task가 모두 0인지 확인한다.
 4. 확정적 Actor 시작 거절 처리 수정을 머지하고, 그 정확한 커밋을 Vercel에 배포한다.
-5. `analysis-worker-primary-e2e`를 `primary:1`과 검토된 임시 슬롯 참조로 생성한다.
+5. `analysis-worker-secondary-e2e`를 `secondary:1`과 검토된 임시 슬롯 참조로 생성한다.
+   normal selected slot, `target-profile`, `profile-fallback`, `target-likers`는 모두 `secondary`로
+   맞춘다. 다른 operation은 서로 충돌하지 않는 별도 슬롯을 사용하고, 각 물리 계정의
+   즉시 잔여 한도 감사를 통과해야 한다.
    비공개로 유지하고 task/maintenance 서비스 계정에만 `run.invoker`를 부여한다.
 6. 새 revision의 이미지/소스 SHA, 비밀 참조, 런타임 gate, IAM, 단일 revision 트래픽,
    health endpoint를 확인한 후에만 작업을 보낸다.
@@ -100,7 +109,7 @@ URL과 OIDC audience를 고정해 가져간다. Cloud Tasks는 이미 생성된 
 8. 승인된 Plus E2E를 정확히 1번 실행한다. preflight 재사용, provider 계보, 최종 비용,
    결과 노출, 보관함 유지, queue 비움, artifact cleanup, 미해결 행 0건을 확인한다.
 9. 승인된 테스트 샤딩 정책을 비활성화하고 Vercel을 다시 배포한다.
-10. `analysis-worker-primary`를 `primary:1`만 참조하도록 생성한다. 두 번째 0건 drain 후
+10. `analysis-worker-secondary`를 `secondary:1`만 참조하도록 생성한다. 두 번째 0건 drain 후
     Vercel과 Scheduler를 최종 서비스로 바꾸고, 복구 전용 서비스 두 개에서 invoker
     권한을 제거한다.
 11. 서비스와 비밀 버전은 삭제하지 않는다. 최종 active 서비스, revision, 소스 SHA,
@@ -176,14 +185,16 @@ cleanup, 비용 합산은 `rejected`를 terminal·정산 완료 상태로 취급
 
 ### 운영 검증
 
-- 토큰과 지문을 출력하지 않고, 임시/최종 서비스의 `primary` 참조가 로컬
-  `APIFY_PRIMARY_API_TOKEN`과 같은지 확인한다.
+- 토큰과 지문을 출력하지 않고, 임시/최종 서비스의 `secondary` 참조가 로컬
+  `APIFY_SECONDARY_API_TOKEN`과 같은지 확인한다.
 - Cloud Run과 Vercel의 소스 SHA가 머지 커밋과 같은지 확인한다.
 - 새 task와 maintenance job이 정확히 하나의 운영 worker를 가리키는지 확인한다.
 - 승인된 Plus request가 완료되고 모든 유료 run과 비용이 정산되며, queue와 artifact가
   비워지고, 예상한 소유자의 보관함에 결과가 보이는지 확인한다.
-- 최종 worker에 임시 non-primary Apify 참조가 없고, 복구 전용 서비스에 task/maintenance
+- 최종 worker에 임시 non-selected Apify 참조가 없고, 복구 전용 서비스에 task/maintenance
   invoker 권한이 없는지 확인한다.
+- Starter 구독 후 `/v2/users/me`와 limits/usage 응답으로 같은 Secondary 계정의 플랜 전환과
+  한도를 확인하고, 출시 직전 E2E를 다시 통과한다.
 
 ## 롤백
 
