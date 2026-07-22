@@ -215,6 +215,37 @@ describe('analysis V2 production profile consumer', () => {
         })).rejects.toThrow('ANALYSIS_V2_PROFILE_CONSUMER_RETRYABLE_OUTCOME');
     });
 
+    it('projects a successful repair ahead of the failed fallback outcome', async () => {
+        const repaired = analysisV2ProfileFetchResumeSchema.parse({
+            ...resume('failed'),
+            repairResults: [{
+                outcome: outcome('terminal.one', 'apify', 'success'),
+                profile: profile('terminal.one'),
+            }],
+            repairUsernames: ['terminal.one'],
+            repairCapturedAt: capturedAt,
+        });
+        const reader = createAnalysisV2ProfileBatchReadModel(
+            profileClient(repaired).client
+        );
+
+        const loaded = await reader.loadExactBatch({
+            requestId,
+            consumerJobKey: 'track:profile-ai:batch:0',
+            consumerClaimToken: claimToken,
+            consumerInputHash,
+            producerJobKey: 'track:profiles:batch:0',
+            batch: 0,
+            expectedItemCount: 2,
+            expectedProducerInputHash: producerInputHash,
+        });
+
+        expect(loaded?.results).toEqual([
+            expect.objectContaining({ username: 'success.one', status: 'success' }),
+            expect.objectContaining({ username: 'terminal.one', status: 'success' }),
+        ]);
+    });
+
     it('rejects mismatched batch producer and consumer identities before RPC access', async () => {
         const fake = profileClient(resume('unavailable'));
         const reader = createAnalysisV2ProfileBatchReadModel(fake.client);

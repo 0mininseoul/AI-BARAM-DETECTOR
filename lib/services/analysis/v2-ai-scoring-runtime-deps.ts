@@ -111,9 +111,15 @@ function finalResults(resume: AnalysisV2ProfileFetchResume): AnalysisV2Checkpoin
         result.outcome.requestedUsername,
         result,
     ]));
+    const repair = new Map(resume.repairResults.map(result => [
+        result.outcome.requestedUsername,
+        result,
+    ]));
     return resume.primaryResults.map(primary => primary.outcome.status === 'success'
         ? primary
-        : fallback.get(primary.outcome.requestedUsername) ?? primary);
+        : repair.get(primary.outcome.requestedUsername)
+            ?? fallback.get(primary.outcome.requestedUsername)
+            ?? primary);
 }
 
 function parseConsumerResume(data: unknown): AnalysisV2ProfileFetchResume {
