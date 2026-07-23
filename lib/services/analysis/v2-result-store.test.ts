@@ -437,7 +437,8 @@ describe('analysis V2 result finalization and loading', () => {
 
     it('normalizes a pre-migration summary while keeping the public contract complete', async () => {
         const snapshot = rawSnapshot(2);
-        const { genderStats: _legacyMissingGenderStats, ...legacySummary } = snapshot.summary;
+        const legacySummary: Partial<typeof snapshot.summary> = { ...snapshot.summary };
+        delete legacySummary.genderStats;
         const fake = rpcClient({
             data: { ...snapshot, summary: legacySummary },
             error: null,
