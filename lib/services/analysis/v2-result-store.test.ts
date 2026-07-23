@@ -121,6 +121,7 @@ function rawSummary(count = 0) {
         publicMutuals: count,
         privateMutuals: 0,
         screenedMutuals: count,
+        genderStats: { male: 0, female: count, unknown: 0 },
         successfullyScreenedMutuals: count,
         fetchUnavailableMutuals: 0,
         mediaUnavailableMutuals: 0,
@@ -425,6 +426,11 @@ describe('analysis V2 result finalization and loading', () => {
         expect(first?.femaleAccounts.map(entry => entry.row.profileImage)).toEqual([
             '/api/image-proxy?signature=1', '/api/image-proxy?signature=2',
         ]);
+        expect(first?.summary.genderStats).toEqual({
+            male: 0,
+            female: 2,
+            unknown: 0,
+        });
         expect(second?.summary.targetProfileImage).toBe('/api/image-proxy?signature=6');
         expect(JSON.stringify(first)).not.toContain('cdninstagram.com');
     });
