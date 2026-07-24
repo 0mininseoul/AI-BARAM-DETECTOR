@@ -94,14 +94,32 @@ describe('Groble seller-reference migration', () => {
                 id UUID PRIMARY KEY,
                 user_id UUID NOT NULL REFERENCES public.users(id),
                 status TEXT NOT NULL,
+                plan_id TEXT NOT NULL DEFAULT 'basic',
                 expected_groble_product_id TEXT NOT NULL,
                 expected_amount_krw INTEGER NOT NULL,
                 payment_id TEXT UNIQUE,
                 actual_groble_product_id TEXT,
                 actual_amount_krw INTEGER,
                 paid_at TIMESTAMP WITH TIME ZONE,
+                due_at TIMESTAMP WITH TIME ZONE,
                 plan_sequence SMALLINT,
+                created_at TIMESTAMP WITH TIME ZONE NOT NULL
+                    DEFAULT pg_catalog.clock_timestamp(),
                 updated_at TIMESTAMP WITH TIME ZONE NOT NULL
+                    DEFAULT pg_catalog.clock_timestamp()
+            );
+            CREATE TABLE public.earlybird_plan_inventory (
+                plan_id TEXT PRIMARY KEY,
+                sale_limit SMALLINT NOT NULL,
+                sold_count SMALLINT NOT NULL
+            );
+            INSERT INTO public.earlybird_plan_inventory(
+                plan_id, sale_limit, sold_count
+            ) VALUES ('basic', 10, 0), ('standard', 10, 0);
+            CREATE TABLE public.earlybird_waitlist (
+                id UUID PRIMARY KEY DEFAULT pg_catalog.gen_random_uuid(),
+                plan_id TEXT NOT NULL DEFAULT 'plus',
+                created_at TIMESTAMP WITH TIME ZONE NOT NULL
                     DEFAULT pg_catalog.clock_timestamp()
             );
             GRANT SELECT, INSERT, UPDATE, DELETE
@@ -188,7 +206,9 @@ describe('Groble seller-reference migration', () => {
 
     beforeEach(async () => {
         await db.exec(`
-            TRUNCATE public.earlybird_orders, public.users;
+            TRUNCATE public.earlybird_waitlist,
+                public.earlybird_orders, public.users;
+            UPDATE public.earlybird_plan_inventory SET sold_count = 0;
             INSERT INTO public.users(id, email) VALUES
                 ('${USER_ONE}', 'one@example.com'),
                 ('${USER_TWO}', 'two@example.com');
@@ -313,6 +333,105 @@ describe('Groble seller-reference migration', () => {
             await expect(db.query(
                 'SELECT public.issue_earlybird_groble_seller_reference($1)',
                 [ORDER_ONE]
+            )).rejects.toThrow(/permission denied/i);
+        } finally {
+            await db.exec('RESET ROLE');
+        }
+    });
+
+    it('returns only aggregate reference-confirmed demand and review counts', async () => {
+        const reference = await issue(ORDER_ONE);
+        await finalize({
+            reference,
+            event: 'confirmed-demand-event',
+            payment: 'confirmed-demand-payment',
+            email: 'one@example.com',
+        });
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET status = 'completed',
+                 paid_at = '2026-07-25T00:00:00Z',
+                 due_at = '2026-07-26T00:00:00Z'
+             WHERE id = $1`,
+            [ORDER_ONE]
+        );
+        await db.query(
+            `UPDATE public.earlybird_orders
+             SET status = 'paid',
+                 plan_id = 'standard',
+                 payment_id = 'unconfirmed-payment',
+                 actual_amount_krw = 19900,
+                 paid_at = '2026-07-25T00:00:00Z',
+                 due_at = '2000-01-01T00:00:00Z'
+             WHERE id = $1`,
+            [ORDER_TWO]
+        );
+        await db.exec(`
+            INSERT INTO public.earlybird_orders(
+                id, user_id, status, expected_groble_product_id,
+                expected_amount_krw, payment_id, actual_amount_krw,
+                paid_at, created_at
+            ) VALUES
+                ('123e4567-e89b-42d3-a456-426614174003', '${USER_ONE}',
+                    'refund_pending', 'basic_product-01', 14900,
+                    'refund-liability-payment', 9900,
+                    '2026-07-25T00:00:00Z', '2026-07-24T12:00:00Z'),
+                ('123e4567-e89b-42d3-a456-426614174004', '${USER_ONE}',
+                    'payment_pending', 'basic_product-01', 14900,
+                    NULL, NULL, NULL, '2026-07-24T12:00:00Z');
+            INSERT INTO public.earlybird_waitlist(plan_id, created_at)
+            VALUES ('plus', '2026-07-24T12:00:00Z');
+            UPDATE public.earlybird_plan_inventory
+            SET sold_count = CASE plan_id
+                WHEN 'basic' THEN 2
+                WHEN 'standard' THEN 1
+            END;
+        `);
+
+        const report = (await asService<Record<string, unknown>>(
+            `SELECT public.load_earlybird_demand_summary(
+                '2026-07-24', '2026-08-01'
+            ) AS report`
+        )).rows[0].report;
+        expect(report).toEqual({
+            startDate: '2026-07-24',
+            endDateExclusive: '2026-08-01',
+            referenceConfirmedPaymentCount: 1,
+            referenceConfirmedGrossKrw: 14_900,
+            unconfirmedPaidOrderCount: 1,
+            refundLiabilityCount: 1,
+            overdueFulfillmentCount: 1,
+            pendingCheckoutCount: 1,
+            plusWaitlistCount: 1,
+            plans: [
+                {
+                    planId: 'basic',
+                    confirmedPaymentCount: 1,
+                    confirmedGrossKrw: 14_900,
+                    remainingSlots: 8,
+                },
+                {
+                    planId: 'standard',
+                    confirmedPaymentCount: 0,
+                    confirmedGrossKrw: 0,
+                    remainingSlots: 9,
+                },
+            ],
+        });
+        expect(JSON.stringify(report)).not.toMatch(
+            /one@example|confirmed-demand-payment|refund-liability-payment|ord[.]|123e4567/i
+        );
+        await expect(asService(
+            `SELECT public.load_earlybird_demand_summary(
+                '2026-01-01', '2026-04-02'
+            )`
+        )).rejects.toThrow('EARLYBIRD_DEMAND_RANGE_INVALID');
+        await db.exec('SET ROLE authenticated');
+        try {
+            await expect(db.query(
+                `SELECT public.load_earlybird_demand_summary(
+                    '2026-07-24', '2026-08-01'
+                )`
             )).rejects.toThrow(/permission denied/i);
         } finally {
             await db.exec('RESET ROLE');

@@ -163,6 +163,16 @@ ORDER BY query_start;
 - 취소된 주문의 결제가 뒤늦게 도착했을 때 실결제액이 `0원 이상`이고 checkout snapshot의 예상 금액 이하라면 쿠폰 할인 결제를 포함해 원래 주문에 `late_cancelled_payment`로 귀속하고 `refund_pending`으로 격리한다. 예상 금액 초과, 다른 상품, 복수 후보는 귀속하지 않으며 판매 수량에도 포함하지 않는다.
 - 결제 확정은 `analysis_requests`를 만들거나 Cloud Tasks/V2 자동 분석을 시작하지 않는다.
 
+### 개인정보 없는 유료 수요 보고서
+
+```bash
+npm run report:earlybird-demand -- --start 2026-07-24 --end 2026-08-01
+```
+
+기간은 UTC 기준 시작일 포함·종료일 제외이며 1~90일만 허용한다. 유료 수요에는 `paid`·`analysis_in_progress`·`completed` 상태이면서 실결제액, payment ID, 서버 발급 seller reference 확인 시각이 모두 존재하는 주문만 들어간다. 리다이렉트, 클라이언트 이벤트, 수동 연결, 테스트 전송, reference가 확인되지 않은 과거 주문은 확정 수요에 포함하지 않는다.
+
+출력은 플랜별 결제 건수·매출·남은 수량과 환불 책임·기한 초과·미확인 결제·대기 checkout·Plus 대기 수의 집계만 포함한다. 사용자명, 구매자 연락처, 주문·결제·webhook ID, seller reference, 공급자 식별자는 조회 결과와 stdout에 포함하지 않는다. 미확인 유료 주문 또는 기한 초과 작업이 하나라도 있으면 JSON은 출력하되 종료 코드는 `1`이므로 운영자가 먼저 확인해야 한다. 확정 수요 건수는 Starter 전환 판단 자료일 뿐 구독 구매나 credential 교체를 승인하거나 자동 실행하지 않는다.
+
 ### 만료 preflight 보존
 
 `earlybird_orders.preflight_id`와 `earlybird_waitlist.preflight_id`는 의도적으로 `ON DELETE RESTRICT`를 사용한다. 만료된 연결 preflight는 retention 작업에서 대상 프로필 PII를 `retained.*` tombstone으로 scrub하지만, 주문 또는 대기 신청이 참조하는 동안 행 자체는 삭제하지 않는다. 어느 상업 레코드에서도 참조하지 않고 provider 사용액도 모두 정산된 만료 tombstone만 삭제할 수 있다. FK를 `CASCADE`로 바꾸거나 retention 500을 재시도로만 덮지 않는다.

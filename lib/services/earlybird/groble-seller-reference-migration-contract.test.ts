@@ -69,6 +69,32 @@ describe('Groble seller-reference migration contract', () => {
         expect(finalizer).not.toContain('plan_sequence =');
     });
 
+    it('reports only reference-confirmed aggregate demand over a bounded range', () => {
+        const reporter = functionDefinition('load_earlybird_demand_summary');
+        expect(reporter).toContain('RETURNS JSONB');
+        expect(reporter).toContain('STABLE');
+        expect(reporter).toContain('SECURITY DEFINER');
+        expect(reporter).toContain("SET search_path = ''");
+        expect(reporter).toContain(
+            'p_end_date_exclusive - p_start_date > 90'
+        );
+        expect(reporter).toContain(
+            'scoped.seller_reference_confirmed_at IS NOT NULL'
+        );
+        expect(reporter).toContain(
+            "'referenceConfirmedPaymentCount', metrics.confirmed_count"
+        );
+        expect(reporter).toContain(
+            "'unconfirmedPaidOrderCount', metrics.unconfirmed_paid_count"
+        );
+        expect(reporter).toContain(
+            "'overdueFulfillmentCount', metrics.overdue_fulfillment_count"
+        );
+        expect(reporter).not.toMatch(
+            /target_instagram_id|excluded_instagram_id|buyer_email|phone_number|groble_seller_reference|event_id/i
+        );
+    });
+
     it('exposes both mutation functions only to service_role', () => {
         for (const name of [
             'issue_earlybird_groble_seller_reference',
@@ -85,6 +111,15 @@ describe('Groble seller-reference migration contract', () => {
         }
         expect(migration).not.toMatch(
             /GRANT EXECUTE ON FUNCTION public\.(?:issue|finalize)_earlybird_groble[\s\S]*?TO (?:anon|authenticated);/
+        );
+    });
+
+    it('exposes the aggregate report only to service_role', () => {
+        expect(migration).toMatch(
+            /REVOKE ALL ON FUNCTION public\.load_earlybird_demand_summary\(DATE, DATE\)\s+FROM PUBLIC, anon, authenticated, service_role;/
+        );
+        expect(migration).toMatch(
+            /GRANT EXECUTE ON FUNCTION public\.load_earlybird_demand_summary\(DATE, DATE\)\s+TO service_role;/
         );
     });
 });
