@@ -64,6 +64,7 @@ export async function runEarlybirdDemandReportCli(
     return Object.freeze({
         summary,
         exitCode: summary.unconfirmedPaidOrderCount > 0
+            || summary.refundLiabilityCount > 0
             || summary.overdueFulfillmentCount > 0
             ? 1
             : 0,

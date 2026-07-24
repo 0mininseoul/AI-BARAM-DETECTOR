@@ -70,6 +70,8 @@ describe('analysis V2 result-image R2 configuration script', () => {
         expect(script).toContain('--reconcile-lifecycle');
         expect(script).toContain('refusing to overwrite existing credential file');
         expect(script).toContain('chmod 600');
+        expect(script).toContain('ln "$temp_file" "$file"');
+        expect(script).not.toContain('mv "$temp_file" "$file"');
         expect(script).not.toMatch(/printf[^\\n]+CLOUDFLARE_API_TOKEN/);
         expect(script).not.toMatch(/log[^\\n]+token_value/);
     });

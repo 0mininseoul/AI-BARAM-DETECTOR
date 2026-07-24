@@ -319,7 +319,11 @@ write_credentials_file() {
     printf 'ANALYSIS_V2_RESULT_IMAGE_R2_ACCESS_KEY_ID=%s\n' "$access_key_id"
     printf 'ANALYSIS_V2_RESULT_IMAGE_R2_SECRET_ACCESS_KEY=%s\n' "$secret_access_key"
   } >"$temp_file"
-  mv "$temp_file" "$file"
+  if ! ln "$temp_file" "$file"; then
+    rm -f -- "$temp_file"
+    die "refusing to overwrite existing credential file: $file"
+  fi
+  rm -f -- "$temp_file"
 }
 
 ensure_scoped_token() {

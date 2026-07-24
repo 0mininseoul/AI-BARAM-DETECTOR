@@ -82,6 +82,7 @@ describe('earlybird demand report CLI', () => {
 
     it.each([
         { unconfirmedPaidOrderCount: 1 },
+        { refundLiabilityCount: 1 },
         { overdueFulfillmentCount: 1 },
     ])('returns nonzero when operator review is required', async overrides => {
         const dependencies: EarlybirdDemandCliDependencies = {
