@@ -980,6 +980,7 @@ function aiJobFence(context: AnalysisV2StageExecutorContext<AnalysisV2StageIdSub
     return {
         ...checkpointClaim(context),
         aiStagePolicyVersion: context.aiStagePolicyVersion,
+        handlerDeadlineAtMs: context.handlerDeadlineAtMs,
     };
 }
 

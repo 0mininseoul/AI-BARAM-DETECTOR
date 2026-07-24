@@ -51,6 +51,7 @@ function store(jobs: AnalysisV2DispatchableJob[]): AnalysisV2JobStore {
         markDispatched: vi.fn(),
         claim: vi.fn(),
         deferTerminalCleanup: vi.fn(),
+        deferAiCapacity: vi.fn(),
         releaseClaim: vi.fn(),
         completeAndFanout: vi.fn(),
         listDispatchable: vi.fn(async () => jobs),

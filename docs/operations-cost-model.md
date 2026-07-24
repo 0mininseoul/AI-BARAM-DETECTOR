@@ -118,6 +118,16 @@ C_total   = C_provider + C_gemini + C_gcp
 
 GCP `$300` credit은 현금 청구 시점을 늦출 뿐 `C_gemini`와 `C_gcp`의 경제원가를 0으로 만들지 않는다. Apify 비용에는 적용되지 않는다.
 
+Gemini 유료 생성은 revision이나 instance 수와 무관하게 데이터베이스의 고정된 8개
+lease slot을 먼저 확보한 뒤에만 시작한다. lease는 240초이고 Gemini SDK 요청은 210초
+hard timeout을 사용한다. 300초 worker handler의 남은 시간이 225초 미만이면 SDK를
+호출하지 않는다. slot 부족, 격리 활성화, deadline 부족은 작업 실패나 분석 시도 횟수로
+소비하지 않고 지연 재실행한다. 각 AI attempt의 terminal 원장을 먼저 저장한 뒤 정확한
+token과 fence로 lease를 반환하며, 만료되거나 동일 attempt의 소유권이 충돌한 slot은
+자동 재사용하지 않고 격리한다. 격리 해제는 사고 근거의 SHA-256 hash를 남기는 DB
+owner 전용 함수로만 가능하다. process-local 8개 semaphore는 방어층일 뿐 전역
+동시성의 정본은 이 database lease다.
+
 `C_total`은 소비된 preflight의 모든 operation별 `u_preflight,j`를 해당 분석에 귀속한다. 사전 점검 후 결제/분석으로 전환되지 않고 만료·이탈한 preflight도 최초 fallback이 실행됐다면 최대 `$0.0026`의 획득 원가가 이미 발생한다. 유료 전환 경로에서 최초와 fresh generation 1회가 모두 fallback하면 최대 `$0.0052`이며, 추가 fresh generation이 생성되면 각 세대의 실제액을 더한다. 기간 총원가와 판매가 산정은 성공 분석만 모수로 보지 말고, 모든 생성 preflight operation의 실제액을 합산한 뒤 유료 전환 건에 배부해야 한다. Apify fallback이 대상 없음을 확인한 경우에도 유저 결제는 없지만 이 운영 원가는 발생할 수 있다.
 
 ## 현재 측정 상태
@@ -159,6 +169,7 @@ Preflight `3d6759a9-948c-4de1-be7a-d02aa72ed8fd`에서 대상 `0_min._.00`의 St
 - `analysis_v2_provider_runs`: V2 Actor 예약, run id, terminal 상태, 실제 사용액과 비용 상한
 - `analysis_preflight_provider_runs`: 최초 preflight와 fresh-admission generation별 Apify target-profile summary fallback의 복합 operation 원장. 각 행은 예약, run id, credential slot, `$0.0026` 상한, terminal 상태, provider `finishedAt`이 최소 30초 지난 후의 실제 사용액을 가진다. 만료·이탈 preflight도 모든 operation 행의 정산 전에는 원장을 삭제하지 않는다.
 - `analysis_v2_ai_attempts`: V2 Gemini attempt, token, thinking, latency, 추정 비용
+- `analysis_v2_gemini_leases`: deployment-wide Gemini 8개 slot의 token·fence·lease·격리 상태. 런타임은 service-role acquire/renew/release만 사용하고 격리 해제는 DB owner만 수행한다.
 - `analysis_pipeline_jobs`: stage별 시도, 시작/완료, 오류와 wall time 계산 근거
 - `analysis_v2_profile_fetch_*`: 자체 결과와 exact unresolved fallback 집합
 - `analysis_progress_state`, `analysis_progress_events`: 사용자용 정리된 진행 상태
