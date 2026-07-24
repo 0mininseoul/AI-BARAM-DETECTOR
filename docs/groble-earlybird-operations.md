@@ -173,6 +173,37 @@ npm run report:earlybird-demand -- --start 2026-07-24 --end 2026-08-01
 
 출력은 플랜별 결제 건수·매출·남은 수량과 환불 책임·기한 초과·미확인 결제·대기 checkout·Plus 대기 수의 집계만 포함한다. 사용자명, 구매자 연락처, 주문·결제·webhook ID, seller reference, 공급자 식별자는 조회 결과와 stdout에 포함하지 않는다. 미확인 유료 주문 또는 기한 초과 작업이 하나라도 있으면 JSON은 출력하되 종료 코드는 `1`이므로 운영자가 먼저 확인해야 한다. 확정 수요 건수는 Starter 전환 판단 자료일 뿐 구독 구매나 credential 교체를 승인하거나 자동 실행하지 않는다.
 
+### 운영자 승인 후 유료 주문 이행
+
+reference가 확인된 `paid` 주문은 webhook transaction에서
+`earlybird_fulfillments.awaiting_operator` 행만 만든다. 이 시점에는
+`analysis_requests`, provider run, Gemini attempt, Cloud Task를 만들지 않는다.
+아래 명령의 exact flag가 결제 API 호출 가능성을 인지한 운영자의 명시적 승인 경계다.
+
+```bash
+npm run earlybird:fulfill -- \
+  --order-id <reference-confirmed paid order UUID> \
+  --confirm-paid-api-call
+```
+
+명령은 주문 UUID만 받는다. Instagram username, 구매자 연락처, 플랜, 금액, provider
+token, credential slot은 인자로 받지 않으며 stdout에도 출력하지 않는다. 서버는 주문의
+불변 user/preflight/plan snapshot을 다시 검증하고, 만료되어 보존된 commercial
+preflight를 그 snapshot으로 한 시간만 재활성화한 뒤 로그인 없는 최신 profile
+사전점검을 수행한다. 최신 수량에서 구매 플랜을 사용할 수 있을 때만 전역 lease로
+production V2 요청 하나와 `coordinator:bootstrap`을 원자적으로 만들고 dispatch한다.
+
+첫 실행 결과가 `admission_pending`이면 오류가 아니라 최신 사전점검 대기 상태다.
+maintenance recovery가 이미 운영자 승인된 행만 재실행한다.
+`awaiting_operator` 행은 recovery가 자동 승인하지 않는다. 요청 생성 뒤에는 V2 job
+recovery가 같은 request/job identity를 재사용하며, 완료 요청만 주문과 outbox를
+`completed`로 맞춘다. 결제·snapshot·소유권 불일치, 새 수량에서의 플랜 불가, 분석
+실패는 새 유료 요청을 임의 생성하지 않고 `manual_review`로 보낸다.
+
+CLI 출력은 `orderId`, bounded `status`, 생성된 경우의 `requestId`, `nextAction` 네
+필드뿐이다. `manual_review`는 결제 취소나 환불을 자동 실행한다는 뜻이 아니며, 기존
+환불 운영 절차에서 별도로 확인해야 한다.
+
 ### 만료 preflight 보존
 
 `earlybird_orders.preflight_id`와 `earlybird_waitlist.preflight_id`는 의도적으로 `ON DELETE RESTRICT`를 사용한다. 만료된 연결 preflight는 retention 작업에서 대상 프로필 PII를 `retained.*` tombstone으로 scrub하지만, 주문 또는 대기 신청이 참조하는 동안 행 자체는 삭제하지 않는다. 어느 상업 레코드에서도 참조하지 않고 provider 사용액도 모두 정산된 만료 tombstone만 삭제할 수 있다. FK를 `CASCADE`로 바꾸거나 retention 500을 재시도로만 덮지 않는다.
